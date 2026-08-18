@@ -1,0 +1,43 @@
+[package]
+name = "winui-remote-desktop"
+version = "0.1.0"
+description = "WinUI Remote Desktop - Tauri + Fluent UI React v9 + RustDesk"
+edition = "2021"
+
+# 保持仅一个二进制 crate，便于 Linux 跨平台构建；
+# Windows 打包为 dll/msi 时可再拆分为 lib + bin 结构。
+[[bin]]
+name = "winui-remote-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+log = "0.4"
+env_logger = "0.11"
+
+# ----------------------------------------------------------------------
+# RustDesk 生态复用说明：
+# 以下 git 依赖在 Linux 上编译极慢且易失败，当前阶段（POC）不实际引入。
+# 阶段一目标为工程骨架 + 跨平台可编译，待 Windows 打包时再启用：
+#
+# hbb_common = { git = "https://github.com/rustdesk/rustdesk", subdirectory = "libs/hbb_common" }
+# scrap      = { git = "https://github.com/rustdesk/rustdesk", subdirectory = "libs/scrap" }
+#
+# 更稳妥的做法是将其作为 git submodule 引入（参考 README 第 2.1 节）。
+# ----------------------------------------------------------------------
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_UI_Input_KeyboardAndMouse",
+] }
+
+[profile.release]
+strip = true
+lto = true

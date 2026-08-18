@@ -1,0 +1,82 @@
+/* 全局基础样式 —— 应用「desktopcr」截图提取的设计系统 */
+:root {
+  /* 背景 */
+  --rd-bg: #f7f9fb;
+  --rd-bg-elevated: #ffffff;
+  --rd-bg-sidebar: #eef3f7;
+  --rd-bg-sidebar-item-hover: #e3ecf5;
+  --rd-bg-sidebar-item-active: #e8f1ff;
+  --rd-bg-muted: #f1f3f5;
+
+  /* 品牌主色 */
+  --rd-primary: #2f7ef7;
+  --rd-primary-hover: #1e5fd1;
+  --rd-primary-active: #5da8ff;
+  --rd-primary-soft: #e8f1ff;
+
+  /* 文字 */
+  --rd-text-primary: #111827;
+  --rd-text-secondary: #4b5563;
+  --rd-text-muted: #8a94a6;
+  --rd-text-on-primary: #ffffff;
+
+  /* 状态 */
+  --rd-online: #34c759;
+  --rd-offline: #9ca3af;
+  --rd-badge-bg: #171717;
+  --rd-badge-text: #ffffff;
+
+  /* 边框 */
+  --rd-border: #d9e1e8;
+  --rd-border-light: #e5e7eb;
+
+  /* 功能色 */
+  --rd-destructive: #dc2626;
+  --rd-warning: #d97706;
+
+  /* 阴影 */
+  --rd-shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+  --rd-shadow-popover: 0 4px 12px rgba(16, 24, 40, 0.08), 0 2px 4px rgba(16, 24, 40, 0.04);
+
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei',
+    system-ui, sans-serif;
+  font-size: 14px;
+  color: var(--rd-text-primary);
+  background-color: var(--rd-bg);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button {
+  font-family: inherit;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(138, 148, 166, 0.4);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}

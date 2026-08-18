@@ -1,0 +1,38 @@
+// Prevents additional console window on Windows in release, DO NOT REMOVE!!
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod capture;
+mod hbb_client;
+mod input_injector;
+mod virtual_display;
+
+fn main() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            // RustDesk 客户端封装
+            hbb_client::list_devices,
+            hbb_client::connect_to_device,
+            hbb_client::disconnect_from_device,
+            hbb_client::get_connection_state,
+            hbb_client::set_stream_quality,
+            hbb_client::set_stream_resolution,
+            hbb_client::set_fullscreen,
+            hbb_client::sync_clipboard,
+            // 虚拟显示器控制
+            virtual_display::install_virtual_display_driver,
+            virtual_display::add_virtual_monitor,
+            virtual_display::list_virtual_monitors,
+            virtual_display::remove_virtual_monitor,
+            // 鼠标 / 键盘事件注入
+            input_injector::inject_mouse_event,
+            input_injector::inject_key_event,
+            // 屏幕抓取
+            capture::start_capture,
+            capture::stop_capture,
+            capture::get_frame,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
