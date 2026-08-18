@@ -10,6 +10,7 @@ import {
   ChevronDownRegular,
   ChevronRightRegular,
   AddRegular,
+  VideoRegular,
 } from '@fluentui/react-icons';
 import { palette, fontFamily, spacing, sidebarWidth } from '../theme/tokens';
 
@@ -203,6 +204,7 @@ interface SidebarProps {
   onSelectAssist?: () => void;
   onSelectFavorites?: () => void;
   onSelectSettings?: () => void;
+  onSelectVirtualDisplays?: () => void;
 }
 
 /**
@@ -217,6 +219,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectAssist,
   onSelectFavorites,
   onSelectSettings,
+  onSelectVirtualDisplays,
 }) => {
   const styles = useStyles();
   const onlineCount = devices.filter((d) => d.online).length;
@@ -247,6 +250,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
             onClick={() => onSelectDevice?.(device.id)}
           />
         ))}
+        <SidebarItem
+          icon={<VideoRegular fontSize={15} />}
+          label="虚拟屏管理"
+          onClick={onSelectVirtualDisplays}
+        />
         <div className={styles.addRow} role="button" tabIndex={0} onClick={onSelectCloud}>
           <span className={styles.addIcon}>
             <AddRegular fontSize={15} />

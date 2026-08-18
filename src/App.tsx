@@ -4,9 +4,12 @@ import { TitleBar } from './components/TitleBar';
 import { Sidebar, type SidebarDevice } from './components/Sidebar';
 import { DevicePage } from './components/DevicePage';
 import RemoteSessionView from './components/RemoteSessionView';
+import VirtualDisplayPanel from './components/VirtualDisplayPanel';
 import FileTransferPage from './components/FileTransferPage';
 import SettingsPage from './components/SettingsPage';
 import {
+  connectToDevice,
+  disconnectFromDevice,
   getDevices,
   getConnectionState,
   onConnectionStateChange,
@@ -52,7 +55,7 @@ const useStyles = makeStyles({
   },
 });
 
-type View = 'home' | 'session' | 'transfer' | 'settings' | 'cloud';
+type View = 'home' | 'session' | 'transfer' | 'settings' | 'cloud' | 'vdisplay';
 
 export const App: React.FC = () => {
   const styles = useStyles();
@@ -60,6 +63,7 @@ export const App: React.FC = () => {
   const [state, setState] = useState<ConnectionState>({ connected: false });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<View>('home');
+  const [connecting, setConnecting] = useState(false);
 
   const load = useCallback(async () => {
     setDevices(await getDevices());
@@ -98,10 +102,38 @@ export const App: React.FC = () => {
     setView('home');
   };
 
+  // 进入远程桌面：先发起连接，成功后再切到会话视图
+  const handleEnterDesktop = async () => {
+    if (!selected) return;
+    setConnecting(true);
+    try {
+      const next = await connectToDevice(selected.id);
+      setState(next);
+      setView('session');
+    } catch (error) {
+      console.error('[app] 连接失败', error);
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  // 退出远程会话：浏览器模式 disconnect 是 noop，本地状态需显式重置
+  const handleExitSession = async () => {
+    void disconnectFromDevice();
+    setState({ connected: false });
+    setView('home');
+  };
+
   return (
     <div className={styles.root}>
       <TitleBar
-        onBack={view === 'session' || view === 'transfer' ? () => setView('home') : undefined}
+        onBack={
+          view === 'session'
+            ? handleExitSession
+            : view === 'vdisplay' || view === 'transfer'
+              ? () => setView('home')
+              : undefined
+        }
         onRefresh={() => void load()}
         onSettings={() => setView('settings')}
       />
@@ -115,6 +147,7 @@ export const App: React.FC = () => {
           onSelectAssist={() => setView('cloud')}
           onSelectFavorites={() => setView('cloud')}
           onSelectSettings={() => setView('settings')}
+          onSelectVirtualDisplays={() => setView('vdisplay')}
         />
 
         <main className={styles.content}>
@@ -123,7 +156,15 @@ export const App: React.FC = () => {
               key={selected.id}
               deviceName={selected.name}
               connected={state.connected && state.peerId === selected.id}
-              onExit={() => setView('home')}
+              onExit={handleExitSession}
+              onOpenVirtualDisplays={() => setView('vdisplay')}
+            />
+          )}
+
+          {view === 'vdisplay' && selected && (
+            <VirtualDisplayPanel
+              deviceName={selected.name}
+              connected={state.connected && state.peerId === selected.id}
             />
           )}
 
@@ -139,8 +180,9 @@ export const App: React.FC = () => {
             <DevicePage
               deviceName={selected.name}
               online={selected.status === 'online'}
+              connecting={connecting}
               quickDevices={quickDevices}
-              onEnterDesktop={() => setView('session')}
+              onEnterDesktop={() => void handleEnterDesktop()}
               onFileTransfer={() => setView('transfer')}
               onMore={() => setView('transfer')}
               onAddDevice={() => setView('cloud')}

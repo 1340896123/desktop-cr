@@ -19,6 +19,8 @@ fn main() {
             hbb_client::set_stream_quality,
             hbb_client::set_stream_resolution,
             hbb_client::set_fullscreen,
+            hbb_client::get_clipboard_text,
+            hbb_client::set_clipboard_text,
             hbb_client::sync_clipboard,
             // 虚拟显示器控制
             virtual_display::install_virtual_display_driver,

@@ -205,6 +205,21 @@ const useStyles = makeStyles({
     fontWeight: 500,
     textAlign: 'right',
   },
+  notice: {
+    position: 'absolute',
+    right: '14px',
+    bottom: '184px',
+    backgroundColor: 'rgba(15, 23, 32, 0.78)',
+    borderRadius: '8px',
+    padding: '8px 14px',
+    fontFamily,
+    fontSize: '12px',
+    lineHeight: '18px',
+    color: '#FFFFFF',
+    backdropFilter: 'blur(4px)',
+    zIndex: 6,
+    maxWidth: '320px',
+  },
   centerPanel: {
     position: 'absolute',
     top: '48px',
@@ -303,13 +318,14 @@ interface RemoteSessionViewProps {
   deviceName: string;
   connected: boolean;
   onExit?: () => void;
+  onOpenVirtualDisplays?: () => void;
 }
 
 /**
  * 截图「远程控制窗口」界面：深色会话栏（设备名/盾牌/显示屏标签/计时/麦克风/控制中心）+
  * 全屏远程画面 + 右下角性能状态浮窗。
  */
-export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName, connected, onExit }) => {
+export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName, connected, onExit, onOpenVirtualDisplays }) => {
   const styles = useStyles();
   const [elapsed, setElapsed] = useState(0);
   const [micMuted, setMicMuted] = useState(false);
@@ -318,6 +334,7 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
   const [displayId, setDisplayId] = useState('1');
   const [fullscreen, setFullscreen] = useState(false);
   const [fps, setFps] = useState(0);
+  const [notice, setNotice] = useState<string | null>(null);
   const timerRef = useRef<number | null>(null);
   const lastFrameTimeRef = useRef(0);
 
@@ -327,6 +344,13 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
       if (timerRef.current) window.clearInterval(timerRef.current);
     };
   }, []);
+
+  // 剪贴板同步通知：3 秒后自动清除
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
 
   const selected = DISPLAYS.find((d) => d.id === displayId) ?? DISPLAYS[0];
 
@@ -392,7 +416,12 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
             {selected.label}
             <ChevronDownRegular fontSize={12} />
           </div>
-          <button type="button" className={styles.addBtn} aria-label="添加显示屏">
+          <button
+            type="button"
+            className={styles.addBtn}
+            aria-label="添加显示屏"
+            onClick={onOpenVirtualDisplays}
+          >
             <AddRegular fontSize={16} />
           </button>
           <span className={styles.signal} title="连接正常" />
@@ -448,6 +477,8 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
             <span className={styles.perfVal}>4K</span>
           </div>
         </div>
+
+        {notice && <div className={styles.notice}>{notice}</div>}
       </div>
 
       {displayMenuOpen && (
@@ -496,7 +527,16 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
             </span>
             分辨率：3840 x 2160
           </div>
-          <div className={styles.centerItem} onClick={() => handleCenterAction(() => void syncClipboard())}>
+          <div
+            className={styles.centerItem}
+            onClick={() =>
+              handleCenterAction(() => {
+                void syncClipboard().then((text) => {
+                  if (text) setNotice(`剪贴板已同步:${text.slice(0, 20)}…`);
+                });
+              })
+            }
+          >
             <span className={styles.centerItemIcon}>
               <ClipboardRegular fontSize={16} />
             </span>

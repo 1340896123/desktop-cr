@@ -107,13 +107,45 @@ export async function setFullscreen(fullscreen: boolean): Promise<void> {
   await invoke('set_fullscreen', { fullscreen });
 }
 
-/** 剪贴板双向同步 */
-export async function syncClipboard(): Promise<void> {
+/** 剪贴板双向同步：返回同步到的剪贴板文本（无文本时返回 null） */
+export async function syncClipboard(): Promise<string | null> {
   if (!isTauri()) {
     console.warn('[connection] 非 Tauri 环境，跳过剪贴板同步');
+    return null;
+  }
+  const result = await invoke<string>('sync_clipboard');
+  return result || null;
+}
+
+/** 获取本机剪贴板文本 */
+export async function getClipboardText(): Promise<string> {
+  if (!isTauri()) {
+    console.warn('[connection] 非 Tauri 环境，返回空剪贴板');
+    return '';
+  }
+  return invoke<string>('get_clipboard_text');
+}
+
+/** 写入本机剪贴板文本 */
+export async function setClipboardText(text: string): Promise<void> {
+  if (!isTauri()) {
+    console.warn('[connection] 非 Tauri 环境，跳过写入剪贴板', text);
     return;
   }
-  await invoke('sync_clipboard');
+  await invoke('set_clipboard_text', { text });
+}
+
+/** 订阅剪贴板同步事件（payload 为同步到的文本），返回取消订阅函数 */
+export async function onClipboardSynced(
+  handler: (text: string) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) {
+    console.warn('[connection] 非 Tauri 环境，使用 mock 剪贴板事件源');
+    return () => {
+      /* noop */
+    };
+  }
+  return listen<{ text: string }>('clipboard-synced', (event) => handler(event.payload.text));
 }
 
 /** 订阅连接状态变更事件，返回取消订阅函数 */

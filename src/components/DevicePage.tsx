@@ -220,6 +220,7 @@ interface QuickDevice {
 interface DevicePageProps {
   deviceName: string;
   online: boolean;
+  connecting?: boolean;
   quickDevices?: QuickDevice[];
   onEnterDesktop?: () => void;
   onFileTransfer?: () => void;
@@ -235,6 +236,7 @@ interface DevicePageProps {
 export const DevicePage: React.FC<DevicePageProps> = ({
   deviceName,
   online,
+  connecting = false,
   quickDevices = [],
   onEnterDesktop,
   onFileTransfer,
@@ -255,9 +257,15 @@ export const DevicePage: React.FC<DevicePageProps> = ({
         <div className={styles.heroPreview}>
           <div className={styles.heroWallpaper} />
           <div className={styles.heroGlow} />
-          <button type="button" className={styles.enterDesktop} onClick={onEnterDesktop}>
+          <button
+            type="button"
+            className={styles.enterDesktop}
+            onClick={onEnterDesktop}
+            disabled={connecting || !online}
+            style={connecting || !online ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
+          >
             <DesktopRegular fontSize={16} />
-            进入桌面
+            {connecting ? '连接中…' : '进入桌面'}
             <ArrowRightFilled fontSize={14} />
           </button>
         </div>
