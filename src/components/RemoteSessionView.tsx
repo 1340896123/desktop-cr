@@ -16,6 +16,8 @@ import {
   KeyboardRegular,
 } from '@fluentui/react-icons';
 import { palette, fontFamily, radius, zIndex } from '../theme/tokens';
+import { setFullscreen as requestFullscreen, setQuality, setResolution, syncClipboard } from '../services/connection';
+import { onFrame, startCapture, stopCapture } from '../services/capture';
 import RemoteCanvas from './RemoteCanvas';
 
 const useStyles = makeStyles({
@@ -315,7 +317,9 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
   const [displayMenuOpen, setDisplayMenuOpen] = useState(false);
   const [displayId, setDisplayId] = useState('1');
   const [fullscreen, setFullscreen] = useState(false);
+  const [fps, setFps] = useState(0);
   const timerRef = useRef<number | null>(null);
+  const lastFrameTimeRef = useRef(0);
 
   useEffect(() => {
     timerRef.current = window.setInterval(() => setElapsed((prev) => prev + 1), 1000);
@@ -325,6 +329,36 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
   }, []);
 
   const selected = DISPLAYS.find((d) => d.id === displayId) ?? DISPLAYS[0];
+
+  // 抓帧生命周期：连接后按当前显示屏参数启动抓帧，切换显示屏 / 断开时先停后启
+  useEffect(() => {
+    if (!connected) return;
+    const monitorId = Number(displayId);
+    void startCapture({ monitorId, width: selected.width, height: selected.height, fps: 60 });
+    return () => {
+      void stopCapture();
+    };
+  }, [connected, displayId, selected.width, selected.height]);
+
+  // 统计实时帧率（与 RemoteCanvas 内部的帧订阅互不冲突）
+  useEffect(() => {
+    if (!connected) return;
+    let unlisten: (() => void) | undefined;
+    void onFrame(() => {
+      const now = performance.now();
+      const prev = lastFrameTimeRef.current;
+      lastFrameTimeRef.current = now;
+      if (prev === 0) return;
+      const instantFps = Math.round(1000 / (now - prev));
+      setFps((prevFps) => (prevFps === instantFps ? prevFps : instantFps));
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      lastFrameTimeRef.current = 0;
+      unlisten?.();
+    };
+  }, [connected]);
 
   const handleCenterAction = useCallback((fn: () => void) => {
     fn();
@@ -391,7 +425,7 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
           </div>
           <div className={styles.perfRow}>
             <span>帧率</span>
-            <span className={styles.perfVal}>28 fps</span>
+            <span className={styles.perfVal}>{fps > 0 ? `${fps} fps` : '-- fps'}</span>
           </div>
           <div className={styles.perfRow}>
             <span>码率</span>
@@ -436,31 +470,46 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
       {centerOpen && (
         <div className={styles.centerPanel}>
           <div className={styles.centerTitle}>控制中心</div>
-          <div className={styles.centerItem} onClick={() => handleCenterAction(() => setFullscreen((prev) => !prev))}>
+          <div
+            className={styles.centerItem}
+            onClick={() =>
+              handleCenterAction(() => {
+                void requestFullscreen(!fullscreen);
+                setFullscreen((prev) => !prev);
+              })
+            }
+          >
             <span className={styles.centerItemIcon}>
               <FullScreenMaximizeRegular fontSize={16} />
             </span>
             全屏切换 {fullscreen ? '(开)' : '(关)'}
           </div>
-          <div className={styles.centerItem} onClick={() => handleCenterAction(() => {})}>
+          <div className={styles.centerItem} onClick={() => handleCenterAction(() => void setQuality({ fps: 60, quality: 'high' }))}>
             <span className={styles.centerItemIcon}>
               <VideoRegular fontSize={16} />
             </span>
             画质：高清（60fps）
           </div>
-          <div className={styles.centerItem} onClick={() => handleCenterAction(() => {})}>
+          <div className={styles.centerItem} onClick={() => handleCenterAction(() => void setResolution({ width: 3840, height: 2160, fps: 60 }))}>
             <span className={styles.centerItemIcon}>
               <ImageRegular fontSize={16} />
             </span>
             分辨率：3840 x 2160
           </div>
-          <div className={styles.centerItem} onClick={() => handleCenterAction(() => {})}>
+          <div className={styles.centerItem} onClick={() => handleCenterAction(() => void syncClipboard())}>
             <span className={styles.centerItemIcon}>
               <ClipboardRegular fontSize={16} />
             </span>
             剪贴板同步
           </div>
-          <div className={styles.centerItem} onClick={() => handleCenterAction(() => {})}>
+          <div
+            className={styles.centerItem}
+            onClick={() =>
+              handleCenterAction(() => {
+                console.info('[session] 键盘输入设置：POC 阶段占位');
+              })
+            }
+          >
             <span className={styles.centerItemIcon}>
               <KeyboardRegular fontSize={16} />
             </span>

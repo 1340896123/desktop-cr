@@ -9,8 +9,15 @@ import {
   Tooltip,
 } from '@fluentui/react-components';
 import { AddRegular, DeleteRegular, VideoRegular } from '@fluentui/react-icons';
-import { invoke } from '@tauri-apps/api/core';
-import { isTauri } from '../services/connection';
+import {
+  addVirtualMonitor,
+  installVirtualDisplayDriver,
+  listVirtualMonitors,
+  onMonitorsChanged,
+  removeVirtualMonitor,
+  type VirtualMonitor,
+} from '../services/virtualDisplay';
+import { startCapture, stopCapture } from '../services/capture';
 import RemoteCanvas from './RemoteCanvas';
 import ControlBar from './ControlBar';
 
@@ -59,14 +66,6 @@ const useStyles = makeStyles({
   },
 });
 
-interface VirtualMonitor {
-  id: number;
-  width: number;
-  height: number;
-  fps: number;
-  connected: boolean;
-}
-
 const PRESETS: Array<{ label: string; width: number; height: number; fps: number }> = [
   { label: '1080P', width: 1920, height: 1080, fps: 60 },
   { label: '2K', width: 2560, height: 1440, fps: 60 },
@@ -93,13 +92,8 @@ export const VirtualDisplayPanel: React.FC<VirtualDisplayPanelProps> = ({ device
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
   const refreshMonitors = useCallback(async () => {
-    if (!isTauri()) {
-      setMonitors([{ id: 1, width: 1920, height: 1080, fps: 60, connected: true }]);
-      return;
-    }
     try {
-      const list = await invoke<VirtualMonitor[]>('list_virtual_monitors');
-      setMonitors(list);
+      setMonitors(await listVirtualMonitors());
     } catch (error) {
       setNotice(`获取虚拟屏列表失败: ${String(error)}`);
     }
@@ -109,16 +103,22 @@ export const VirtualDisplayPanel: React.FC<VirtualDisplayPanelProps> = ({ device
     void refreshMonitors();
   }, [refreshMonitors]);
 
+  // 订阅虚拟屏列表变更事件，自动刷新列表
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void onMonitorsChanged((list) => setMonitors(list)).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
   const installDriver = async () => {
     setBusy(true);
     setNotice(null);
     try {
-      if (!isTauri()) {
-        console.warn('[vdisplay] 非 Tauri 环境，mock 安装驱动');
-        setDriverInstalled(true);
-        return;
-      }
-      await invoke('install_virtual_display_driver');
+      await installVirtualDisplayDriver();
       setDriverInstalled(true);
     } catch (error) {
       setNotice(`驱动安装失败: ${String(error)}`);
@@ -131,14 +131,7 @@ export const VirtualDisplayPanel: React.FC<VirtualDisplayPanelProps> = ({ device
     setBusy(true);
     setNotice(null);
     try {
-      if (!isTauri()) {
-        console.warn('[vdisplay] 非 Tauri 环境，mock 添加虚拟屏');
-        const mockId = monitors.length + 1;
-        setMonitors((prev) => [...prev, { id: mockId, width, height, fps, connected: true }]);
-        setSelectedId(mockId);
-        return;
-      }
-      const id = await invoke<number>('add_virtual_monitor', { width, height, fps });
+      const id = await addVirtualMonitor(width, height, fps);
       setMonitors((prev) => [...prev, { id, width, height, fps, connected: true }]);
       setSelectedId(id);
     } catch (error) {
@@ -151,12 +144,7 @@ export const VirtualDisplayPanel: React.FC<VirtualDisplayPanelProps> = ({ device
   const removeMonitor = async (id: number) => {
     setNotice(null);
     try {
-      if (!isTauri()) {
-        console.warn('[vdisplay] 非 Tauri 环境，mock 移除虚拟屏');
-        setMonitors((prev) => prev.filter((m) => m.id !== id));
-        return;
-      }
-      await invoke('remove_virtual_monitor', { monitorId: id });
+      await removeVirtualMonitor(id);
       setMonitors((prev) => prev.filter((m) => m.id !== id));
       if (selectedId === id) setSelectedId(null);
     } catch (error) {
@@ -165,6 +153,20 @@ export const VirtualDisplayPanel: React.FC<VirtualDisplayPanelProps> = ({ device
   };
 
   const selected = monitors.find((m) => m.id === selectedId) ?? monitors[0] ?? null;
+
+  // 抓帧生命周期：选中虚拟屏存在时启动抓帧（分辨率由 Rust 端 clamp），面板卸载时停止
+  useEffect(() => {
+    if (!selected) return;
+    void startCapture({
+      monitorId: selected.id,
+      width: selected.width,
+      height: selected.height,
+      fps: selected.fps,
+    });
+    return () => {
+      void stopCapture();
+    };
+  }, [selected?.id]);
 
   return (
     <div className={styles.panel}>

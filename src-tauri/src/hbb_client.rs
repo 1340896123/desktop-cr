@@ -6,6 +6,7 @@
 
 use serde::Serialize;
 use std::sync::Mutex;
+use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DeviceInfo {
@@ -16,6 +17,7 @@ pub struct DeviceInfo {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectionState {
     pub connected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -58,24 +60,40 @@ pub fn list_devices() -> Vec<DeviceInfo> {
 
 /// 连接到指定 peer。
 #[tauri::command]
-pub fn connect_to_device(peer_id: String) -> Result<ConnectionState, String> {
-    let mut inner = state();
-    // TODO: 通过 hbb_common 建立 P2P / Relay 连接（阶段一后续 / 阶段二）。
-    log::info!("[hbb_client] connect_to_device: {peer_id} (mock)");
-    inner.current_peer = Some(peer_id.clone());
-    Ok(ConnectionState {
+pub fn connect_to_device(peer_id: String, app: AppHandle) -> Result<ConnectionState, String> {
+    {
+        let mut inner = state();
+        // TODO: 通过 hbb_common 建立 P2P / Relay 连接（阶段一后续 / 阶段二）。
+        log::info!("[hbb_client] connect_to_device: {peer_id} (mock)");
+        inner.current_peer = Some(peer_id.clone());
+    }
+
+    let state = ConnectionState {
         connected: true,
         peer_id: Some(peer_id),
         error: None,
-    })
+    };
+    app.emit("connection-state", &state)
+        .map_err(|e| format!("failed to emit connection-state: {e}"))?;
+    Ok(state)
 }
 
 /// 断开当前连接。
 #[tauri::command]
-pub fn disconnect_from_device() -> Result<(), String> {
-    let mut inner = state();
-    log::info!("[hbb_client] disconnect_from_device (mock)");
-    inner.current_peer = None;
+pub fn disconnect_from_device(app: AppHandle) -> Result<(), String> {
+    {
+        let mut inner = state();
+        log::info!("[hbb_client] disconnect_from_device (mock)");
+        inner.current_peer = None;
+    }
+
+    let state = ConnectionState {
+        connected: false,
+        peer_id: None,
+        error: None,
+    };
+    app.emit("connection-state", &state)
+        .map_err(|e| format!("failed to emit connection-state: {e}"))?;
     Ok(())
 }
 

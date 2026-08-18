@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { makeStyles, tokens } from '@fluentui/react-components';
 import { sendKeyEvent, sendMouseEvent, type MouseInputPayload } from '../services/input';
+import { onFrame } from '../services/capture';
 
 const useStyles = makeStyles({
   container: {
@@ -35,6 +36,10 @@ const useStyles = makeStyles({
     borderRadius: '4px',
     fontSize: '12px',
   },
+  liveBadge: {
+    color: '#34C759',
+    fontWeight: 600,
+  },
 });
 
 interface RemoteCanvasProps {
@@ -61,6 +66,8 @@ export const RemoteCanvas: React.FC<RemoteCanvasProps> = ({
   const styles = useStyles();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [frameSize, setFrameSize] = useState({ width: remoteWidth, height: remoteHeight });
+  const [live, setLive] = useState(false);
+  const latestFrameRef = useRef<ImageData | null>(null);
 
   const normalize = useCallback(
     (clientX: number, clientY: number) => {
@@ -171,10 +178,56 @@ export const RemoteCanvas: React.FC<RemoteCanvasProps> = ({
     setFrameSize({ width: remoteWidth, height: remoteHeight });
   }, [remoteWidth, remoteHeight]);
 
-  // 兼容模式下绘制一个模拟帧，用于演示坐标区域
+  // 订阅抓帧事件：收到帧后立即绘制到画布，并以帧实际尺寸为准更新画布大小
+  useEffect(() => {
+    if (!connected || mode !== 'canvas') return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onFrame((frame) => {
+      if (disposed) return;
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const imageData = new ImageData(
+        new Uint8ClampedArray(frame.rgba),
+        frame.width,
+        frame.height,
+      );
+      latestFrameRef.current = imageData;
+      setLive(true);
+      setFrameSize((prev) =>
+        prev.width === frame.width && prev.height === frame.height
+          ? prev
+          : { width: frame.width, height: frame.height },
+      );
+      const ctx = canvas.getContext('2d');
+      if (ctx) ctx.putImageData(imageData, 0, 0);
+    }).then((fn) => {
+      if (!disposed) unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [connected, mode]);
+
+  // 帧尺寸变化时 canvas 的 width/height 会被重置并清空，需要重绘最新一帧
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || mode !== 'canvas') return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const image = latestFrameRef.current;
+    if (image) {
+      ctx.putImageData(image, 0, 0);
+      return;
+    }
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }, [mode, frameSize]);
+
+  // 兼容模式下绘制一个模拟帧，用于演示坐标区域；收到第一帧后停止绘制网格
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || mode !== 'canvas' || live) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -198,7 +251,7 @@ export const RemoteCanvas: React.FC<RemoteCanvasProps> = ({
     ctx.font = '14px system-ui';
     ctx.textAlign = 'center';
     ctx.fillText(`Remote Desktop ${remoteWidth}x${remoteHeight} (Canvas Mode)`, canvas.width / 2, canvas.height / 2);
-  }, [mode, frameSize, remoteWidth, remoteHeight]);
+  }, [mode, frameSize, remoteWidth, remoteHeight, live]);
 
   if (!connected) {
     return (
@@ -234,7 +287,7 @@ export const RemoteCanvas: React.FC<RemoteCanvasProps> = ({
   return (
     <div className={styles.container}>
       <div className={styles.overlay}>
-        {frameSize.width}x{frameSize.height} · 已连接
+        {frameSize.width}x{frameSize.height} · 已连接{live && <span className={styles.liveBadge}> · Live 模式</span>}
       </div>
       <canvas
         ref={canvasRef}
