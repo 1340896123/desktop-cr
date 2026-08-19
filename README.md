@@ -57,88 +57,80 @@
 
 ### 2.1 Cargo 依赖
 
-在 `src-tauri/Cargo.toml` 中，直接引入 RustDesk 的核心子模块，无需重写通信与加密逻辑：
+> 注记(项目收尾后现状):RustDesk 的 `hbb_common`/`scrap` 是 git submodule 形态的重依赖链(多个 rustdesk-org fork 依赖、sodiumoxide C 编译、bindgen 等),在 Windows 上构建脆弱且需要 libclang;`hbb_common` 作为 git 依赖无法拉取 submodule 内容。当前网络层改为**自研直连 TCP 协议**(`network.rs`,长度前缀 JSON 帧 + base64 JPEG),真实实现了 LAN 远程控制的全部能力;抓屏直接用 windows crate 的 DXGI API(与 scrap 底层同一技术),已隔离在 `capture.rs`,未来可平滑替换为 RustDesk 生态。
+
+实际依赖(`src-tauri/Cargo.toml`):
 
 ```toml
-[package]
-name = "winui-remote-desktop"
-version = "0.1.0"
-edition = "2021"
-
 [dependencies]
-tauri = { version = "2.0.0-rc", features = ["protocol-asset"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio = { version = "1.35", features = ["full"] }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+log = "0.4"
+env_logger = "0.11"
 
-# 复用 RustDesk 核心依赖 (定位到 git 仓库的 libs 目录或本地 submodule)
-hbb_common = { git = "https://github.com/rustdesk/rustdesk", subdirectory = "libs/hbb_common" }
-scrap = { git = "https://github.com/rustdesk/rustdesk", subdirectory = "libs/scrap" }
+# 轻量纯 Rust 依赖:协议 base64 / JPEG 编码 / IDD dylib 动态加载
+base64 = "0.22"
+jpeg-encoder = "0.6"
+libloading = "0.8"
 
-# Windows 底层支持
-windows = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse"] }
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_Graphics_Dxgi", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Registry",
+  "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_SystemServices",
+  "Win32_Security",
+] }
 ```
 
 ### 2.2 虚拟屏幕 (Virtual Display) 驱动集成
 
-RustDesk 基于微软 IDD 框架实现了动态虚拟屏。本架构通过 Tauri Command 对其进行控制。
+基于微软 IDD(Indirect Display Driver)框架,本架构通过 Tauri Command 控制虚拟显示器增删。已落地真实实现:
 
-驱动准备：将编译好的 `rustdesk-idd-driver.dll` 与 `cert.cer` 放入安装包资源目录 `src-tauri/resources/idd_driver/`。
+驱动资源(`src-tauri/resources/idd_driver/`,随安装包打包,来源:RustDesk 官方 Windows 发行包 + Amyuni usbmmidd 官方工具包):
 
-Rust 控制逻辑 (`src-tauri/src/virtual_display.rs`)：
+- `usbmmIdd.inf` / `usbmmidd.cat`(Amyuni 微软签名 IDD 驱动)
+- `x64/usbmmIdd.dll`、`Win32/usbmmIdd.dll`(驱动二进制)
+- `deviceinstaller64.exe` / `deviceinstaller.exe`(官方驱动安装器)
+- `dylib_virtual_display.dll`(RustDesk IDD 控制 DLL,`libloading` 加载,失败静默回退 usbmmidd)
 
-```rust
-use std::process::Command;
+控制逻辑(`src-tauri/src/virtual_display.rs`,Windows 真实路径):
 
-#[tauri::command]
-pub fn install_virtual_display_driver() -> Result<String, String> {
-    // 调用 nefcon 或 devcon 挂载驱动
-    let output = Command::new("idd_driver/setup.exe")
-        .arg("install")
-        .output()
-        .map_err(|e| e.to_string())?;
+1. **安装驱动**:`deviceinstaller64 install usbmmIdd.inf usbmmidd`(需管理员权限,失败返回真实错误信息)。
+2. **添加虚拟屏**:写入注册表 `HKLM\...\WUDF\Services\usbmmIdd\Parameters\Monitors` 的分辨率列表(目标分辨率放首位),再执行 `deviceinstaller64 enableidd 1`(每次新增一个,最多 4 个),返回新显示器 id 并广播 `virtual-monitors-changed`。
+3. **枚举/移除**:`EnumDisplayDevicesW` 真实枚举(按 DeviceString 识别 usbmmidd/Indirect 虚拟屏);`deviceinstaller64 enableidd 0` 移除。
+4. **可选增强**:`libloading` 动态加载 `dylib_virtual_display.dll`,当 `is_device_created()` 为真时经 `plug_in_monitor`/`plug_out_monitor` 操作 RustDesk IDD 驱动。
 
-    if output.status.success() {
-        Ok("Virtual display driver installed successfully".into())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
-}
-
-#[tauri::command]
-pub fn add_virtual_monitor(width: u32, height: u32, fps: u32) -> Result<u32, String> {
-    // 通过 RustDesk 的 IDD API 动态添加虚拟显示器
-    // 刷新率 T_f = 1000 / fps (ms)
-    log::info!("Adding virtual display: {}x{} @ {}Hz", width, height, fps);
-    // 返回屏幕索引或 ID
-    Ok(1)
-}
-```
+> 刷新率周期 T_f = 1000 / fps (ms) 由驱动侧消费;安装驱动/增删虚拟屏均需要 UAC 管理员权限,非管理员时返回明确提示。
 
 ## 3. 画面传输与渲染管道
 
-画面传输采用 **低延迟 P2P/WebRTC/WebSocket 直连** 方案：
+画面传输采用 **真实 DXGI 抓屏 + JPEG 编码 + LAN TCP / Tauri IPC 事件** 双通道:
 
 ```
 +------------------+         +-------------------+         +---------------------+
-| 远程主机采集端   |         | Rust 转换与编码层 |         | 前端渲染层 (Canvas) |
-| (DXGI / Scrap)   | ------> | (H.264 / VP9 /    | ------> | WebRTC DataChannel  |
-| / 虚拟显示器     |         | Shared Memory)    |         | or Web Workers      |
+| 远程主机采集端   |         | Rust 编码层        |         | 前端渲染层 (Canvas)  |
+| (DXGI Output     | ------> | (JPEG 编码,       | ------> | createImageBitmap +  |
+|  Duplication)    |         |  base64/TCP 帧)   |         | drawImage)           |
 +------------------+         +-------------------+         +---------------------+
 ```
 
 ### 3.1 视频传输两条路线
 
-**高帧率模式 (推荐 - WebRTC Video Track / DataChannel)：**
+**远程模式 (已实现 - LAN TCP 帧流)：**
 
-- Rust 侧复用 RustDesk 通信栈打通 P2P 通道
-- 将 DXGI/IDD 抓取的帧通过 H.264/AV1 硬件编码，送入 WebRTC Video Track
-- 前端使用 `<video>` 标签渲染，支持硬件加速解码，延迟 ≤ 30ms
+- 被控端 `capture.rs` 用 IDXGIOutputDuplication 抓帧 → jpeg-encoder 编码 → `network.rs` 以 4 字节长度前缀 JSON 帧(`frame` 消息,base64 JPEG)推送到控制端
+- 控制端 `remote-frame` 事件携带 JPEG 字节 → 前端 `<canvas>` `createImageBitmap` + `drawImage` 渲染
+- 流参数(画质/分辨率/帧率)经 `stream` 消息实时下发被控端并即时生效
 
-**兼容模式 (Shared Memory / ImageData)：**
+**本机预览模式 (已实现 - IPC 事件)：**
 
-- 在同机模式或高安全限制环境下，Rust 将 RGB/YUV 原始帧写入 Tauri 共享内存/二进制 Channel
-- 前端使用 Web Workers 在 `<canvas>` 上绘制
+- 同一套 DXGI 抓帧循环,`capture-frame` 事件推送 JPEG 到前端 `<canvas>` 预览
+
+> WebRTC `<video>` 高帧率路线(H.264/AV1 硬件编码)依赖 RustDesk 官方信令服务器基础设施,为远期蓝图;当前 JPEG-over-TCP 已满足 LAN 场景。
 
 ## 4. 控制事件管线
 
@@ -232,24 +224,29 @@ my-tauri-remote-desktop/
 ├── docs/
 │   └── technical_architecture.md   # 本架构文档
 ├── src/                            # React 前端工程
-│   ├── assets/                     # 静态资源
 │   ├── components/                 # Fluent UI 业务组件
 │   │   ├── ControlBar.tsx          # 顶部悬浮工具栏
-│   │   ├── RemoteCanvas.tsx        # 远程画面 Canvas / Video 封装
-│   │   └── VirtualDisplayPanel.tsx # 虚拟屏管理面板
-│   ├── services/                   # Tauri IPC 封装层 (Invoke / Listen)
-│   │   ├── connection.ts
-│   │   └── input.ts
-│   ├── App.tsx                     # 应用入口与 FluentProvider 根组件
+│   │   ├── RemoteCanvas.tsx        # 远程画面 Canvas(JPEG 渲染,local/remote 双源)
+│   │   ├── RemoteSessionView.tsx   # 远程会话窗口(控制中心/性能浮窗)
+│   │   ├── VirtualDisplayPanel.tsx # 虚拟屏管理 + 本机显示器预览
+│   │   ├── DevicePage.tsx / SettingsPage.tsx / FileTransferPage.tsx / Sidebar.tsx ...
+│   ├── services/                   # Tauri IPC 封装层 (Invoke / Listen,isTauri 守卫)
+│   │   ├── connection.ts           # 连接/会话/剪贴板/全屏/被控端管理
+│   │   ├── capture.ts              # 抓帧 + 真实显示器枚举 + remote-frame 订阅
+│   │   ├── virtualDisplay.ts       # IDD 虚拟屏增删/驱动安装
+│   │   ├── config.ts               # 应用配置持久化(设备列表/端口)
+│   │   └── input.ts                # 鼠标/键盘事件注入
+│   ├── App.tsx                     # 应用入口与视图路由
 │   └── main.tsx
 ├── src-tauri/                      # Tauri Rust 后端工程
-│   ├── resources/                  # 包含 idd_driver 驱动文件
-│   │   └── idd_driver/
+│   ├── resources/
+│   │   └── idd_driver/             # usbmmidd 签名驱动 + deviceinstaller + RustDesk dylib
 │   ├── src/
-│   │   ├── hbb_client.rs           # RustDesk hbb_common 逻辑封装
-│   │   ├── virtual_display.rs      # IDD 驱动挂载与控制逻辑
+│   │   ├── capture.rs              # 真实 DXGI 抓屏 + JPEG 编码 + 显示器枚举
+│   │   ├── network.rs              # 真实 LAN TCP 协议(host/peer 会话)
+│   │   ├── hbb_client.rs           # 会话管理/配置持久化/被控端/剪贴板/流参数
+│   │   ├── virtual_display.rs      # 真实 IDD 虚拟屏(usbmmidd + dylib)
 │   │   ├── input_injector.rs       # Win32 SendInput 鼠标键盘注入
-│   │   ├── capture.rs              # 屏幕抓取逻辑 (Scrap/DXGI)
 │   │   └── main.rs                 # Tauri 注册与 Commands 绑定
 │   ├── Cargo.toml                  # Rust 依赖声明
 │   └── tauri.conf.json             # Tauri 配置文件
@@ -258,11 +255,20 @@ my-tauri-remote-desktop/
 
 ## 7. 开发里程碑路线图
 
-- [ ] **阶段一：环境搭建与 POC 验证**
-      集成 Tauri v2 + Fluent UI v9。将 RustDesk `hbb_common` 导入后端，验证底层 ID/中继服务器注册。
-- [ ] **阶段二：虚拟屏驱动集成**
-      封装 Rust 控制 Windows IDD 驱动的接口。在前端通过 UI 实现"一键增加 1080P/2K/4K 虚拟屏"。
-- [ ] **阶段三：画面抓取与传输**
-      实现 DXGI/Scrap 对指定虚拟屏的帧捕获。建立 WebRTC / Shared Memory 通道将画质传输到前端 `<video>` / `<canvas>`。
-- [ ] **阶段四：控制注入与细节优化**
-      精确映射按键与鼠标相对/绝对坐标。Fluent UI 悬浮控制栏（全屏切换、分辨率调节、剪贴板同步等）功能完备。
+- [x] **阶段一：环境搭建与 POC 验证**
+      集成 Tauri v2 + Fluent UI v9 工程骨架,完成「设备 / 远程会话 / 虚拟屏 / 文件传输 / 设置」全套 UI 与 IPC 服务层。RustDesk `hbb_common` 导入因依赖链过重(重 git 依赖 + C 编译)暂缓,网络层改为自研直连 TCP 协议(见 §2.1 注记)。
+- [x] **阶段二：虚拟屏驱动集成**
+      真实 IDD 驱动接入:`resources/idd_driver/` 内置 usbmmidd 签名驱动 + 官方 `deviceinstaller64` + RustDesk `dylib_virtual_display.dll`;驱动安装 / 注册表分辨率写入 / `enableidd 1|0` 增删虚拟屏 / 真实显示器枚举均已在 Windows 落地。前端「虚拟屏管理」面板支持一键增加 1080P/2K/4K。
+- [x] **阶段三：画面抓取与传输**
+      真实 DXGI 抓屏(IDXGIOutputDuplication + D3D11)逐帧 JPEG 编码;本地预览经 `capture-frame` 事件推送到 `<canvas>`;远程画面经自研 TCP 协议(`network.rs`)以 base64 JPEG 帧流传输,前端 `remote-frame` 事件 + `createImageBitmap` 渲染。WebRTC `<video>` 高帧率路线留待对接官方 HBBS/HBBR 时启用。
+- [x] **阶段四：控制注入与细节优化**
+      Windows 真实 SendInput 注入(鼠标绝对坐标 + 键盘 code→VK 全映射,含修饰键/扩展键);远程会话内鼠标/键盘/滚轮事件经协议实时注入被控端;控制中心全屏/画质/分辨率/剪贴板同步真实生效;流参数经 `stream` 消息实时下发被控端。
+
+## 8. 已交付能力清单
+
+- **本机预览**:选择任意显示器,实时 DXGI 抓帧 + JPEG 预览。
+- **LAN 远程控制**:一台机器以「被控端」运行(设置页配置端口并启动),另一台通过「设备列表」添加 `ip:port` 后一键进入会话——真实画面流 + 真实鼠标键盘注入 + 剪贴板双向同步 + 画质/分辨率实时调节。
+- **虚拟显示器**:管理员权限下安装 usbmmidd IDD 驱动,一键添加 1080P/2K/4K 虚拟屏(最多 4 个),支持枚举/移除。
+- **配置持久化**:对端设备列表、被控端口、被控自启开关持久化到 `%APPDATA%/com.example.winui-remote-desktop/config.json`。
+
+> 说明:HBBS/HBBR 信令服务器、NAT 打洞与 WebRTC 视频轨道依赖 RustDesk 官方服务器基础设施与重依赖链,属外部依赖项;当前直连 TCP 已实现完整远程桌面功能,该层替换不影响前端与注入/抓帧模块。
