@@ -639,5 +639,159 @@ mod tests {
             ]
         );
     }
+
+    /// 本机 DXGI 真实抓帧 + 缩放 + JPEG 编码吞吐基准(需要显示器/GPU,默认忽略)。
+    ///
+    /// 无节流(不按 fps 睡眠)连续抓帧 3 秒,统计:
+    /// - 真实帧率:DXGI 实际交付帧数 / 时长(受桌面内容变化频率限制)
+    /// - 管道理论最大帧率:单帧(采集 + 缩放 + 编码)平均耗时的倒数
+    ///
+    /// 运行:`cargo test -- --ignored dxgi_max_fps_benchmark --nocapture`
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore]
+    fn dxgi_max_fps_benchmark() {
+        use windows::core::Interface;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11CreateDevice, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAP_READ,
+            D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+            ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
+        use windows::Win32::Graphics::Dxgi::{
+            CreateDXGIFactory1, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIFactory1,
+            IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+        };
+
+        let monitors = list_monitors_windows().expect("枚举显示器失败");
+        assert!(!monitors.is_empty(), "本机未检测到显示器");
+        let monitor = &monitors[0];
+        println!(
+            "[bench] 目标显示器 #{}: {} {}x{}",
+            monitor.id, monitor.name, monitor.width, monitor.height
+        );
+
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.expect("CreateDXGIFactory1 失败");
+        let adapter = unsafe { factory.EnumAdapters1(0) }.expect("EnumAdapters1(0) 失败(可能无 GPU)");
+        let output = unsafe { adapter.EnumOutputs(monitor.id) }
+            .expect("EnumOutputs 失败: 显示器不存在或不可捕获");
+        let mut device: Option<ID3D11Device> = None;
+        let mut ctx: Option<ID3D11DeviceContext> = None;
+        unsafe {
+            D3D11CreateDevice(
+                &adapter,
+                D3D_DRIVER_TYPE_UNKNOWN,
+                None,
+                D3D11_CREATE_DEVICE_FLAG(0),
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut ctx),
+            )
+        }
+        .expect("D3D11CreateDevice 失败");
+        let device = device.expect("D3D11CreateDevice 未返回设备");
+        let ctx = ctx.expect("D3D11CreateDevice 未返回设备上下文");
+        let output1: IDXGIOutput1 = output.cast().expect("IDXGIOutput → IDXGIOutput1 转换失败");
+        let dup: IDXGIOutputDuplication = unsafe { output1.DuplicateOutput(&device) }
+            .expect("DuplicateOutput 失败(桌面捕获不可用)");
+
+        let duration = std::time::Duration::from_secs(3);
+        let start = std::time::Instant::now();
+        let deadline = start + duration;
+        let mut frames = 0u32;
+        let mut wait_timeouts = 0u64;
+        let mut proc_total = std::time::Duration::ZERO;
+        let mut encode_total = std::time::Duration::ZERO;
+        let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+
+        while std::time::Instant::now() < deadline {
+            // 1) 取帧;WAIT_TIMEOUT 表示暂无新帧(桌面静止),继续空转
+            let mut resource: Option<IDXGIResource> = None;
+            if let Err(e) = unsafe { dup.AcquireNextFrame(0, &mut frame_info, &mut resource) } {
+                if e.code() == DXGI_ERROR_WAIT_TIMEOUT {
+                    wait_timeouts += 1;
+                    continue;
+                }
+                let _ = unsafe { dup.ReleaseFrame() };
+                panic!("AcquireNextFrame 失败: {e}");
+            }
+            let Some(resource) = resource else {
+                let _ = unsafe { dup.ReleaseFrame() };
+                continue;
+            };
+            let tex: ID3D11Texture2D = resource
+                .cast()
+                .unwrap_or_else(|e| panic!("桌面资源转换 ID3D11Texture2D 失败: {e}"));
+
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            unsafe { tex.GetDesc(&mut desc) };
+            let (src_w, src_h) = (desc.Width, desc.Height);
+
+            // 2) 拷贝到 CPU 可读 staging 纹理(与 dxgi_capture_loop 同管线)
+            let mut staging_desc = desc;
+            staging_desc.Usage = D3D11_USAGE_STAGING;
+            staging_desc.BindFlags = 0;
+            staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            staging_desc.MiscFlags = 0;
+            staging_desc.MipLevels = 1;
+            staging_desc.ArraySize = 1;
+            staging_desc.SampleDesc = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
+            let mut staging: Option<ID3D11Texture2D> = None;
+            if let Err(e) = unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) } {
+                let _ = unsafe { dup.ReleaseFrame() };
+                panic!("创建 staging 纹理失败: {e}");
+            }
+            let staging = staging.expect("CreateTexture2D 未返回纹理");
+            unsafe { ctx.CopyResource(&staging, &tex) };
+            drop(tex);
+
+            // 3) Map 读出像素(注意 RowPitch 可能大于 width*4)
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            if let Err(e) = unsafe { ctx.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) } {
+                let _ = unsafe { dup.ReleaseFrame() };
+                panic!("Map 失败: {e}");
+            }
+            let row_pitch = mapped.RowPitch as usize;
+            let mut bgra = vec![0u8; (src_w as usize) * (src_h as usize) * 4];
+            for y in 0..src_h as usize {
+                let src_row = unsafe { (mapped.pData as *const u8).add(y * row_pitch) };
+                let dst_row = &mut bgra[y * (src_w as usize) * 4..(y + 1) * (src_w as usize) * 4];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(src_row, dst_row.as_mut_ptr(), (src_w as usize) * 4);
+                }
+            }
+            unsafe { ctx.Unmap(&staging, 0) };
+            drop(staging);
+            let _ = unsafe { dup.ReleaseFrame() };
+
+            // 4) BGRA→RGB → 缩放 + JPEG 编码,记录耗时
+            let proc_start = std::time::Instant::now();
+            let rgb = bgra_to_rgb(&bgra, src_w, src_h);
+            let encode_start = std::time::Instant::now();
+            let _ = rgb_to_jpeg(&rgb, src_w, src_h, 1920, 1920, 85)
+                .expect("JPEG 编码失败");
+            encode_total += encode_start.elapsed();
+            proc_total += proc_start.elapsed();
+            frames += 1;
+        }
+        drop(dup);
+
+        let elapsed = start.elapsed().as_secs_f64();
+        let real_fps = frames as f64 / elapsed;
+        let avg_proc_ms = proc_total.as_secs_f64() * 1000.0 / frames.max(1) as f64;
+        let pipeline_max_fps = if avg_proc_ms > 0.0 {
+            1000.0 / avg_proc_ms
+        } else {
+            f64::INFINITY
+        };
+        let avg_encode_ms = encode_total.as_secs_f64() * 1000.0 / frames.max(1) as f64;
+        println!(
+            "[bench] 3 秒交付 {frames} 帧(空等 {wait_timeouts} 次)→ 真实帧率 {real_fps:.1} fps | 单帧管道 {avg_proc_ms:.2} ms(编码 {avg_encode_ms:.2} ms)→ 管道理论最大 {pipeline_max_fps:.1} fps"
+        );
+        assert!(frames > 0, "3 秒内未抓到任何帧");
+    }
 }
 
