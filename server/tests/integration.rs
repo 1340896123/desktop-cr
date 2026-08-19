@@ -285,7 +285,7 @@ async fn relay_udp_forward() {
 
     // 宿主
     let host = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let host_addr = host.local_addr().unwrap();
+    let _host_addr = host.local_addr().unwrap();
     host.send_to(r#"{"t":"alloc-udp","id":"u1"}"#.as_bytes(), relay_addr)
         .await
         .unwrap();
