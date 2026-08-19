@@ -16,6 +16,9 @@ import {
   PersonRegular,
   AddRegular,
   DeleteRegular,
+  GlobeRegular,
+  ServerRegular,
+  KeyRegular,
 } from '@fluentui/react-icons';
 import { palette, fontFamily, spacing, radius, shadow } from '../theme/tokens';
 import { startHost, stopHost, isHostRunning, onHostStateChange, type HostState } from '../services/connection';
@@ -416,6 +419,9 @@ export const SettingsPage: React.FC = () => {
   const [hostState, setHostState] = useState<HostState>({ running: false, port: 0 });
   const [hostError, setHostError] = useState<string | null>(null);
   const [portInput, setPortInput] = useState('21118');
+  const [signalServerInput, setSignalServerInput] = useState('');
+  const [relayServerInput, setRelayServerInput] = useState('');
+  const [hostIdInput, setHostIdInput] = useState('');
   const [newPeerName, setNewPeerName] = useState('');
   const [newPeerAddr, setNewPeerAddr] = useState('');
   const [peerError, setPeerError] = useState<string | null>(null);
@@ -443,6 +449,9 @@ export const SettingsPage: React.FC = () => {
       const cfg = await getAppConfig();
       setConfig(cfg);
       setPortInput(String(cfg.hostPort));
+      setSignalServerInput(cfg.signalServer ?? '');
+      setRelayServerInput(cfg.relayServer ?? '');
+      setHostIdInput(cfg.hostId ?? '');
     })();
     void isHostRunning().then((running) => setHostState((prev) => ({ ...prev, running })));
     void onHostStateChange((state) => setHostState(state)).then((fn) => {
@@ -491,6 +500,34 @@ export const SettingsPage: React.FC = () => {
       await startHost(port);
     } catch (error) {
       setHostError(`启动被控端失败: ${String(error)}`);
+    }
+  };
+
+  const saveServerConfig = async () => {
+    const sig = signalServerInput.trim();
+    const relay = relayServerInput.trim();
+    const id = hostIdInput.trim();
+    const next: AppConfig = config
+      ? {
+          ...config,
+          signalServer: sig ? sig : undefined,
+          relayServer: relay ? relay : undefined,
+          hostId: id,
+        }
+      : {
+          hostEnabled: false,
+          hostPort: Number(portInput) || 21118,
+          peers: [],
+          signalServer: sig ? sig : undefined,
+          relayServer: relay ? relay : undefined,
+          hostId: id || 'dcr-browser',
+        };
+    setConfig(next);
+    try {
+      await saveAppConfig(next);
+      setNotice('服务器与 ID 已保存');
+    } catch (error) {
+      setNotice(`保存失败: ${String(error)}`);
     }
   };
 
@@ -667,6 +704,78 @@ export const SettingsPage: React.FC = () => {
 
       {tab === '网络' && (
         <>
+          <div className={styles.card}>
+            <div className={styles.row}>
+              <span className={styles.rowIcon}>
+                <GlobeRegular fontSize={16} />
+              </span>
+              <div className={styles.rowBody}>
+                <div className={styles.rowTitle}>服务器与 ID</div>
+                <div className={styles.rowDesc}>配置信令/中继服务器与本机 ID，保存后被控端可被广域网发现</div>
+              </div>
+            </div>
+            <div className={styles.rowDivider} />
+            <div className={styles.row}>
+              <span className={styles.rowIcon}>
+                <GlobeRegular fontSize={16} />
+              </span>
+              <div className={styles.rowBody}>
+                <div className={styles.rowTitle}>信令服务器</div>
+                <div className={styles.rowDesc}>
+                  配置后本机被控端会注册并可被广域网发现，控制端连接时会查询对端地址并回退到中继
+                </div>
+              </div>
+              <input
+                className={styles.pathInput}
+                style={{ width: 220 }}
+                placeholder="signal.example.com:21116"
+                value={signalServerInput}
+                onChange={(e) => setSignalServerInput(e.target.value)}
+              />
+            </div>
+            <div className={styles.rowDivider} />
+            <div className={styles.row}>
+              <span className={styles.rowIcon}>
+                <ServerRegular fontSize={16} />
+              </span>
+              <div className={styles.rowBody}>
+                <div className={styles.rowTitle}>中继服务器</div>
+                <div className={styles.rowDesc}>直连失败时经其中继转发流量（打洞失败兜底）</div>
+              </div>
+              <input
+                className={styles.pathInput}
+                style={{ width: 220 }}
+                placeholder="relay.example.com:21117"
+                value={relayServerInput}
+                onChange={(e) => setRelayServerInput(e.target.value)}
+              />
+            </div>
+            <div className={styles.rowDivider} />
+            <div className={styles.row}>
+              <span className={styles.rowIcon}>
+                <KeyRegular fontSize={16} />
+              </span>
+              <div className={styles.rowBody}>
+                <div className={styles.rowTitle}>本机 ID</div>
+                <div className={styles.rowDesc}>信令注册用唯一标识，被控端与发现列表显示</div>
+              </div>
+              <input
+                className={styles.pathInput}
+                style={{ width: 220 }}
+                placeholder="dcr-主机名"
+                value={hostIdInput}
+                onChange={(e) => setHostIdInput(e.target.value)}
+              />
+            </div>
+            <div className={styles.rowDivider} />
+            <div className={styles.row}>
+              <div className={styles.rowBody} />
+              <button type="button" className={styles.hostToggle} onClick={() => void saveServerConfig()}>
+                保存
+              </button>
+            </div>
+          </div>
+
           <div className={styles.card}>
             <div className={styles.row}>
               <span className={styles.rowIcon}>

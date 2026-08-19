@@ -14,6 +14,12 @@ export interface AppConfig {
   hostEnabled: boolean;
   hostPort: number;
   peers: PeerConfig[];
+  /** 信令服务器地址 "ip:port"，配置后被控端向其注册并心跳 */
+  signalServer?: string;
+  /** 中继服务器地址 "ip:port"，直连失败时经其中继转发 */
+  relayServer?: string;
+  /** 本机唯一 ID，信令注册用，默认 "dcr-<主机名>" */
+  hostId: string;
 }
 
 /** 浏览器模式降级时的默认配置 */
@@ -21,6 +27,9 @@ const DEFAULT_CONFIG: AppConfig = {
   hostEnabled: false,
   hostPort: 21118,
   peers: [],
+  signalServer: undefined,
+  relayServer: undefined,
+  hostId: 'dcr-browser',
 };
 
 /** 读取应用配置；浏览器模式返回默认值 */

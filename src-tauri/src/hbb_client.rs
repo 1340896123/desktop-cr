@@ -45,6 +45,15 @@ pub struct AppConfig {
     pub host_enabled: bool,
     pub host_port: u16,
     pub peers: Vec<PeerConfig>,
+    /// 信令服务器地址("ip:port",可选;配置后被控端注册/心跳,控制端查找/发现)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal_server: Option<String>,
+    /// 中继服务器地址("ip:port",可选;直连失败时经其中继转发)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_server: Option<String>,
+    /// 本机唯一 ID(信令注册用,默认 "dcr-<主机名>")
+    #[serde(default = "default_host_id")]
+    pub host_id: String,
 }
 
 impl Default for AppConfig {
@@ -53,8 +62,20 @@ impl Default for AppConfig {
             host_enabled: false,
             host_port: 21118,
             peers: Vec::new(),
+            signal_server: None,
+            relay_server: None,
+            host_id: default_host_id(),
         }
     }
+}
+
+/// 默认本机 ID:"dcr-<COMPUTERNAME>"。
+pub(crate) fn default_host_id() -> String {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("dcr-{s}"))
+        .unwrap_or_else(|| "dcr-host".into())
 }
 
 /// 对端设备配置。
@@ -249,8 +270,28 @@ pub async fn list_devices() -> Vec<DeviceInfo> {
                 platform: "windows".into(),
             });
         }
+
+        // 信令服务器发现的在线设备(不在本地配置的按 ID 展示,可经信令/中继连接)
+        if let Some(sig) = cfg.signal_server.clone() {
+            match crate::network::signal_list(&sig).await {
+                Ok(peers) => {
+                    for p in peers {
+                        if !devices.iter().any(|d| d.id == p.id) {
+                            devices.push(DeviceInfo {
+                                id: p.id.clone(),
+                                name: p.id.clone(),
+                                status: "online".into(),
+                                platform: "unknown".into(),
+                            });
+                        }
+                    }
+                }
+                Err(e) => log::warn!("[hbb_client] 信令设备列表获取失败: {e}"),
+            }
+        }
+
         log::info!(
-            "[hbb_client] list_devices: 通过 TCP 探测 {} 个对端(其中 {} 在线)",
+            "[hbb_client] list_devices: 共 {} 个对端(其中 {} 在线)",
             devices.len(),
             devices.iter().filter(|d| d.status == "online").count()
         );
@@ -278,6 +319,10 @@ async fn tcp_probe(addr: &str) -> bool {
 }
 
 /// 连接到指定 peer(真实网络连接)。
+///
+/// 连接路径回退链(见 `network::open_transport`):
+/// 配置的 LAN 直连 → 信令服务器返回的外部地址 → 中继服务器兜底。
+/// 若该 peer 不在本地配置(信令发现/仅凭 ID),则从信令服务器查询其地址。
 #[tauri::command]
 pub async fn connect_to_device(peer_id: String, app: AppHandle) -> Result<ConnectionState, String> {
     // 本机不能连接自己
@@ -286,28 +331,56 @@ pub async fn connect_to_device(peer_id: String, app: AppHandle) -> Result<Connec
         crate::operation_log::op_log("hbb_client", "connect_to_device", &format!("失败: {err}"));
         return Err(err);
     }
-    // 从配置查找对端地址
     let cfg = load_app_config();
-    let peer = match cfg.peers.iter().find(|p| p.id == peer_id).cloned() {
-        Some(peer) => peer,
-        None => {
-            let err = format!("未找到对端设备: {peer_id}");
-            crate::operation_log::op_log("hbb_client", "connect_to_device", &format!("失败: {err}"));
-            return Err(err);
-        }
-    };
+    let peer = cfg.peers.iter().find(|p| p.id == peer_id).cloned();
 
-    // 真实建立连接;失败时广播断开并返回错误
-    if let Err(e) = crate::network::connect_peer(app.clone(), peer_id.clone(), peer.addr.clone()).await
-    {
-        let state = ConnectionState {
-            connected: false,
-            peer_id: Some(peer_id.clone()),
-            error: Some(e.clone()),
-        };
-        let _ = app.emit("connection-state", &state);
-        crate::operation_log::op_log("hbb_client", "connect_to_device", &format!("失败: {e}"));
-        return Err(e);
+    // 信令服务器查询(可选):拿外部地址与中继提示;信令发现的设备借此获取地址
+    let mut direct = peer.as_ref().map(|p| p.addr.clone());
+    let mut external: Option<String> = None;
+    let mut relay = cfg.relay_server.clone();
+    if let Some(sig) = cfg.signal_server.clone() {
+        match crate::network::signal_lookup(&sig, &peer_id).await {
+            Ok(Some((lan, ext, hint))) => {
+                log::info!("[hbb_client] 信令查到 {peer_id}: lan={lan}, external={ext}");
+                if direct.is_none() && !lan.is_empty() {
+                    direct = Some(lan);
+                }
+                if !ext.is_empty() {
+                    external = Some(ext);
+                }
+                if relay.is_none() && !hint.is_empty() {
+                    relay = Some(hint);
+                }
+            }
+            Ok(None) => log::info!("[hbb_client] 信令显示 {peer_id} 离线"),
+            Err(e) => log::warn!("[hbb_client] 信令查询失败: {e}"),
+        }
+    }
+    let direct = direct.ok_or_else(|| {
+        let err = format!("未找到对端设备(且信令不可用): {peer_id}");
+        crate::operation_log::op_log("hbb_client", "connect_to_device", &format!("失败: {err}"));
+        err
+    })?;
+
+    // 真实建立连接(直连 → 外部 → 中继);失败时广播断开并返回错误
+    match crate::network::connect_peer(app.clone(), peer_id.clone(), direct, external, relay).await {
+        Ok(via) => {
+            crate::operation_log::op_log(
+                "hbb_client",
+                "connect_to_device",
+                &format!("成功: peer={peer_id}, via={via}"),
+            );
+        }
+        Err(e) => {
+            let state = ConnectionState {
+                connected: false,
+                peer_id: Some(peer_id.clone()),
+                error: Some(e.clone()),
+            };
+            let _ = app.emit("connection-state", &state);
+            crate::operation_log::op_log("hbb_client", "connect_to_device", &format!("失败: {e}"));
+            return Err(e);
+        }
     }
 
     let state = ConnectionState {
@@ -317,7 +390,6 @@ pub async fn connect_to_device(peer_id: String, app: AppHandle) -> Result<Connec
     };
     app.emit("connection-state", &state)
         .map_err(|e| format!("failed to emit connection-state: {e}"))?;
-    crate::operation_log::op_log("hbb_client", "connect_to_device", &format!("成功: peer={peer_id}"));
     Ok(state)
 }
 
@@ -531,6 +603,20 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
         let std_listener = std::net::TcpListener::bind(("0.0.0.0", port))
             .map_err(|e| format!("监听 0.0.0.0:{port} 失败(端口被占用?): {e}"))?;
         let cfg = stream_cfg();
+
+        // 信令注册信息:服务器地址 / 本机 ID / 局域网地址(供广域网被发现)
+        let app_cfg = load_app_config();
+        let signal_addr = app_cfg.signal_server.clone();
+        let host_id = if app_cfg.host_id.trim().is_empty() {
+            default_host_id()
+        } else {
+            app_cfg.host_id.clone()
+        };
+        let lan_ip = crate::network::local_ipv4()
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "127.0.0.1".into());
+        let lan = format!("{lan_ip}:{port}");
+
         let handle = tokio::spawn(async move {
             let listener = match tokio::net::TcpListener::from_std(std_listener) {
                 Ok(l) => l,
@@ -551,8 +637,21 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
             {
                 log::warn!("[hbb_client] host 抓帧启动失败(继续以无帧模式运行): {e}");
             }
+            // 配置了信令服务器则后台注册本机并心跳(随 host 停止而取消)
+            let reg_task = if signal_addr.is_some() {
+                Some(tokio::spawn(crate::network::signal_register_loop(
+                    signal_addr,
+                    host_id,
+                    lan,
+                )))
+            } else {
+                None
+            };
             if let Err(e) = crate::network::serve_host(app.clone(), listener).await {
                 log::error!("[hbb_client] host 服务退出: {e}");
+            }
+            if let Some(t) = reg_task {
+                t.abort();
             }
             // host 退出(含异常返回)后广播停止
             let _ = app.emit("host-state", serde_json::json!({ "running": false, "port": 0 }));
@@ -739,6 +838,9 @@ mod tests {
                 addr: "192.168.1.5:21118".into(),
                 platform: Some("windows".into()),
             }],
+            signal_server: Some("signal.example.com:21116".into()),
+            relay_server: Some("relay.example.com:21117".into()),
+            host_id: "dcr-test-pc".into(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         // camelCase 字段名
@@ -746,6 +848,9 @@ mod tests {
         assert!(json.contains("\"hostPort\""));
         assert!(json.contains("\"peers\""));
         assert!(json.contains("\"addr\""));
+        assert!(json.contains("\"signalServer\""));
+        assert!(json.contains("\"relayServer\""));
+        assert!(json.contains("\"hostId\""));
 
         // serde roundtrip 后内容一致
         let back: AppConfig = serde_json::from_str(&json).unwrap();
@@ -754,6 +859,16 @@ mod tests {
         assert_eq!(back.peers.len(), 1);
         assert_eq!(back.peers[0].addr, "192.168.1.5:21118");
         assert_eq!(back.peers[0].platform.as_deref(), Some("windows"));
+        assert_eq!(back.signal_server.as_deref(), Some("signal.example.com:21116"));
+        assert_eq!(back.relay_server.as_deref(), Some("relay.example.com:21117"));
+        assert_eq!(back.host_id, "dcr-test-pc");
+
+        // 旧配置(缺新字段)反序列化应回退到默认值
+        let old = r#"{"hostEnabled":true,"hostPort":21118,"peers":[]}"#;
+        let back: AppConfig = serde_json::from_str(old).unwrap();
+        assert!(back.signal_server.is_none());
+        assert!(back.relay_server.is_none());
+        assert!(!back.host_id.is_empty(), "host_id 应有默认值");
     }
 }
 
