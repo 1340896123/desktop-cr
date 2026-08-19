@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { makeStyles } from '@fluentui/react-components';
 import {
   RocketRegular,
@@ -9,8 +9,17 @@ import {
   DragRegular,
   EditRegular,
   ChevronDownRegular,
+  DesktopRegular,
+  LinkRegular,
+  PlayRegular,
+  StopRegular,
+  PersonRegular,
+  AddRegular,
+  DeleteRegular,
 } from '@fluentui/react-icons';
 import { palette, fontFamily, spacing, radius, shadow } from '../theme/tokens';
+import { startHost, stopHost, isHostRunning, onHostStateChange, type HostState } from '../services/connection';
+import { getAppConfig, saveAppConfig, genPeerId, type AppConfig } from '../services/config';
 
 const useStyles = makeStyles({
   page: {
@@ -190,6 +199,58 @@ const useStyles = makeStyles({
     color: palette.textMuted,
     display: 'flex',
   },
+  hostToggle: {
+    height: '30px',
+    padding: '0 14px',
+    border: 'none',
+    borderRadius: radius.control,
+    fontFamily,
+    fontSize: '13px',
+    fontWeight: 600,
+    color: '#fff',
+    backgroundColor: palette.primary,
+    cursor: 'pointer',
+    flexShrink: 0,
+
+    '&:hover': {
+      backgroundColor: palette.primaryHover,
+    },
+  },
+  peerFields: {
+    display: 'flex',
+    gap: '8px',
+    marginTop: '8px',
+    alignItems: 'center',
+  },
+  peerInput: {
+    flex: 1,
+    minWidth: 0,
+    height: '30px',
+    padding: '0 10px',
+    backgroundColor: palette.background,
+    border: `1px solid ${palette.borderLight}`,
+    borderRadius: radius.control,
+    fontFamily,
+    fontSize: '12px',
+    color: palette.textSecondary,
+    outline: 'none',
+    transition: 'border-color 150ms ease',
+
+    '&:focus': {
+      border: `1px solid ${palette.primary}`,
+    },
+  },
+  errorText: {
+    fontFamily,
+    fontSize: '12px',
+    color: palette.destructive,
+    marginTop: '6px',
+  },
+  noticeText: {
+    fontFamily,
+    fontSize: '13px',
+    color: palette.primary,
+  },
 });
 
 const useSwitchStyles = makeStyles({
@@ -266,10 +327,6 @@ const settings: Record<string, { title: string; desc?: string; icon: React.React
     { title: '发送 Ctrl 组合键到远端', icon: <RocketRegular fontSize={16} /> },
     { title: '将 Win 键发送到远端', icon: <PowerRegular fontSize={16} /> },
   ],
-  网络: [
-    { title: '使用中继服务器（UDP Relay）', icon: <ArrowSyncRegular fontSize={16} /> },
-    { title: '优先使用 TCP 直连', icon: <DragRegular fontSize={16} /> },
-  ],
 };
 
 function ShieldRegularIcon() {
@@ -282,9 +339,20 @@ function ShieldRegularIcon() {
 
 type TabKey = '常规' | '安全' | '键盘' | '网络';
 
+/** 校验对端地址格式 host:port（IPv4 / hostname，端口 1..65535） */
+function isValidPeerAddr(addr: string): boolean {
+  const match = addr.match(
+    /^([0-9]{1,3}(?:\.[0-9]{1,3}){3}|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*):([0-9]{1,5})$/,
+  );
+  if (!match) return false;
+  const port = Number(match[2]);
+  return port >= 1 && port <= 65535;
+}
+
 /**
- * 截图「设置」界面：左侧为应用导航（App 侧边栏），右侧为设置内容区，
- * 顶部「常规/安全/键盘/网络」标签页 + 卡片式设置项（开关/路径/下拉）。
+ * 设置界面：顶部「常规/安全/键盘/网络」标签页 + 卡片式设置项。
+ * 「网络」tab 为真实功能（被控端模式 + 对端设备列表，读写持久化配置），
+ * 其余 tab 保持静态展示。
  */
 export const SettingsPage: React.FC = () => {
   const styles = useStyles();
@@ -303,7 +371,102 @@ export const SettingsPage: React.FC = () => {
     tcp: false,
   });
 
+  const [config, setConfig] = useState<AppConfig | null>(null);
+  const [hostState, setHostState] = useState<HostState>({ running: false, port: 0 });
+  const [hostError, setHostError] = useState<string | null>(null);
+  const [portInput, setPortInput] = useState('21118');
+  const [newPeerName, setNewPeerName] = useState('');
+  const [newPeerAddr, setNewPeerAddr] = useState('');
+  const [peerError, setPeerError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
   const toggle = (key: string) => setToggles((prev) => ({ ...prev, [key]: !prev[key] }));
+
+  // 进入页面时加载配置 + 被控端状态，并订阅 host-state 事件
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      const cfg = await getAppConfig();
+      setConfig(cfg);
+      setPortInput(String(cfg.hostPort));
+    })();
+    void isHostRunning().then((running) => setHostState((prev) => ({ ...prev, running })));
+    void onHostStateChange((state) => setHostState(state)).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
+
+  // 配置变更后防抖持久化
+  useEffect(() => {
+    if (!config) return;
+    const timer = window.setTimeout(() => {
+      void saveAppConfig(config);
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [config]);
+
+  // 操作提示自动清除
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(null), 2500);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  const toggleHostEnabled = () => {
+    setConfig((prev) => (prev ? { ...prev, hostEnabled: !prev.hostEnabled } : prev));
+  };
+
+  const toggleHost = async () => {
+    setHostError(null);
+    if (hostState.running) {
+      try {
+        await stopHost();
+      } catch (error) {
+        setHostError(String(error));
+      }
+      return;
+    }
+    const port = Number(portInput);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      setHostError('端口需在 1..65535 之间');
+      return;
+    }
+    try {
+      await startHost(port);
+    } catch (error) {
+      setHostError(`启动被控端失败: ${String(error)}`);
+    }
+  };
+
+  const addPeer = () => {
+    const name = newPeerName.trim();
+    const addr = newPeerAddr.trim();
+    if (!name) {
+      setPeerError('请输入设备名称');
+      return;
+    }
+    if (!isValidPeerAddr(addr)) {
+      setPeerError('地址格式应为 host:port（如 192.168.1.10:21118）');
+      return;
+    }
+    setConfig((prev) =>
+      prev ? { ...prev, peers: [...prev.peers, { id: genPeerId(), name, addr }] } : prev,
+    );
+    setNewPeerName('');
+    setNewPeerAddr('');
+    setPeerError(null);
+    setNotice('设备已添加并保存');
+  };
+
+  const deletePeer = (id: string) => {
+    setConfig((prev) =>
+      prev ? { ...prev, peers: prev.peers.filter((p) => p.id !== id) } : prev,
+    );
+    setNotice('设备已删除并保存');
+  };
+
+  const hostPort = config?.hostPort ?? 21118;
 
   return (
     <div className={styles.page}>
@@ -429,7 +592,7 @@ export const SettingsPage: React.FC = () => {
         </>
       )}
 
-      {(tab === '安全' || tab === '键盘' || tab === '网络') && (
+      {(tab === '安全' || tab === '键盘') && (
         <div className={styles.card}>
           {(settings[tab] ?? []).map((row, idx) => (
             <React.Fragment key={row.title}>
@@ -445,6 +608,144 @@ export const SettingsPage: React.FC = () => {
             </React.Fragment>
           ))}
         </div>
+      )}
+
+      {tab === '网络' && (
+        <>
+          <div className={styles.card}>
+            <div className={styles.row}>
+              <span className={styles.rowIcon}>
+                <DesktopRegular fontSize={16} />
+              </span>
+              <div className={styles.rowBody}>
+                <div className={styles.rowTitle}>被控端模式（远程控制本机）</div>
+                <div className={styles.rowDesc}>监听指定端口，允许其他设备远程控制本机</div>
+              </div>
+            </div>
+            <div className={styles.rowDivider} />
+            <div className={styles.row}>
+              <span className={styles.rowIcon}>
+                <LinkRegular fontSize={16} />
+              </span>
+              <div className={styles.rowBody}>
+                <div className={styles.rowTitle}>端口</div>
+                <div className={styles.rowDesc}>范围 1..65535，默认 21118</div>
+              </div>
+              <input
+                type="number"
+                className={styles.pathInput}
+                style={{ width: 120 }}
+                value={portInput}
+                min={1}
+                max={65535}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  setPortInput(raw);
+                  const v = Number(raw);
+                  if (Number.isInteger(v) && v >= 1 && v <= 65535) {
+                    setConfig((prev) => (prev ? { ...prev, hostPort: v } : prev));
+                  }
+                }}
+              />
+            </div>
+            <div className={styles.rowDivider} />
+            <div className={styles.row}>
+              <span className={styles.rowIcon}>
+                {hostState.running ? <StopRegular fontSize={16} /> : <PlayRegular fontSize={16} />}
+              </span>
+              <div className={styles.rowBody}>
+                <div className={styles.rowTitle}>
+                  {hostState.running
+                    ? `运行中 · 端口 ${hostState.port || hostPort}`
+                    : '未运行'}
+                </div>
+              </div>
+              <button
+                type="button"
+                className={styles.hostToggle}
+                style={hostState.running ? { backgroundColor: palette.destructive } : undefined}
+                onClick={() => void toggleHost()}
+              >
+                {hostState.running ? '停止被控端' : '启动被控端'}
+              </button>
+            </div>
+            {hostError && <div className={styles.errorText}>{hostError}</div>}
+            <div className={styles.rowDivider} />
+            <div className={styles.row}>
+              <span className={styles.rowIcon}>
+                <RocketRegular fontSize={16} />
+              </span>
+              <div className={styles.rowBody}>
+                <div className={styles.rowTitle}>退出后保持被控端运行</div>
+                <div className={styles.rowDesc}>当前仅持久化到配置，不实现系统级自启</div>
+              </div>
+              <ToggleSwitch on={config?.hostEnabled ?? false} onChange={() => toggleHostEnabled()} />
+            </div>
+          </div>
+
+          <div className={styles.card}>
+            <div className={styles.row}>
+              <span className={styles.rowIcon}>
+                <PersonRegular fontSize={16} />
+              </span>
+              <div className={styles.rowBody}>
+                <div className={styles.rowTitle}>设备列表（远程桌面对端）</div>
+                <div className={styles.rowDesc}>配置可远程控制的对端设备，保存后生效</div>
+              </div>
+            </div>
+            <div className={styles.rowDivider} />
+            {(config?.peers ?? []).map((peer) => (
+              <React.Fragment key={peer.id}>
+                <div className={styles.row}>
+                  <div className={styles.rowBody}>
+                    <div className={styles.rowTitle}>{peer.name}</div>
+                    <div className={styles.rowDesc}>{peer.addr}</div>
+                  </div>
+                  <button
+                    type="button"
+                    className={styles.pathIconBtn}
+                    onClick={() => deletePeer(peer.id)}
+                    aria-label="删除设备"
+                  >
+                    <DeleteRegular fontSize={14} />
+                  </button>
+                </div>
+                <div className={styles.rowDivider} />
+              </React.Fragment>
+            ))}
+            {(config?.peers ?? []).length === 0 && (
+              <div className={styles.row}>
+                <div className={styles.rowDesc}>暂无对端设备，请在下方向添加</div>
+              </div>
+            )}
+            <div className={styles.rowDivider} />
+            <div className={styles.row}>
+              <div className={styles.rowBody}>
+                <div className={styles.rowTitle}>添加设备</div>
+                <div className={styles.peerFields}>
+                  <input
+                    className={styles.peerInput}
+                    placeholder="名称"
+                    value={newPeerName}
+                    onChange={(e) => setNewPeerName(e.target.value)}
+                  />
+                  <input
+                    className={styles.peerInput}
+                    placeholder="host:port"
+                    value={newPeerAddr}
+                    onChange={(e) => setNewPeerAddr(e.target.value)}
+                  />
+                  <button type="button" className={styles.pathIconBtn} onClick={addPeer} aria-label="添加设备">
+                    <AddRegular fontSize={14} />
+                  </button>
+                </div>
+                {peerError && <div className={styles.errorText}>{peerError}</div>}
+              </div>
+            </div>
+          </div>
+
+          {notice && <div className={styles.noticeText}>{notice}</div>}
+        </>
       )}
     </div>
   );

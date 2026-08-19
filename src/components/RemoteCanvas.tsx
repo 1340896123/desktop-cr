@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { makeStyles, tokens } from '@fluentui/react-components';
 import { sendKeyEvent, sendMouseEvent, type MouseInputPayload } from '../services/input';
-import { onFrame } from '../services/capture';
+import { onFrame, onRemoteFrame } from '../services/capture';
 
 const useStyles = makeStyles({
   container: {
@@ -49,6 +49,8 @@ interface RemoteCanvasProps {
   remoteHeight: number;
   /** 渲染模式：canvas 兼容模式 / video 高帧率模式 */
   mode?: 'canvas' | 'video';
+  /** 画面数据源：local = 本机抓帧预览（capture-frame），remote = 远程画面（remote-frame） */
+  streamSource?: 'local' | 'remote';
 }
 
 /**
@@ -56,18 +58,20 @@ interface RemoteCanvasProps {
  * 监听 pointer / key / wheel 事件，按 README 第 4 节公式做坐标归一化：
  *   X_remote = x * W_remote / W_css
  *   Y_remote = y * H_remote / H_css
+ * 帧渲染：收到的帧为 JPEG 字节数组，经 Blob → createImageBitmap → drawImage 绘制。
  */
 export const RemoteCanvas: React.FC<RemoteCanvasProps> = ({
   connected,
   remoteWidth,
   remoteHeight,
   mode = 'canvas',
+  streamSource = 'local',
 }) => {
   const styles = useStyles();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [frameSize, setFrameSize] = useState({ width: remoteWidth, height: remoteHeight });
   const [live, setLive] = useState(false);
-  const latestFrameRef = useRef<ImageData | null>(null);
+  const latestBitmapRef = useRef<ImageBitmap | null>(null);
 
   const normalize = useCallback(
     (clientX: number, clientY: number) => {
@@ -178,37 +182,65 @@ export const RemoteCanvas: React.FC<RemoteCanvasProps> = ({
     setFrameSize({ width: remoteWidth, height: remoteHeight });
   }, [remoteWidth, remoteHeight]);
 
-  // 订阅抓帧事件：收到帧后立即绘制到画布，并以帧实际尺寸为准更新画布大小
+  // 订阅帧事件（本机 capture-frame 或远程 remote-frame）：JPEG 解码后异步绘制到画布。
+  // 异步绘制期间通过 disposed 标志避免竞态；新帧到来时关闭并替换旧 ImageBitmap。
   useEffect(() => {
     if (!connected || mode !== 'canvas') return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    void onFrame((frame) => {
+
+    const handleFrame = (frame: { width: number; height: number; jpeg: number[] }) => {
       if (disposed) return;
       const canvas = canvasRef.current;
       if (!canvas) return;
-      const imageData = new ImageData(
-        new Uint8ClampedArray(frame.rgba),
-        frame.width,
-        frame.height,
-      );
-      latestFrameRef.current = imageData;
       setLive(true);
       setFrameSize((prev) =>
         prev.width === frame.width && prev.height === frame.height
           ? prev
           : { width: frame.width, height: frame.height },
       );
-      const ctx = canvas.getContext('2d');
-      if (ctx) ctx.putImageData(imageData, 0, 0);
-    }).then((fn) => {
+      void (async () => {
+        let bitmap: ImageBitmap | undefined;
+        try {
+          const blob = new Blob([new Uint8Array(frame.jpeg)], { type: 'image/jpeg' });
+          bitmap = await createImageBitmap(blob);
+        } catch {
+          return;
+        }
+        if (disposed) {
+          bitmap.close();
+          return;
+        }
+        const current = canvasRef.current;
+        const ctx = current?.getContext('2d');
+        if (!current || !ctx) {
+          bitmap.close();
+          return;
+        }
+        ctx.drawImage(bitmap, 0, 0, current.width, current.height);
+        const prev = latestBitmapRef.current;
+        if (prev) prev.close();
+        latestBitmapRef.current = bitmap;
+      })();
+    };
+
+    const subPromise =
+      streamSource === 'remote'
+        ? onRemoteFrame((frame) => handleFrame(frame))
+        : onFrame((frame) => handleFrame(frame));
+    void subPromise.then((fn) => {
       if (!disposed) unlisten = fn;
     });
     return () => {
       disposed = true;
       unlisten?.();
+      const prev = latestBitmapRef.current;
+      if (prev) {
+        prev.close();
+        latestBitmapRef.current = null;
+      }
     };
-  }, [connected, mode]);
+  }, [connected, mode, streamSource]);
 
   // 帧尺寸变化时 canvas 的 width/height 会被重置并清空，需要重绘最新一帧
   useEffect(() => {
@@ -216,9 +248,9 @@ export const RemoteCanvas: React.FC<RemoteCanvasProps> = ({
     if (!canvas || mode !== 'canvas') return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    const image = latestFrameRef.current;
-    if (image) {
-      ctx.putImageData(image, 0, 0);
+    const bitmap = latestBitmapRef.current;
+    if (bitmap) {
+      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
       return;
     }
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -284,10 +316,13 @@ export const RemoteCanvas: React.FC<RemoteCanvasProps> = ({
     );
   }
 
+  const overlayLabel = streamSource === 'remote' ? '远程画面 · Live' : '本机预览 · Live';
+
   return (
     <div className={styles.container}>
       <div className={styles.overlay}>
-        {frameSize.width}x{frameSize.height} · 已连接{live && <span className={styles.liveBadge}> · Live 模式</span>}
+        {frameSize.width}x{frameSize.height} · 已连接
+        {live && <span className={styles.liveBadge}> · {overlayLabel}</span>}
       </div>
       <canvas
         ref={canvasRef}

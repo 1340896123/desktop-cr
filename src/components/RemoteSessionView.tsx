@@ -17,7 +17,7 @@ import {
 } from '@fluentui/react-icons';
 import { palette, fontFamily, radius, zIndex } from '../theme/tokens';
 import { setFullscreen as requestFullscreen, setQuality, setResolution, syncClipboard } from '../services/connection';
-import { onFrame, startCapture, stopCapture } from '../services/capture';
+import { onRemoteFrame } from '../services/capture';
 import RemoteCanvas from './RemoteCanvas';
 
 const useStyles = makeStyles({
@@ -336,7 +336,7 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
   const [fps, setFps] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const timerRef = useRef<number | null>(null);
-  const lastFrameTimeRef = useRef(0);
+  const frameCountRef = useRef(0);
 
   useEffect(() => {
     timerRef.current = window.setInterval(() => setElapsed((prev) => prev + 1), 1000);
@@ -354,33 +354,24 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
 
   const selected = DISPLAYS.find((d) => d.id === displayId) ?? DISPLAYS[0];
 
-  // 抓帧生命周期：连接后按当前显示屏参数启动抓帧，切换显示屏 / 断开时先停后启
+  // 统计实时帧率：基于 remote-frame 事件计数（与 RemoteCanvas 内部的帧订阅互不冲突）。
+  // RemoteCanvas 负责绘制，这里只做每秒计数并刷新性能浮窗。
   useEffect(() => {
     if (!connected) return;
-    const monitorId = Number(displayId);
-    void startCapture({ monitorId, width: selected.width, height: selected.height, fps: 60 });
-    return () => {
-      void stopCapture();
-    };
-  }, [connected, displayId, selected.width, selected.height]);
-
-  // 统计实时帧率（与 RemoteCanvas 内部的帧订阅互不冲突）
-  useEffect(() => {
-    if (!connected) return;
+    frameCountRef.current = 0;
     let unlisten: (() => void) | undefined;
-    void onFrame(() => {
-      const now = performance.now();
-      const prev = lastFrameTimeRef.current;
-      lastFrameTimeRef.current = now;
-      if (prev === 0) return;
-      const instantFps = Math.round(1000 / (now - prev));
-      setFps((prevFps) => (prevFps === instantFps ? prevFps : instantFps));
+    void onRemoteFrame(() => {
+      frameCountRef.current += 1;
     }).then((fn) => {
       unlisten = fn;
     });
+    const interval = window.setInterval(() => {
+      setFps(frameCountRef.current);
+      frameCountRef.current = 0;
+    }, 1000);
     return () => {
-      lastFrameTimeRef.current = 0;
       unlisten?.();
+      window.clearInterval(interval);
     };
   }, [connected]);
 
@@ -445,7 +436,7 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
       </div>
 
       <div className={styles.canvasArea}>
-        <RemoteCanvas connected={connected} remoteWidth={selected.width} remoteHeight={selected.height} mode="canvas" />
+        <RemoteCanvas connected={connected} remoteWidth={selected.width} remoteHeight={selected.height} mode="canvas" streamSource="remote" />
 
         <div className={styles.perfOverlay}>
           <div className={styles.perfRow}>
