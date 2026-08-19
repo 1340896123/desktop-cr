@@ -3,13 +3,30 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isTauri } from './connection';
 
 /**
- * 一帧远程桌面画面（RGBA 原始像素，尺寸由 Rust 端 clamp 到 ≤ 480x270）。
+ * 一帧本机抓屏画面（JPEG 字节数组，Rust 端将 DXGI 帧编码为 JPEG 后推送）。
  */
 export interface CapturedFrame {
   monitorId: number;
   width: number;
   height: number;
-  rgba: number[];
+  jpeg: number[];
+}
+
+/** 显示器信息（真实枚举，IDD 虚拟屏以 isVirtual 标记） */
+export interface MonitorInfo {
+  id: number;
+  name: string;
+  width: number;
+  height: number;
+  isPrimary: boolean;
+  isVirtual: boolean;
+}
+
+/** 远程帧（来自被控端，经 LAN 协议解码后的 JPEG 字节） */
+export interface RemoteFrame {
+  width: number;
+  height: number;
+  jpeg: number[];
 }
 
 export interface StartCaptureOptions {
@@ -19,7 +36,7 @@ export interface StartCaptureOptions {
   fps?: number;
 }
 
-/** 开始抓取指定虚拟屏的画面流 */
+/** 开始抓取指定显示器的画面流 */
 export async function startCapture(options: StartCaptureOptions): Promise<void> {
   if (!isTauri()) {
     console.warn('[capture] 非 Tauri 环境，跳过开始抓帧', options);
@@ -40,6 +57,15 @@ export async function stopCapture(): Promise<void> {
     return;
   }
   await invoke('stop_capture');
+}
+
+/** 枚举本机所有显示器（真实 EnumDisplayDevicesW；浏览器模式返回空数组） */
+export async function listMonitors(): Promise<MonitorInfo[]> {
+  if (!isTauri()) {
+    console.warn('[capture] 非 Tauri 环境，返回空显示器列表');
+    return [];
+  }
+  return invoke<MonitorInfo[]>('list_monitors');
 }
 
 /**
@@ -65,7 +91,7 @@ export async function getFrame(monitorId: number): Promise<PulledFrame | null> {
   }
 }
 
-/** 订阅实时抓帧事件，返回取消订阅函数 */
+/** 订阅实时抓帧事件（capture-frame，本机预览），返回取消订阅函数 */
 export async function onFrame(handler: (frame: CapturedFrame) => void): Promise<UnlistenFn> {
   if (!isTauri()) {
     console.warn('[capture] 非 Tauri 环境，使用空事件源');
@@ -74,4 +100,15 @@ export async function onFrame(handler: (frame: CapturedFrame) => void): Promise<
     };
   }
   return listen<CapturedFrame>('capture-frame', (event) => handler(event.payload));
+}
+
+/** 订阅远程帧事件（remote-frame，来自被控端），返回取消订阅函数 */
+export async function onRemoteFrame(handler: (frame: RemoteFrame) => void): Promise<UnlistenFn> {
+  if (!isTauri()) {
+    console.warn('[capture] 非 Tauri 环境，使用空远程帧事件源');
+    return () => {
+      /* noop */
+    };
+  }
+  return listen<RemoteFrame>('remote-frame', (event) => handler(event.payload));
 }
