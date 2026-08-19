@@ -50,14 +50,14 @@ pub struct CapturedFrameEvent {
 /// 最新帧快照:未开始抓帧时为 None。
 static LATEST_FRAME: Mutex<Option<CapturedFrame>> = Mutex::new(None);
 
-/// 最新 H.264 硬件编码帧(宽, 高, Annex-B 字节, 是否关键帧)。仅供远端会话推帧。
-static LATEST_H264: Mutex<Option<(u32, u32, Vec<u8>, bool)>> = Mutex::new(None);
+/// 最新 FFmpeg 视频帧(H.264/H.265 Annex-B,宽, 高, 字节, 是否关键帧)。仅供远端会话推帧。
+static LATEST_VIDEO: Mutex<Option<(u32, u32, Vec<u8>, bool)>> = Mutex::new(None);
 
 /// 最近一帧 JPEG 编码耗时(毫秒,供远程性能统计)。
 static LATEST_ENCODE_DUR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// 最近一帧 H.264 硬件编码耗时(毫秒,供远程性能统计)。
-static LATEST_H264_DUR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// 最近一帧 FFmpeg 视频编码耗时(毫秒,供远程性能统计)。
+static LATEST_VIDEO_DUR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// 当前抓帧循环任务句柄:用于 stop_capture 取消循环。
 static CAPTURE_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
@@ -152,7 +152,7 @@ fn stop_capture_inner() {
     if let Ok(mut slot) = LATEST_FRAME.lock() {
         *slot = None;
     }
-    if let Ok(mut slot) = LATEST_H264.lock() {
+    if let Ok(mut slot) = LATEST_VIDEO.lock() {
         *slot = None;
     }
 }
@@ -184,9 +184,9 @@ pub fn latest_frame() -> Option<(u32, u32, Vec<u8>)> {
     Some((frame.width, frame.height, frame.data.clone()))
 }
 
-/// 供 host / 网络层拉取最新 H.264 帧:返回 (width, height, Annex-B 字节, 是否关键帧)。
-pub fn latest_h264() -> Option<(u32, u32, Vec<u8>, bool)> {
-    LATEST_H264.lock().ok()?.clone()
+/// 供 host / 网络层拉取最新 FFmpeg 视频帧(H.264/H.265):返回 (width, height, Annex-B 字节, 是否关键帧)。
+pub fn latest_video() -> Option<(u32, u32, Vec<u8>, bool)> {
+    LATEST_VIDEO.lock().ok()?.clone()
 }
 
 /// 最近一帧 JPEG 编码耗时(毫秒)。
@@ -194,9 +194,9 @@ pub fn latest_frame_dur_ms() -> u32 {
     LATEST_ENCODE_DUR.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// 最近一帧 H.264 硬件编码耗时(毫秒)。
-pub fn latest_h264_dur_ms() -> u32 {
-    LATEST_H264_DUR.load(std::sync::atomic::Ordering::Relaxed)
+/// 最近一帧 FFmpeg 视频编码耗时(毫秒)。
+pub fn latest_video_dur_ms() -> u32 {
+    LATEST_VIDEO_DUR.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// 按最大尺寸等比缩放(只缩小不放大),返回缩放后的 (宽, 高)。纯函数无平台依赖。
@@ -397,9 +397,9 @@ async fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String
 
     log::info!("[capture] DXGI 抓屏就绪: monitor {monitor_id}");
 
-    // H.264 硬件编码器(懒创建,分辨率/帧率变化时重建)
+    // FFmpeg 视频编码器(懒创建,分辨率/帧率/编码器变化时重建)
     let mut hw_enc: Option<crate::ffmpeg_hw::HwEncoder> = None;
-    let mut hw_key: Option<(u32, u32, u32, u32, u32)> = None;
+    let mut hw_key: Option<(u32, u32, u32, u32, u32, String)> = None;
     let mut hw_logged = false;
 
     let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
@@ -482,16 +482,26 @@ async fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String
         // 7) BGRA → RGB
         let rgb = bgra_to_rgb(&bgra, src_w, src_h);
 
-        // 7.5) H.264 硬件编码路径:流配置 codec=h264 且 FFmpeg DLL 可用时启用
-        let h264_active = cfg.codec == "h264" && crate::ffmpeg_hw::available();
-        if h264_active {
-            let key = (src_w, src_h, cfg.target_width, cfg.target_height, cfg.fps);
-            if hw_key != Some(key) {
-                // 分辨率/帧率变化 → 重建编码器(首帧请求关键帧)
-                let enc_name =
-                    crate::ffmpeg_hw::preferred_encoder().unwrap_or_else(|| "h264".to_string());
+        // 7.5) FFmpeg 视频编码路径(H.264/H.265):流配置 codec∈{h264,hevc} 且 FFmpeg DLL 可用时启用
+        let video_active =
+            (cfg.codec == "h264" || cfg.codec == "hevc") && crate::ffmpeg_hw::available();
+        if video_active {
+            let key = (
+                src_w,
+                src_h,
+                cfg.target_width,
+                cfg.target_height,
+                cfg.fps,
+                cfg.codec.clone(),
+            );
+            if hw_key.as_ref() != Some(&key) {
+                // 分辨率/帧率/编码器变化 → 重建编码器(首帧请求关键帧)
+                let family = cfg.codec.clone();
+                let enc_name = crate::ffmpeg_hw::preferred_encoder(&family)
+                    .unwrap_or_else(|| family.clone());
                 hw_enc = crate::ffmpeg_hw::HwEncoder::open(
                     &enc_name,
+                    crate::ffmpeg_hw::codec_family_id(&family),
                     src_w,
                     src_h,
                     cfg.target_width,
@@ -505,7 +515,7 @@ async fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String
                 }
                 if !hw_logged {
                     log::info!(
-                        "[capture] H.264 硬件编码启用: {} @ {}x{};{}",
+                        "[capture] FFmpeg 视频编码启用: {} ({family}) @ {}x{};{}",
                         enc_name,
                         hw_enc.as_ref().map(|e| e.dims().0).unwrap_or(0),
                         hw_enc.as_ref().map(|e| e.dims().1).unwrap_or(0),
@@ -515,19 +525,19 @@ async fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String
                 }
             }
             if let Some(enc) = hw_enc.as_mut() {
-                let h264_start = std::time::Instant::now();
+                let enc_start = std::time::Instant::now();
                 match enc.encode_rgb(&rgb) {
                     Ok(Some((ew, eh, data, is_key))) => {
-                        LATEST_H264_DUR.store(
-                            h264_start.elapsed().as_millis() as u32,
+                        LATEST_VIDEO_DUR.store(
+                            enc_start.elapsed().as_millis() as u32,
                             std::sync::atomic::Ordering::Relaxed,
                         );
-                        if let Ok(mut slot) = LATEST_H264.lock() {
+                        if let Ok(mut slot) = LATEST_VIDEO.lock() {
                             *slot = Some((ew, eh, data, is_key));
                         }
                     }
                     Ok(None) => {}
-                    Err(e) => log::warn!("[capture] H.264 编码失败: {e}"),
+                    Err(e) => log::warn!("[capture] FFmpeg 编码失败: {e}"),
                 }
             }
         } else {
@@ -537,9 +547,9 @@ async fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String
         }
 
         // 8) 缩放 + JPEG 编码(目标尺寸/画质来自流配置),记录编码耗时。
-        //    h264 激活时仅生成小尺寸预览图(供本地 capture-frame 面板),避免全尺寸 CPU 编码。
+        //    FFmpeg 视频编码激活时仅生成小尺寸预览图(供本地 capture-frame 面板),避免全尺寸 CPU 编码。
         let encode_start = std::time::Instant::now();
-        let (jw, jh, jpeg) = if h264_active {
+        let (jw, jh, jpeg) = if video_active {
             match rgb_to_jpeg(&rgb, src_w, src_h, 480, 270, 60) {
                 Ok(v) => v,
                 Err(e) => {

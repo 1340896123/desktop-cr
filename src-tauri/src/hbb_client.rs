@@ -137,13 +137,9 @@ pub fn register_config_dir(dir: PathBuf) {
     let _ = CONFIG_DIR.set(dir);
 }
 
-/// 当前流参数快照(供抓帧 / 推帧循环读取)。
-pub(crate) fn stream_cfg() -> StreamConfig {
-    STREAM_CFG.lock().unwrap_or_else(|e| e.into_inner()).clone()
-}
-
-/// 控制端流编码选择:本机 FFmpeg 可用(可解码 H.264)时首选 h264,否则 jpeg。
-fn stream_codec_choice() -> String {
+/// 控制端流编码选择(默认使用 FFmpeg):本机 FFmpeg 可用(可解码 H.264)时下发 h264,
+/// 否则 jpeg。H.265 为可选,默认 h264(兼容性与解码开销更优)。
+pub(crate) fn stream_codec_choice() -> String {
     #[cfg(target_os = "windows")]
     {
         if crate::ffmpeg_hw::available() {
@@ -151,6 +147,26 @@ fn stream_codec_choice() -> String {
         }
     }
     "jpeg".into()
+}
+
+/// 未协商时的默认编码:本机 FFmpeg 可用则 h264,否则 jpeg。
+fn default_codec_choice() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        if crate::ffmpeg_hw::available() {
+            return "h264".into();
+        }
+    }
+    "jpeg".into()
+}
+
+/// 当前流参数快照(供抓帧 / 推帧循环读取);codec 为空时解析为默认 FFmpeg 编码。
+pub(crate) fn stream_cfg() -> StreamConfig {
+    let mut cfg = STREAM_CFG.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if cfg.codec.is_empty() {
+        cfg.codec = default_codec_choice();
+    }
+    cfg
 }
 
 /// 应用被控端收到的流参数(控制端经协议下发,见 network::Msg::Stream)。
@@ -168,9 +184,13 @@ pub(crate) fn apply_stream_cfg(fps: u32, jpeg_quality: u8, width: u32, height: u
     if height > 0 {
         cfg.target_height = height.clamp(1, 1920);
     }
-    // codec 为空视为 jpeg(默认),仅接受已知值
-    if !codec.is_empty() {
-        cfg.codec = if codec == "h264" { "h264".into() } else { "jpeg".into() };
+    // codec 为空 → 默认 FFmpeg(h264 可用时);仅接受 jpeg/h264/hevc
+    if codec.is_empty() {
+        cfg.codec = default_codec_choice();
+    } else if matches!(codec.as_str(), "jpeg" | "h264" | "hevc") {
+        cfg.codec = codec;
+    } else {
+        cfg.codec = "jpeg".into();
     }
     log::info!(
         "[hbb_client] apply_stream_cfg: {}x{} @ {}fps, jpeg_quality={}, codec={}",

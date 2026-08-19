@@ -49,7 +49,7 @@ pub enum Msg {
         id: String,
     },
     /// 视频帧(jpeg 为 base64 编码;dur 为被控端编码耗时毫秒,用于性能统计;
-/// codec 为 "jpeg" | "h264",h264 时 jpeg 字段为 Annex-B 字节的 base64)。
+/// codec 为 "jpeg" | "h264" | "hevc",h264/hevc 时 jpeg 字段为 Annex-B 字节的 base64)。
     Frame {
         w: u32,
         h: u32,
@@ -636,10 +636,11 @@ async fn host_write_loop(
         let wait_ms = (1000u64 / u64::from(cfg.fps.clamp(1, 30))).max(1);
         let outgoing: Option<Msg> = tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(wait_ms)) => {
-                // 有最新帧才推送(没有帧则跳过本轮);codec 依流配置选 H.264 或 JPEG
-                let frame = if cfg.codec == "h264" {
-                    crate::capture::latest_h264()
-                        .map(|(w, h, data, key)| (w, h, data, "h264".to_string(), key))
+                // 有最新帧才推送(没有帧则跳过本轮);codec 依流配置选 FFmpeg 视频或 JPEG
+                let use_video = cfg.codec == "h264" || cfg.codec == "hevc";
+                let frame = if use_video {
+                    crate::capture::latest_video()
+                        .map(|(w, h, data, key)| (w, h, data, cfg.codec.clone(), key))
                         .or_else(|| {
                             crate::capture::latest_frame()
                                 .map(|(w, h, j)| (w, h, j, "jpeg".to_string(), false))
@@ -654,8 +655,8 @@ async fn host_write_loop(
                         h,
                         seq,
                         jpeg: base64::engine::general_purpose::STANDARD.encode(&data),
-                        dur: if codec == "h264" {
-                            crate::capture::latest_h264_dur_ms()
+                        dur: if use_video {
+                            crate::capture::latest_video_dur_ms()
                         } else {
                             crate::capture::latest_frame_dur_ms()
                         },
@@ -730,6 +731,20 @@ pub async fn connect_peer(
         peer_addr: addr.clone(),
         tx,
     });
+
+    // 3.5) 连接即下发当前流参数(codec 偏好等),使被控端默认走 FFmpeg 编码
+    {
+        let cfg = crate::hbb_client::stream_cfg();
+        let _ = session_send(Msg::Stream {
+            fps: cfg.fps,
+            jpeg_quality: cfg.jpeg_quality,
+            width: cfg.target_width,
+            height: cfg.target_height,
+            monitor: None,
+            codec: crate::hbb_client::stream_codec_choice(),
+        })
+        .await;
+    }
 
     // 4) 收消息循环(帧/剪贴板)+ 写通道循环(转发 session_send 的消息)
     let (read_half, write_half) = stream.into_split();
@@ -960,8 +975,8 @@ async fn peer_read_loop(
     peer_id: String,
     peer_addr: String,
 ) {
-    // H.264 解码器(懒创建,会话内复用)
-    let mut decoder: Option<crate::ffmpeg_hw::HwDecoder> = None;
+    // FFmpeg 解码器(懒创建,会话内复用;codec 变化时重建)
+    let mut decoder: Option<(String, crate::ffmpeg_hw::HwDecoder)> = None;
     let result: Result<(), String> = async {
         loop {
             let msg = read_msg(&mut read_half).await?;
@@ -978,9 +993,10 @@ async fn peer_read_loop(
                     // base64 解码后推送远程帧(携带序号与编码耗时供性能统计)
                     match base64::engine::general_purpose::STANDARD.decode(&jpeg) {
                         Ok(data) => {
-                            if codec == "h264" {
-                                // H.264 → 解码 → 缩放 → JPEG,前端渲染方式不变
-                                match decode_h264_to_jpeg(&mut decoder, &data, 1280, 720, 80) {
+                            if codec == "h264" || codec == "hevc" {
+                                // FFmpeg 解码(H.264/H.265)→ 缩放 → JPEG,前端渲染方式不变
+                                match decode_video_to_jpeg(&mut decoder, &codec, &data, 1280, 720, 80)
+                                {
                                     Some((dw, dh, jpeg_bytes)) => {
                                         let _ = app.emit(
                                             "remote-frame",
@@ -994,7 +1010,7 @@ async fn peer_read_loop(
                                         );
                                     }
                                     None => log::warn!(
-                                        "[network] H.264 帧解码失败(seq={seq}),跳过"
+                                        "[network] {codec} 帧解码失败(seq={seq}),跳过"
                                     ),
                                 }
                             } else {
@@ -1077,22 +1093,25 @@ async fn peer_write_loop(
     Ok(())
 }
 
-/// 将 H.264 Annex-B 帧解码为 JPEG(控制器端,供前端渲染)。
+/// 将 H.264/H.265 Annex-B 帧解码为 JPEG(控制器端,供前端渲染)。
 ///
-/// 内部复用会话级解码器;解码 → RGB24 → 等比缩放到 (max_w, max_h) → JPEG。
-fn decode_h264_to_jpeg(
-    decoder: &mut Option<crate::ffmpeg_hw::HwDecoder>,
+/// 内部复用会话级解码器(codec 变化时按 `codec_family_id` 重建);解码 → RGB24 →
+/// 等比缩放到 (max_w, max_h) → JPEG。
+fn decode_video_to_jpeg(
+    decoder: &mut Option<(String, crate::ffmpeg_hw::HwDecoder)>,
+    codec: &str,
     data: &[u8],
     max_w: u32,
     max_h: u32,
     quality: u8,
 ) -> Option<(u32, u32, Vec<u8>)> {
-    if decoder.is_none() {
-        if let Ok(d) = crate::ffmpeg_hw::HwDecoder::open() {
-            *decoder = Some(d);
+    let need_rebuild = decoder.as_ref().map(|(c, _)| c != codec).unwrap_or(true);
+    if need_rebuild {
+        if let Ok(d) = crate::ffmpeg_hw::HwDecoder::open(crate::ffmpeg_hw::codec_family_id(codec)) {
+            *decoder = Some((codec.to_string(), d));
         }
     }
-    let d = decoder.as_mut()?;
+    let (_, d) = decoder.as_mut()?;
     let (dw, dh, rgb) = d.decode(data).ok()??;
     let (jw, jh) = crate::capture::scale_dimensions(dw, dh, max_w, max_h);
     let (_, _, jpeg) = crate::capture::rgb_to_jpeg(&rgb, dw, dh, jw, jh, quality).ok()?;

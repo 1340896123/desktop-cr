@@ -6,7 +6,7 @@
 //!
 //! 能力探测(hwinfo 逻辑):
 //!   - `detect_gpus()`:DXGI 枚举适配器(厂商 ID/型号/显存),映射 NVIDIA/Intel/AMD
-//!   - `preferred_encoder()`:按 GPU 厂商优先选 h264_nvenc / h264_qsv / h264_amf,
+//!   - `preferred_encoder(family)`:按 GPU 厂商优先选 *_nvenc / *_qsv / *_amf,
 //!     软件回退 libopenh264 / h264;全部不可用返回 None → 调用方回退 JPEG。
 //!
 //! 编码:H.264 Annex-B(低延迟:无 B 帧 + LOW_DELAY + GOP 2s + 按需强制 IDR),
@@ -29,8 +29,9 @@ use libloading::{Library, Symbol};
 const AV_PIX_FMT_YUV420P: c_int = 0;
 /// AV_PIX_FMT_RGB24
 const AV_PIX_FMT_RGB24: c_int = 2;
-/// AV_CODEC_ID_H264
+/// AV_CODEC_ID_H264 / AV_CODEC_ID_HEVC(H.265)
 const AV_CODEC_ID_H264: c_int = 27;
+const AV_CODEC_ID_HEVC: c_int = 172;
 /// AV_PKT_FLAG_KEY
 const AV_PKT_FLAG_KEY: c_int = 0x0001;
 /// AV_CODEC_FLAG_LOW_DELAY (1 << 19)
@@ -151,6 +152,7 @@ struct AvRational {
 
 type FindEncByName = unsafe extern "C" fn(*const c_char) -> *const c_void;
 type FindDecoder = unsafe extern "C" fn(c_int) -> *const c_void;
+type FindDecoderByName = unsafe extern "C" fn(*const c_char) -> *const c_void;
 type AllocCtx3 = unsafe extern "C" fn(*const c_void) -> *mut c_void;
 type Open2 = unsafe extern "C" fn(*mut c_void, *const c_void, *mut *mut c_void) -> c_int;
 type SendFrame = unsafe extern "C" fn(*mut c_void, *const AvFrame) -> c_int;
@@ -206,6 +208,9 @@ static LIBS: OnceLock<Option<&'static Libs>> = OnceLock::new();
 struct Fns {
     avcodec_find_encoder_by_name: Symbol<'static, FindEncByName>,
     avcodec_find_decoder: Symbol<'static, FindDecoder>,
+    /// 仅用于诊断探针(硬件解码扩展预留)。
+    #[allow(dead_code)]
+    avcodec_find_decoder_by_name: Symbol<'static, FindDecoderByName>,
     avcodec_alloc_context3: Symbol<'static, AllocCtx3>,
     avcodec_open2: Symbol<'static, Open2>,
     avcodec_send_frame: Symbol<'static, SendFrame>,
@@ -245,6 +250,7 @@ fn build_fns() -> Option<&'static Fns> {
         Some(Box::leak(Box::new(Fns {
             avcodec_find_encoder_by_name: libs.avcodec.get(b"avcodec_find_encoder_by_name").ok()?,
             avcodec_find_decoder: libs.avcodec.get(b"avcodec_find_decoder").ok()?,
+            avcodec_find_decoder_by_name: libs.avcodec.get(b"avcodec_find_decoder_by_name").ok()?,
             avcodec_alloc_context3: libs.avcodec.get(b"avcodec_alloc_context3").ok()?,
             avcodec_open2: libs.avcodec.get(b"avcodec_open2").ok()?,
             avcodec_send_frame: libs.avcodec.get(b"avcodec_send_frame").ok()?,
@@ -433,7 +439,7 @@ pub fn encoder_available(name: &str) -> bool {
     unsafe { (f.avcodec_find_encoder_by_name)(name_c.as_ptr()) }.is_null() == false
 }
 
-/// 所有候选编码器及其可用性。
+/// 所有候选编码器及其可用性(H.264 + H.265)。
 pub fn detect_encoders() -> Vec<(&'static str, bool)> {
     [
         "h264_nvenc",
@@ -441,39 +447,62 @@ pub fn detect_encoders() -> Vec<(&'static str, bool)> {
         "h264_amf",
         "libopenh264",
         "h264",
+        "hevc_nvenc",
+        "hevc_qsv",
+        "hevc_amf",
+        "libx265",
+        "hevc",
     ]
     .iter()
     .map(|n| (*n, encoder_available(n)))
     .collect()
 }
 
-/// 按 GPU 厂商优先选择编码器(nvenc/qsv/amf → 软件回退)。
-pub fn preferred_encoder() -> Option<String> {
+/// 编码器家族 → AVCodecID。
+pub fn codec_family_id(codec: &str) -> c_int {
+    match codec {
+        "hevc" | "h265" => AV_CODEC_ID_HEVC,
+        _ => AV_CODEC_ID_H264,
+    }
+}
+
+/// 按 GPU 厂商优先选择编码器(nvenc/qsv/amf → 软件回退)。`family` 为 "h264" 或 "hevc"。
+pub fn preferred_encoder(family: &str) -> Option<String> {
+    let hw: [String; 3] = [
+        format!("{family}_nvenc"),
+        format!("{family}_qsv"),
+        format!("{family}_amf"),
+    ];
+    let sw: [&str; 2] = if family == "hevc" {
+        ["libx265", "hevc"]
+    } else {
+        ["libopenh264", "h264"]
+    };
+
     let gpus = detect_gpus();
     let has_nvidia = gpus.iter().any(|g| g.vendor_id == 0x10DE);
     let has_intel = gpus.iter().any(|g| g.vendor_id == 0x8086);
     let has_amd = gpus.iter().any(|g| matches!(g.vendor_id, 0x1002 | 0x1022));
 
-    let mut order: Vec<&'static str> = Vec::new();
+    let mut order: Vec<String> = Vec::new();
     if has_nvidia {
-        order.push("h264_nvenc");
+        order.push(hw[0].clone());
     }
     if has_intel {
-        order.push("h264_qsv");
+        order.push(hw[1].clone());
     }
     if has_amd {
-        order.push("h264_amf");
+        order.push(hw[2].clone());
     }
     if order.is_empty() {
         // 无厂商信息时按通用顺序探测
-        order.extend(["h264_nvenc", "h264_qsv", "h264_amf"]);
+        order.extend(hw.iter().cloned());
     }
-    order.push("libopenh264");
-    order.push("h264");
+    order.extend(sw.iter().map(|s| s.to_string()));
 
     for name in order {
-        if encoder_available(name) {
-            return Some(name.to_string());
+        if encoder_available(&name) {
+            return Some(name);
         }
     }
     None
@@ -497,15 +526,19 @@ pub fn capability_report() -> String {
         .map(|(n, _)| n.to_string())
         .collect();
     lines.push(format!("encoders=[{}]", encs.join(", ")));
-    lines.push(format!("preferred={:?}", preferred_encoder()));
+    lines.push(format!(
+        "preferred_h264={:?}; preferred_hevc={:?}",
+        preferred_encoder("h264"),
+        preferred_encoder("hevc")
+    ));
     lines.join("; ")
 }
 
 // ---------------------------------------------------------------------------
-// H.264 编码器
+// FFmpeg 编码器(H.264 / H.265)
 // ---------------------------------------------------------------------------
 
-/// FFmpeg H.264 编码器(RGB24 输入,Annex-B 输出)。单线程使用。
+/// FFmpeg 视频编码器(RGB24 输入,Annex-B 输出,支持 H.264/H.265)。单线程使用。
 pub struct HwEncoder {
     f: &'static Fns,
     ctx: *mut c_void,
@@ -525,11 +558,13 @@ pub struct HwEncoder {
 unsafe impl Send for HwEncoder {}
 
 impl HwEncoder {
-    /// 打开 H.264 编码器。`codec_name` 来自 `preferred_encoder()` 探测结果。
+    /// 打开视频编码器(H.264/H.265)。`codec_name` 来自 `preferred_encoder(family)` 探测结果,
+    /// `codec_id` 来自 `codec_family_id(family)`(H.264=27,H.265=173)。
     ///
     /// 输入为 RGB24,内部经 swscale 等比缩放到 (dst_w, dst_h)(不放大)。
     pub fn open(
         codec_name: &str,
+        codec_id: c_int,
         src_w: u32,
         src_h: u32,
         dst_w: u32,
@@ -560,7 +595,7 @@ impl HwEncoder {
                 return Err("avcodec_parameters_alloc 失败".to_string());
             }
             (*par).codec_type = 0; // AVMEDIA_TYPE_VIDEO
-            (*par).codec_id = AV_CODEC_ID_H264;
+            (*par).codec_id = codec_id;
             (*par).format = AV_PIX_FMT_YUV420P;
             (*par).width = dst_w as c_int;
             (*par).height = dst_h as c_int;
@@ -788,7 +823,7 @@ fn bitrate_for(w: u32, h: u32, fps: u32) -> u64 {
     bits.clamp(500_000, 8_000_000)
 }
 
-/// 应用厂商私有参数(尽力而为;失败静默忽略)。
+/// 应用厂商私有参数(尽力而为;失败静默忽略)。H.264 与 H.265 同厂商参数一致。
 fn apply_private_opts(f: &Fns, ctx: *mut c_void, codec_name: &str) {
     let set = |name: &str, val: &str| {
         let n = std::ffi::CString::new(name).unwrap();
@@ -796,23 +831,23 @@ fn apply_private_opts(f: &Fns, ctx: *mut c_void, codec_name: &str) {
         unsafe { (f.av_opt_set)(ctx, n.as_ptr(), v.as_ptr(), AV_OPT_SEARCH_CHILDREN) }
     };
     match codec_name {
-        "h264_nvenc" => {
+        "h264_nvenc" | "hevc_nvenc" => {
             // 低延迟:zero-latency 预设 p4 / llhq 二选一
             let _ = set("preset", "p4");
             let _ = set("tune", "ull");
             let _ = set("zerolatency", "1");
             let _ = set("rc", "vbr");
         }
-        "h264_qsv" => {
+        "h264_qsv" | "hevc_qsv" => {
             let _ = set("preset", "veryfast");
             let _ = set("low_power", "0");
         }
-        "h264_amf" => {
+        "h264_amf" | "hevc_amf" => {
             let _ = set("usage", "lowlatency");
             let _ = set("quality", "speed");
             let _ = set("rate_control", "cbr");
         }
-        "libopenh264" => {
+        "libopenh264" | "libx265" => {
             let _ = set("complexity", "low");
         }
         _ => {}
@@ -820,10 +855,10 @@ fn apply_private_opts(f: &Fns, ctx: *mut c_void, codec_name: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// H.264 解码器
+// FFmpeg 解码器(H.264 / H.265)
 // ---------------------------------------------------------------------------
 
-/// FFmpeg H.264 解码器(Annex-B 输入,RGB24 输出)。单线程使用。
+/// FFmpeg 视频解码器(Annex-B 输入,RGB24 输出,支持 H.264/H.265)。单线程使用。
 pub struct HwDecoder {
     f: &'static Fns,
     ctx: *mut c_void,
@@ -838,11 +873,11 @@ pub struct HwDecoder {
 unsafe impl Send for HwDecoder {}
 
 impl HwDecoder {
-    /// 打开 H.264 软件解码器(native h264,FFmpeg 全版本内置)。
-    pub fn open() -> Result<Self, String> {
+    /// 打开原生软件解码器。`codec_id` 来自 `codec_family_id()`(H.264=27,H.265=173)。
+    pub fn open(codec_id: c_int) -> Result<Self, String> {
         let f = fns().ok_or("FFmpeg DLL 未加载")?;
         unsafe {
-            let codec = (f.avcodec_find_decoder)(AV_CODEC_ID_H264);
+            let codec = (f.avcodec_find_decoder)(codec_id);
             if codec.is_null() {
                 return Err("未找到 h264 解码器".to_string());
             }
@@ -1056,7 +1091,11 @@ mod tests {
         for (n, ok) in &encs {
             println!("[ffmpeg] 编码器 {n}: {}", if *ok { "可用" } else { "不可用" });
         }
-        println!("[ffmpeg] 首选: {:?}", preferred_encoder());
+        println!(
+            "[ffmpeg] 首选 h264: {:?}; 首选 hevc: {:?}",
+            preferred_encoder("h264"),
+            preferred_encoder("hevc")
+        );
         assert!(available());
     }
 
@@ -1111,99 +1150,164 @@ mod tests {
         }
     }
 
-    /// 1080p H.264 硬件编码吞吐基准:连续编码 60 帧,报告帧率与单帧耗时(需 DLL,默认忽略)。
+    /// 1080p 硬件编码吞吐基准(H.264 与 H.265):连续编码 60 帧,报告帧率与单帧耗时(需 DLL,默认忽略)。
     #[test]
     #[ignore]
     fn ffmpeg_h264_benchmark() {
-        let codec = preferred_encoder().expect("无可用 H.264 编码器");
-        let (w, h) = (1920u32, 1080u32);
-        let mut rgb = Vec::with_capacity((w * h * 3) as usize);
-        for i in 0..(w * h) {
-            let x = i % w;
-            let y = i / w;
-            rgb.extend_from_slice(&[
-                (x % 256) as u8,
-                (y % 256) as u8,
-                ((x ^ y) % 256) as u8,
-            ]);
-        }
-        let mut enc = HwEncoder::open(&codec, w, h, 1920, 1080, 60).expect("打开编码器失败");
-        enc.request_keyframe();
+        for family in ["h264", "hevc"] {
+            let Some(codec) = preferred_encoder(family) else {
+                println!("[bench] {family} 无可用编码器,跳过");
+                continue;
+            };
+            let (w, h) = (1920u32, 1080u32);
+            let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+            for i in 0..(w * h) {
+                let x = i % w;
+                let y = i / w;
+                rgb.extend_from_slice(&[
+                    (x % 256) as u8,
+                    (y % 256) as u8,
+                    ((x ^ y) % 256) as u8,
+                ]);
+            }
+            let mut enc = HwEncoder::open(&codec, codec_family_id(family), w, h, 1920, 1080, 60)
+                .expect("打开编码器失败");
+            enc.request_keyframe();
 
-        let frames = 60u32;
-        let start = std::time::Instant::now();
-        let mut total_bytes = 0usize;
-        let mut key_count = 0u32;
-        for _ in 0..frames {
-            if let Some((_, _, data, key)) = enc.encode_rgb(&rgb).expect("编码失败") {
-                total_bytes += data.len();
-                if key {
-                    key_count += 1;
+            let frames = 60u32;
+            let start = std::time::Instant::now();
+            let mut total_bytes = 0usize;
+            let mut key_count = 0u32;
+            for _ in 0..frames {
+                if let Some((_, _, data, key)) = enc.encode_rgb(&rgb).expect("编码失败") {
+                    total_bytes += data.len();
+                    if key {
+                        key_count += 1;
+                    }
                 }
             }
+            let elapsed = start.elapsed().as_secs_f64();
+            let fps = frames as f64 / elapsed;
+            let avg_ms = elapsed * 1000.0 / frames as f64;
+            println!(
+                "[bench-{family}] {codec}: {frames} 帧 @ {w}x{h} 用时 {elapsed:.2}s → {fps:.1} fps,单帧 {avg_ms:.2} ms,输出 {total_bytes} B(≈{:.1} kbps),关键帧 {key_count} 个",
+                total_bytes as f64 * 8.0 * fps / 1000.0
+            );
+            assert!(fps > 10.0, "硬件编码帧率异常: {fps:.1}");
         }
-        let elapsed = start.elapsed().as_secs_f64();
-        let fps = frames as f64 / elapsed;
-        let avg_ms = elapsed * 1000.0 / frames as f64;
-        println!(
-            "[bench-h264] {codec}: {frames} 帧 @ {w}x{h} 用时 {elapsed:.2}s → {fps:.1} fps,单帧 {avg_ms:.2} ms,输出 {total_bytes} B(≈{:.1} kbps),关键帧 {key_count} 个",
-            total_bytes as f64 * 8.0 * fps / 1000.0
-        );
-        assert!(fps > 10.0, "硬件编码帧率异常: {fps:.1}");
     }
 
-    /// 真实编解码往返:合成 RGB → 硬件/软件 H.264 编码 → 解码 → 对比尺寸与内容(需 DLL,默认忽略)。
+    /// 探针:检查 H.265(HEVC)编解码器在本机 FFmpeg DLL 的可用性(默认忽略)。
+    #[test]
+    #[ignore]
+    fn ffmpeg_probe_hevc() {
+        let f = fns().expect("FFmpeg 未加载");
+        for name in [
+            "hevc_nvenc", "hevc_qsv", "hevc_amf", "libx265", "hevc", "hevc_cuvid", "hevc_d3d11va",
+        ] {
+            let c = std::ffi::CString::new(name).unwrap();
+            unsafe {
+                let enc = (f.avcodec_find_encoder_by_name)(c.as_ptr());
+                let dec = (f.avcodec_find_decoder_by_name)(c.as_ptr());
+                println!(
+                    "[probe-hevc] {name}: 编码={} 解码={}",
+                    !enc.is_null(),
+                    !dec.is_null()
+                );
+            }
+        }
+        unsafe {
+            println!(
+                "[probe-hevc] 原生 hevc 解码器(id=172): {:?}",
+                (f.avcodec_find_decoder)(172).is_null() == false
+            );
+        }
+        // 隔离测试:hevc_nvenc 直接 open2(不设参数)
+        unsafe {
+            let c = std::ffi::CString::new("hevc_nvenc").unwrap();
+            let codec = (f.avcodec_find_encoder_by_name)(c.as_ptr());
+            let mut ctx = (f.avcodec_alloc_context3)(codec);
+            let rc = (f.avcodec_open2)(ctx, codec, std::ptr::null_mut());
+            println!("[probe-hevc] hevc_nvenc 直接 open2: rc={rc}");
+            (f.avcodec_free_context)(&mut ctx);
+
+            // 经 parameters 设置 codec_id=173 后再 open2
+            let mut ctx2 = (f.avcodec_alloc_context3)(codec);
+            let mut par = (f.avcodec_parameters_alloc)();
+            (*par).codec_type = 0;
+            (*par).codec_id = 172;
+            (*par).format = 0;
+            (*par).width = 320;
+            (*par).height = 180;
+            (*par).bit_rate = 3_000_000;
+            let rc = (f.avcodec_parameters_to_context)(ctx2, par);
+            println!("[probe-hevc] params_to_ctx: rc={rc}");
+            (f.avcodec_parameters_free)(&mut par);
+            let rc = (f.avcodec_open2)(ctx2, codec, std::ptr::null_mut());
+            println!("[probe-hevc] hevc_nvenc params+open2: rc={rc}");
+            (f.avcodec_free_context)(&mut ctx2);
+        }
+    }
+
+    /// 真实编解码往返(需 DLL,默认忽略):H.264 与 H.265 各自编码 → 解码 → 校验。
     #[test]
     #[ignore]
     fn ffmpeg_h264_roundtrip() {
-        let codec = preferred_encoder().expect("无可用 H.264 编码器");
-        let (w, h) = (320u32, 180u32);
-        let mut rgb = Vec::with_capacity((w * h * 3) as usize);
-        for y in 0..h {
-            for x in 0..w {
-                // 渐变 + 色块,便于内容校验
-                let (r, g, b) = (
-                    ((x * 255 / w) as u8),
-                    ((y * 255 / h) as u8),
-                    (x.wrapping_mul(31) ^ y.wrapping_mul(17)) as u8,
-                );
-                rgb.extend_from_slice(&[r, g, b]);
-            }
-        }
-
-        let mut enc = HwEncoder::open(&codec, w, h, w, h, 30).expect("打开编码器失败");
-        enc.request_keyframe();
-        let mut all: Vec<u8> = Vec::new();
-        let mut got_key = false;
-        // 编 5 帧,保证拿到 IDR + 至少一帧内容
-        for _ in 0..5 {
-            match enc.encode_rgb(&rgb).expect("编码失败") {
-                Some((_, _, data, key)) => {
-                    all.extend_from_slice(&data);
-                    got_key |= key;
+        for family in ["h264", "hevc"] {
+            let Some(codec) = preferred_encoder(family) else {
+                println!("[roundtrip] {family} 无可用编码器,跳过");
+                continue;
+            };
+            let (w, h) = (320u32, 180u32);
+            let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+            for y in 0..h {
+                for x in 0..w {
+                    // 渐变 + 色块,便于内容校验
+                    let (r, g, b) = (
+                        ((x * 255 / w) as u8),
+                        ((y * 255 / h) as u8),
+                        (x.wrapping_mul(31) ^ y.wrapping_mul(17)) as u8,
+                    );
+                    rgb.extend_from_slice(&[r, g, b]);
                 }
-                None => {}
             }
-        }
-        assert!(!all.is_empty(), "编码无输出");
-        assert!(has_annexb_prefix(&all), "输出应含 Annex-B 起始码");
-        assert!(count_nalus(&all) >= 2, "应包含 SPS/PPS + 帧数据 NAL");
-        assert!(got_key, "应输出关键帧");
 
-        let mut dec = HwDecoder::open().expect("打开解码器失败");
-        let out = dec.decode(&all).expect("解码失败").expect("解码无输出");
-        let (dw, dh, rgb_out) = out;
-        assert_eq!((dw, dh), (w, h), "解码尺寸应一致");
+            let mut enc = HwEncoder::open(&codec, codec_family_id(family), w, h, w, h, 30)
+                .expect("打开编码器失败");
+            enc.request_keyframe();
+            let mut all: Vec<u8> = Vec::new();
+            let mut got_key = false;
+            // 编 5 帧,保证拿到 IDR + 至少一帧内容
+            for _ in 0..5 {
+                match enc.encode_rgb(&rgb).expect("编码失败") {
+                    Some((_, _, data, key)) => {
+                        all.extend_from_slice(&data);
+                        got_key |= key;
+                    }
+                    None => {}
+                }
+            }
+            assert!(!all.is_empty(), "{family} 编码无输出");
+            assert!(has_annexb_prefix(&all), "{family} 输出应含 Annex-B 起始码");
+            assert!(count_nalus(&all) >= 2, "{family} 应包含 SPS/PPS + 帧数据 NAL");
+            assert!(got_key, "{family} 应输出关键帧");
 
-        // 内容校验:整帧平均色差应远小于 128(编码/解码损失远小于信号)
-        let n = (dw * dh * 3) as usize;
-        let mut sum = 0u64;
-        for i in (0..n).step_by(97) {
-            let d = (rgb[i] as i32 - rgb_out[i] as i32).abs() as u64;
-            sum += d;
+            let mut dec = HwDecoder::open(codec_family_id(family)).expect("打开解码器失败");
+            let out = dec.decode(&all).expect("解码失败").expect("解码无输出");
+            let (dw, dh, rgb_out) = out;
+            assert_eq!((dw, dh), (w, h), "{family} 解码尺寸应一致");
+
+            // 内容校验:整帧平均色差应远小于 128(编码/解码损失远小于信号)
+            let n = (dw * dh * 3) as usize;
+            let mut sum = 0u64;
+            for i in (0..n).step_by(97) {
+                let d = (rgb[i] as i32 - rgb_out[i] as i32).abs() as u64;
+                sum += d;
+            }
+            let samples = ((n + 96) / 97) as u64;
+            let avg = sum / samples.max(1);
+            assert!(avg < 48, "{family} 解码内容偏差过大: {avg}");
+            println!("[roundtrip] {family}: {codec} 编码→解码 往返校验通过(平均色差 {avg})");
         }
-        let samples = ((n + 96) / 97) as u64;
-        let avg = sum / samples.max(1);
-        assert!(avg < 48, "解码内容偏差过大: {avg}");
     }
 }
