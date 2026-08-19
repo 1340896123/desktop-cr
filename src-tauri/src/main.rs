@@ -4,13 +4,26 @@
 mod capture;
 mod hbb_client;
 mod input_injector;
+mod network;
 mod virtual_display;
+
+use tauri::Manager;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     tauri::Builder::default()
+        .setup(|app| {
+            // 注册配置目录(供 hbb_client 持久化 config.json)
+            if let Ok(dir) = app.path().app_config_dir() {
+                hbb_client::register_config_dir(dir);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            // 应用配置
+            hbb_client::get_app_config,
+            hbb_client::save_app_config,
             // RustDesk 客户端封装
             hbb_client::list_devices,
             hbb_client::connect_to_device,
@@ -22,6 +35,10 @@ fn main() {
             hbb_client::get_clipboard_text,
             hbb_client::set_clipboard_text,
             hbb_client::sync_clipboard,
+            // 被控端管理
+            hbb_client::start_host,
+            hbb_client::stop_host,
+            hbb_client::is_host_running,
             // 虚拟显示器控制
             virtual_display::install_virtual_display_driver,
             virtual_display::add_virtual_monitor,
@@ -31,6 +48,7 @@ fn main() {
             input_injector::inject_mouse_event,
             input_injector::inject_key_event,
             // 屏幕抓取
+            capture::list_monitors,
             capture::start_capture,
             capture::stop_capture,
             capture::get_frame,

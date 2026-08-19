@@ -36,8 +36,9 @@ pub fn inject_mouse_event(
     }
 }
 
+/// Windows 平台真实鼠标注入(network 协议层也直接调用本函数)。
 #[cfg(target_os = "windows")]
-fn inject_mouse_event_windows(
+pub(crate) fn inject_mouse_event_windows(
     x: f64,
     y: f64,
     event_type: &str,
@@ -127,8 +128,9 @@ pub fn inject_key_event(
     }
 }
 
+/// Windows 平台真实键盘注入(network 协议层也直接调用本函数)。
 #[cfg(target_os = "windows")]
-fn inject_key_event_windows(
+pub(crate) fn inject_key_event_windows(
     key: &str,
     event_type: &str,
     code: Option<&str>,

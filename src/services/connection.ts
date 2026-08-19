@@ -38,6 +38,11 @@ export interface ClipboardData {
   format?: string;
 }
 
+export interface HostState {
+  running: boolean;
+  port: number;
+}
+
 const mockDevices: DeviceInfo[] = [
   { id: 'mock-01', name: 'Desktop-Office (Mock)', status: 'online', platform: 'windows' },
   { id: 'mock-02', name: 'NAS-Server (Mock)', status: 'offline', platform: 'linux' },
@@ -159,4 +164,44 @@ export async function onConnectionStateChange(
     };
   }
   return listen<ConnectionState>('connection-state', (event) => handler(event.payload));
+}
+
+/** 启动被控端服务（监听指定端口，供远程控制本机） */
+export async function startHost(port: number): Promise<void> {
+  if (!isTauri()) {
+    console.warn('[connection] 非 Tauri 环境，跳过启动被控端', { port });
+    return;
+  }
+  await invoke('start_host', { port });
+}
+
+/** 停止被控端服务 */
+export async function stopHost(): Promise<void> {
+  if (!isTauri()) {
+    console.warn('[connection] 非 Tauri 环境，跳过停止被控端');
+    return;
+  }
+  await invoke('stop_host');
+}
+
+/** 查询被控端是否在运行 */
+export async function isHostRunning(): Promise<boolean> {
+  if (!isTauri()) {
+    console.warn('[connection] 非 Tauri 环境，返回 false');
+    return false;
+  }
+  return invoke<boolean>('is_host_running');
+}
+
+/** 订阅被控端运行状态事件（host-state），返回取消订阅函数 */
+export async function onHostStateChange(
+  handler: (state: HostState) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) {
+    console.warn('[connection] 非 Tauri 环境，使用空事件源');
+    return () => {
+      /* noop */
+    };
+  }
+  return listen<HostState>('host-state', (event) => handler(event.payload));
 }
