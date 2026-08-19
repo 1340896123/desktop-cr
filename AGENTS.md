@@ -8,7 +8,7 @@ WinUI-style remote desktop client: **Tauri v2 + React 18 + Fluent UI React v9**.
 - `npm run build` — `tsc && vite build`; this is the only typecheck/lint gate. **No eslint, no test framework, no CI.** tsconfig is strict with `noUnusedLocals`/`noUnusedParameters` — unused code fails the build
 - `npm run tauri dev` / `npm run tauri build` — run/build the desktop app
 - `cargo check` / `cargo build` in `src-tauri/` — Rust side. Windows 专属依赖只在 `[target.'cfg(windows)'.dependencies]`(windows crate + 相关 features)
-- `cargo test` in `src-tauri/` — Rust 单元测试(Rust 无独立测试框架,用 `#[cfg(test)]` 内嵌于各模块;13 条:capture 缩放/BGRA、network 协议标签与 TCP framing 往返、hbb_client 配置与流参数、input_injector code→VK 映射、virtual_display 注册表值、operation_log 读写、media_pipeline 音视频合成链路)
+- `cargo test` in `src-tauri/` — Rust 单元测试(Rust 无独立测试框架,用 `#[cfg(test)]` 内嵌于各模块;18 条 + 8 ignored:capture 缩放/BGRA + DXGI 吞吐基准(ignored)、network 协议标签与 TCP framing 往返 + 文件传输状态机/全双工/速率基准、hbb_client 配置与流参数、input_injector code→VK 映射、virtual_display 注册表值、operation_log 读写、media_pipeline 音视频合成链路、ffmpeg_hw 编码往返/基准(ignored)、bench 实时链路基准(ignored))
 - `server/` — 独立 crate(信令/STUN/TURN 服务):`cargo build --release` 产出 `server/target/release/dcr-signal.exe`、`dcr-relay.exe`;`cargo test` 20 条(14 单元 + 6 集成 loopback)
 - `npm test` — vitest(vitest run),前端纯函数测试(src/utils/coords.ts、src/services/config.ts)
 - 验收标准 = `cargo check` 零警告(两处)+ `cargo test` 全过(两处)+ `npm run build` 零错误 + `npm test` 全过
@@ -24,6 +24,7 @@ WinUI-style remote desktop client: **Tauri v2 + React 18 + Fluent UI React v9**.
   - `input_injector.rs` — 真实 SendInput 鼠标/键盘注入(code→VK 全映射表)。
   - `operation_log.rs` — 操作日志持久化(`app_config_dir/logs/operations-YYYYMMDD.log`,按 UTC 日期轮转),命令 `get_operation_logs`,各模块关键操作经 `op_log` 写入。
   - `media_pipeline.rs` — 音视频全链路测试管道:采集(DXGI 单帧 / cpal WASAPI)→ 编码(JPEG / WAV)→ 传输(network.rs 真实 TCP framing loopback)→ 解码(image / hound)→ 存本地文件;命令 `run_media_pipeline_test`;`#[cfg(test)]` 用合成数据覆盖合成链路。
+  - `bench.rs` — 实时链路性能基准 `run_realtime_bench_command`(前端可调):模式 `loopback`(本机回环)或 `relay`(经公网中继 `relay_addr` 配对 host/client 透明通道),真实 DXGI 采集 → 缩放+JPEG 编码 → 协议帧发送 → 本机解码渲染,每秒输出实时帧率;静止桌面自动复用上一帧,无帧时回退合成动画帧(`synthetic=true` 直接跳过抓屏);`#[test] #[ignore]` 两个基准(回环 / 中继,`DCR_BENCH_RELAY` 环境变量指定中继地址,缺省 `120.78.77.248:21117`)。
 - `server/` — **独立 crate**(Windows 可运行 exe):
   - `dcr-signal.exe` — 信令 + STUN:TCP 21116 注册/心跳/查找/在线列表,连接断开自动注销;UDP 21115 RFC 5389 二进制 STUN Binding(XOR-MAPPED-ADDRESS)+ 不同源端口 NAT 探测 + `{"t":"stun"}` 调试;`--relay-hint` 下发中继地址。
   - `dcr-relay.exe` — TURN-like 中继:TCP 21117 `allocate {id,role}` 配对后双向字节透明转发(copy_bidirectional,上层 framing 透传);UDP 21119 `alloc-udp`/`data` 数据报转发。

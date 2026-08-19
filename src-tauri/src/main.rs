@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bench;
 mod capture;
 #[cfg(target_os = "windows")]
 mod ffmpeg_hw;
@@ -69,6 +70,8 @@ fn main() {
             capture::get_frame,
             // 音视频全链路测试
             media_pipeline::run_media_pipeline_test,
+            // 实时链路性能基准
+            bench::run_realtime_bench_command,
             // 操作日志
             operation_log::get_operation_logs,
         ])
