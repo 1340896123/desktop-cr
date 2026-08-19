@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { makeStyles } from '@fluentui/react-components';
 import {
   ArrowLeftRegular,
@@ -11,12 +11,24 @@ import {
   DocumentRegular,
   CheckmarkCircleFilled,
   DeleteRegular,
-  PauseRegular,
-  PlayRegular,
   DismissRegular,
   ImageRegular,
 } from '@fluentui/react-icons';
 import { palette, fontFamily, spacing, radius } from '../theme/tokens';
+import {
+  listDirectory,
+  getIncomingDir,
+  sendFile,
+  requestRemoteDir,
+  requestFilePull,
+  onFileProgress,
+  onRemoteDirectory,
+  type FileEntry,
+} from '../services/fileTransfer';
+import {
+  getConnectionState,
+  onConnectionStateChange,
+} from '../services/connection';
 
 const useStyles = makeStyles({
   page: {
@@ -41,6 +53,20 @@ const useStyles = makeStyles({
     color: palette.textPrimary,
     letterSpacing: '-0.02em',
     margin: 0,
+  },
+  connectHint: {
+    fontFamily,
+    fontSize: '13px',
+    color: palette.textMuted,
+    background: palette.muted,
+    borderRadius: radius.pill,
+    padding: '6px 14px',
+    maxWidth: '420px',
+    textAlign: 'center',
+  },
+  connectHintActive: {
+    color: '#1E7D43',
+    background: '#E7F7EC',
   },
   transferPanel: {
     display: 'flex',
@@ -117,6 +143,12 @@ const useStyles = makeStyles({
       backgroundColor: palette.muted,
       color: palette.textPrimary,
     },
+
+    '&:disabled': {
+      color: palette.textMuted,
+      cursor: 'not-allowed',
+      opacity: 0.5,
+    },
   },
   pathInputWrap: {
     flex: 1,
@@ -129,6 +161,16 @@ const useStyles = makeStyles({
     border: `1px solid ${palette.borderLight}`,
     borderRadius: radius.control,
     minWidth: 0,
+  },
+  pathInput: {
+    flex: 1,
+    minWidth: 0,
+    border: 'none',
+    outline: 'none',
+    background: 'transparent',
+    fontFamily,
+    fontSize: '12px',
+    color: palette.textSecondary,
   },
   pathText: {
     flex: 1,
@@ -242,6 +284,7 @@ const useStyles = makeStyles({
     border: `1px solid ${palette.borderLight}`,
     borderRadius: radius.card,
     overflow: 'hidden',
+    minHeight: '180px',
   },
   taskHeader: {
     display: 'flex',
@@ -304,20 +347,33 @@ const useStyles = makeStyles({
     },
   },
   taskName: {
-    flex: '1 1 30%',
+    flex: '1 1 28%',
     minWidth: 0,
     display: 'flex',
     alignItems: 'center',
     gap: '6px',
   },
   taskStatus: {
-    flex: '0 0 88px',
+    flex: '0 0 160px',
     display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
+    flexDirection: 'column',
+    gap: '3px',
     color: '#1E7D43',
     fontSize: '12px',
     fontWeight: 500,
+  },
+  progressTrack: {
+    width: '100%',
+    height: '4px',
+    borderRadius: radius.pill,
+    backgroundColor: palette.muted,
+    overflow: 'hidden',
+  },
+  progressBar: {
+    height: '100%',
+    borderRadius: radius.pill,
+    backgroundColor: palette.primary,
+    transition: 'width 120ms linear',
   },
   taskSize: {
     flex: '0 0 70px',
@@ -326,7 +382,7 @@ const useStyles = makeStyles({
     fontSize: '12px',
   },
   taskPath: {
-    flex: '1 1 24%',
+    flex: '1 1 20%',
     minWidth: 0,
     color: palette.textMuted,
     fontSize: '12px',
@@ -361,82 +417,62 @@ const useStyles = makeStyles({
   },
 });
 
-type FileKind = 'folder' | 'file';
-
-interface RemoteFile {
-  name: string;
-  kind: FileKind;
-  modified: string;
-  type: string;
-  size: string;
-}
-
-type TaskStatus = 'sent' | 'transferring' | 'paused' | 'failed';
-
 interface TransferTask {
+  /** 唯一键(direction:id),区分发送与接收两侧可能重号的 id */
+  key: string;
   id: number;
   name: string;
-  status: TaskStatus;
-  size: string;
+  direction: 'send' | 'recv';
+  status: 'transferring' | 'sent' | 'failed' | 'paused';
+  size: number;
+  received: number;
   sendPath: string;
   recvPath: string;
 }
 
-const localPath = 'F:\\desktop-cr\\client\\target\\release\\bundle\\nsis';
+/** 拉取类传输的 id 基准:与发送侧(1..n)和被控端推送(1..n)分区,避免冲突 */
+const PULL_ID_BASE = 1_000_000;
+let pullSeq = 0;
+const nextPullId = () => PULL_ID_BASE + pullSeq++;
 
-const remoteFiles: RemoteFile[] = [
-  { name: '.env.development.local', kind: 'file', modified: '2026-07-10 09:12', type: 'local', size: '1.03 KB' },
-  { name: '1、本报告书仅限企业每年向市场监管管理部门报送年度报告,并向...', kind: 'file', modified: '2026-07-15 11:30', type: 'txt', size: '4.71 KB' },
-  { name: '20260704培训', kind: 'folder', modified: '2026-07-04 15:20', type: '文件夹', size: '--' },
-  { name: '20260704培训.rar', kind: 'file', modified: '2026-07-04 15:22', type: 'rar', size: '39.70 MB' },
-  { name: '23年-26年度离职人员情况表.xlsx', kind: 'file', modified: '2026-07-13 09:45', type: 'xlsx', size: '13.53 KB' },
-  { name: 'Antigravity.lnk', kind: 'file', modified: '2026-07-02 17:08', type: '文件夹', size: '--' },
-  { name: 'Aras SetWorkflowPath.exe', kind: 'file', modified: '2026-06-28 14:02', type: 'exe', size: '149.05 MB' },
-  { name: 'Aras_AML执行结果_20260715_110008.csv', kind: 'file', modified: '2026-07-15 11:00', type: 'csv', size: '1.00 KB' },
-  { name: 'BOM位号修复脚本.txt', kind: 'file', modified: '2026-07-12 10:18', type: 'txt', size: '5.19 KB' },
-  { name: 'BOM导出20260629160406.zip', kind: 'file', modified: '2026-06-29 16:04', type: 'zip', size: '3.12 MB' },
-  { name: 'BOM导出20260702115629.zip', kind: 'file', modified: '2026-07-02 11:56', type: 'zip', size: '60.15 KB' },
-  { name: 'BOM导出20260714131525', kind: 'folder', modified: '2026-07-14 13:15', type: '文件夹', size: '--' },
-  { name: 'BOM导出20260714131838', kind: 'folder', modified: '2026-07-14 13:18', type: '文件夹', size: '--' },
-  { name: 'BOM搬转.json', kind: 'file', modified: '2026-07-09 16:41', type: 'json', size: '139.66 KB' },
-];
+const DEFAULT_PATH = 'C:\\';
 
-const remotePath = 'E:\\Desktop';
-const remoteName = 'AAAAA';
-
-const initialTasks: TransferTask[] = [
-  {
-    id: 1,
-    name: 'DesktopCR_0.1.0_x64-setup.exe',
-    status: 'sent',
-    size: '4.50 MB',
-    sendPath: '本机 F:\\desktop-cr\\client\\target\\release\\bundle\\nsis\\DesktopCR_0.1.0_x6...',
-    recvPath: '远端 E:\\Desktop',
-  },
-  {
-    id: 2,
-    name: '2025年终总结 - 廖宇杰.pptx',
-    status: 'sent',
-    size: '1.74 MB',
-    sendPath: '本机 E:\\Desktop\\2025年终总结 - 廖宇杰.pptx',
-    recvPath: '远端 E:\\Desktop',
-  },
-];
-
-function formatSize(size: string, kind: FileKind): string {
-  if (kind === 'folder') return '--';
-  return size;
+function joinPath(dir: string, name: string): string {
+  const sep = dir.includes('/') ? '/' : '\\';
+  return dir.endsWith(sep) ? dir + name : dir + sep + name;
 }
 
-const FileIcon: React.FC<{ kind: FileKind; type: string }> = ({ kind, type }) => {
-  if (kind === 'folder') {
+function parentDir(path: string): string {
+  const clean = path.replace(/[\\/]+$/, '');
+  const idx = Math.max(clean.lastIndexOf('\\'), clean.lastIndexOf('/'));
+  if (idx < 0) return clean + '\\';
+  return clean.slice(0, idx + 1);
+}
+
+function formatSize(bytes: number, isDir: boolean): string {
+  if (isDir) return '--';
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+
+function formatDate(ms: number | null): string {
+  if (ms === null) return '--';
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+const FileIcon: React.FC<{ isDir: boolean; ext: string }> = ({ isDir, ext }) => {
+  if (isDir) {
     return (
       <span style={{ color: '#F5A623', display: 'flex' }}>
         <FolderRegular fontSize={16} />
       </span>
     );
   }
-  if (type === 'png' || type === 'jpg' || type === 'webp') {
+  if (ext === 'png' || ext === 'jpg' || ext === 'jpeg' || ext === 'webp' || ext === 'gif') {
     return (
       <span style={{ color: '#5DA8FF', display: 'flex' }}>
         <ImageRegular fontSize={16} />
@@ -444,47 +480,232 @@ const FileIcon: React.FC<{ kind: FileKind; type: string }> = ({ kind, type }) =>
     );
   }
   return (
-    <span style={{ color: type === 'xlsx' ? '#1E7D43' : type === 'zip' || type === 'rar' ? '#D97706' : '#8A94A6', display: 'flex' }}>
+    <span
+      style={{
+        color:
+          ext === 'xlsx' || ext === 'xls'
+            ? '#1E7D43'
+            : ext === 'zip' || ext === 'rar' || ext === '7z'
+              ? '#D97706'
+              : '#8A94A6',
+        display: 'flex',
+      }}
+    >
       <DocumentRegular fontSize={16} />
     </span>
   );
 };
 
-/**
- * 截图「文件传输」界面：上部分为 本机/远端 双栏文件列表 + 双向发送按钮，
- * 下部分为传输任务列表（名称/状态/大小/发送路径/接收路径/操作）。
- */
 export const FileTransferPage: React.FC = () => {
   const styles = useStyles();
+  const [connected, setConnected] = useState(false);
+  const [incomingPath, setIncomingPath] = useState('');
+
+  // 本机面板
+  const [localPath, setLocalPath] = useState(DEFAULT_PATH);
+  const [localEntries, setLocalEntries] = useState<FileEntry[]>([]);
+  const [localHistory, setLocalHistory] = useState<string[]>([]);
   const [localSelected, setLocalSelected] = useState<Set<number>>(new Set());
+
+  // 远端面板
+  const [remotePath, setRemotePath] = useState(DEFAULT_PATH);
+  const [remoteEntries, setRemoteEntries] = useState<FileEntry[]>([]);
+  const [remoteError, setRemoteError] = useState<string | null>(null);
+  const [remoteHistory, setRemoteHistory] = useState<string[]>([]);
   const [remoteSelected, setRemoteSelected] = useState<Set<number>>(new Set());
-  const [tasks, setTasks] = useState<TransferTask[]>(initialTasks);
+  const remoteReqSeq = useRef(0);
 
-  const canSend = remoteSelected.size > 0 || localSelected.size > 0;
+  const [tasks, setTasks] = useState<TransferTask[]>([]);
 
-  const sendToRemote = () => {
-    if (remoteSelected.size === 0) return;
-    const names = remoteFiles.filter((_, i) => remoteSelected.has(i)).map((f) => f.name);
-    setTasks((prev) => [
-      ...names.map((name, idx) => ({
-        id: Date.now() + idx,
-        name,
-        status: 'sent' as TaskStatus,
-        size: '--',
-        sendPath: `远端 ${remotePath}`,
-        recvPath: '本机 (目标)',
-      })),
-      ...prev,
-    ]);
-    setRemoteSelected(new Set());
+  const refreshLocal = useCallback(async (path: string) => {
+    try {
+      setLocalEntries(await listDirectory(path));
+    } catch (error) {
+      console.error('[file-transfer] 读取本机目录失败', error);
+      setLocalEntries([]);
+    }
+  }, []);
+
+  const refreshRemote = useCallback(async (path: string) => {
+    const seq = ++remoteReqSeq.current;
+    setRemoteError(null);
+    try {
+      await requestRemoteDir(path);
+    } catch (error) {
+      console.error('[file-transfer] 请求远端目录失败', error);
+      if (remoteReqSeq.current === seq) setRemoteError(String(error));
+    }
+  }, []);
+
+  useEffect(() => {
+    void getConnectionState().then((s) => setConnected(s.connected));
+    void getIncomingDir().then(setIncomingPath);
+    void refreshLocal(DEFAULT_PATH);
+    if (connected) void refreshRemote(DEFAULT_PATH);
+
+    let unlistenProgress: (() => void) | undefined;
+    let unlistenRemote: (() => void) | undefined;
+    let unlistenConn: (() => void) | undefined;
+
+    void onFileProgress((p) => {
+      const key = `${p.direction}:${p.id}`;
+      setTasks((prev) => {
+        const idx = prev.findIndex((t) => t.key === key);
+        if (idx < 0) {
+          // 新接收/推送:任务尚不存在则创建
+          const isRecv = p.direction === 'recv';
+          return [
+            {
+              key,
+              id: p.id,
+              name: p.name ?? `文件-${p.id}`,
+              direction: p.direction,
+              status: 'transferring',
+              size: p.total,
+              received: p.received,
+              sendPath: isRecv ? '远端' : '本机',
+              recvPath: isRecv ? incomingPath : '远端',
+            },
+            ...prev,
+          ];
+        }
+        return prev.map((t) =>
+          t.key === key
+            ? {
+                ...t,
+                size: p.total,
+                received: p.received,
+                status:
+                  p.received >= p.total && p.total > 0 ? 'sent' : 'transferring',
+              }
+            : t,
+        );
+      });
+    }).then((fn) => {
+      unlistenProgress = fn;
+    });
+
+    void onRemoteDirectory((dir) => {
+      if (dir.path !== remotePath) return;
+      setRemoteEntries(dir.entries);
+      setRemoteError(dir.error);
+    }).then((fn) => {
+      unlistenRemote = fn;
+    });
+
+    void onConnectionStateChange((s) => {
+      setConnected(s.connected);
+      if (s.connected) void refreshRemote(remotePath);
+    }).then((fn) => {
+      unlistenConn = fn;
+    });
+
+    return () => {
+      unlistenProgress?.();
+      unlistenRemote?.();
+      unlistenConn?.();
+    };
+  }, [refreshLocal, refreshRemote, remotePath, connected, incomingPath]);
+
+  const goLocal = (path: string, recordHistory: boolean) => {
+    if (recordHistory) setLocalHistory((prev) => [...prev, localPath]);
+    setLocalPath(path);
+    setLocalSelected(new Set());
+    void refreshLocal(path);
   };
 
-  const sendToLocal = () => {
-    if (localSelected.size === 0) return;
+  const goRemote = (path: string, recordHistory: boolean) => {
+    if (recordHistory) setRemoteHistory((prev) => [...prev, remotePath]);
+    setRemotePath(path);
+    setRemoteSelected(new Set());
+    void refreshRemote(path);
+  };
+
+  const localBack = () => {
+    setLocalHistory((prev) => {
+      if (prev.length === 0) return prev;
+      const next = [...prev];
+      const prevPath = next.pop()!;
+      setLocalPath(prevPath);
+      setLocalSelected(new Set());
+      void refreshLocal(prevPath);
+      return next;
+    });
+  };
+
+  const remoteBack = () => {
+    setRemoteHistory((prev) => {
+      if (prev.length === 0) return prev;
+      const next = [...prev];
+      const prevPath = next.pop()!;
+      setRemotePath(prevPath);
+      setRemoteSelected(new Set());
+      void refreshRemote(prevPath);
+      return next;
+    });
+  };
+
+  const canSendToRemote = connected && localSelected.size > 0;
+  const canPullToLocal = connected && remoteSelected.size > 0;
+
+  const sendToRemote = async () => {
+    const files = localEntries.filter((_, i) => localSelected.has(i)).filter((f) => !f.isDir);
+    if (files.length === 0) return;
+    for (const f of files) {
+      const full = joinPath(localPath, f.name);
+      try {
+        const id = await sendFile(full);
+        setTasks((prev) => [
+          {
+            key: `send:${id}`,
+            id,
+            name: f.name,
+            direction: 'send',
+            status: 'transferring',
+            size: f.size,
+            received: 0,
+            sendPath: full,
+            recvPath: '远端',
+          },
+          ...prev,
+        ]);
+      } catch (error) {
+        console.error(`[file-transfer] 发送 ${f.name} 失败`, error);
+      }
+    }
     setLocalSelected(new Set());
   };
 
-  const removeTask = (id: number) => setTasks((prev) => prev.filter((t) => t.id !== id));
+  const pullToLocal = async () => {
+    const files = remoteEntries.filter((_, i) => remoteSelected.has(i)).filter((f) => !f.isDir);
+    if (files.length === 0) return;
+    for (const f of files) {
+      const id = nextPullId();
+      const full = joinPath(remotePath, f.name);
+      try {
+        await requestFilePull(id, full);
+        setTasks((prev) => [
+          {
+            key: `recv:${id}`,
+            id,
+            name: f.name,
+            direction: 'recv',
+            status: 'transferring',
+            size: f.size,
+            received: 0,
+            sendPath: `远端 ${full}`,
+            recvPath: incomingPath,
+          },
+          ...prev,
+        ]);
+      } catch (error) {
+        console.error(`[file-transfer] 拉取 ${f.name} 失败`, error);
+      }
+    }
+    setRemoteSelected(new Set());
+  };
+
+  const removeTask = (key: string) => setTasks((prev) => prev.filter((t) => t.key !== key));
 
   const toggleSelect = (set: Set<number>, idx: number): Set<number> => {
     const next = new Set(set);
@@ -493,10 +714,19 @@ export const FileTransferPage: React.FC = () => {
     return next;
   };
 
+  const completedCount = useMemo(() => tasks.filter((t) => t.status === 'sent').length, [tasks]);
+
   return (
     <div className={styles.page}>
       <div className={styles.header}>
         <h1 className={styles.title}>文件传输</h1>
+        <span
+          className={connected ? `${styles.connectHint} ${styles.connectHintActive}` : styles.connectHint}
+        >
+          {connected
+            ? '已连接 · 支持双向并发传输'
+            : '未连接 · 请先进入远程会话后再传输文件'}
+        </span>
       </div>
 
       <div className={styles.transferPanel}>
@@ -504,16 +734,32 @@ export const FileTransferPage: React.FC = () => {
           <div className={styles.paneHeader}>
             <span className={styles.paneTitle}>我的电脑</span>
             <span className={`${styles.tag} ${styles.tagLocal}`}>本机</span>
-            <span className={styles.paneSub}>0 个已选</span>
+            <span className={styles.paneSub}>{localSelected.size} 个已选</span>
           </div>
           <div className={styles.pathBar}>
-            <button type="button" className={styles.pathIconBtn} aria-label="后退">
+            <button
+              type="button"
+              className={styles.pathIconBtn}
+              aria-label="后退"
+              disabled={localHistory.length === 0}
+              onClick={localBack}
+            >
               <ArrowLeftRegular fontSize={14} />
             </button>
-            <button type="button" className={styles.pathIconBtn} aria-label="向上一级">
+            <button
+              type="button"
+              className={styles.pathIconBtn}
+              aria-label="向上一级"
+              onClick={() => goLocal(parentDir(localPath), false)}
+            >
               <ArrowUpRegular fontSize={14} />
             </button>
-            <button type="button" className={styles.pathIconBtn} aria-label="刷新">
+            <button
+              type="button"
+              className={styles.pathIconBtn}
+              aria-label="刷新"
+              onClick={() => void refreshLocal(localPath)}
+            >
               <ArrowSyncRegular fontSize={14} />
             </button>
             <div className={styles.pathInputWrap}>
@@ -528,15 +774,37 @@ export const FileTransferPage: React.FC = () => {
               <span className={styles.colType}>类型</span>
               <span className={styles.colSize}>大小</span>
             </div>
-            <div className={styles.empty}>本目录为空</div>
+            {localEntries.map((file, idx) => (
+              <div
+                key={file.name}
+                className={
+                  localSelected.has(idx) ? `${styles.fileRow} ${styles.fileRowSelected}` : styles.fileRow
+                }
+                onClick={() => setLocalSelected((prev) => toggleSelect(prev, idx))}
+                onDoubleClick={() => {
+                  if (file.isDir) goLocal(joinPath(localPath, file.name), true);
+                }}
+              >
+                <span className={styles.colName}>
+                  <span className={styles.fileIcon}>
+                    <FileIcon isDir={file.isDir} ext={file.ext} />
+                  </span>
+                  <span className={styles.fileName}>{file.name}</span>
+                </span>
+                <span className={styles.colDate}>{formatDate(file.modifiedMs)}</span>
+                <span className={styles.colType}>{file.isDir ? '文件夹' : file.ext || '文件'}</span>
+                <span className={styles.colSize}>{formatSize(file.size, file.isDir)}</span>
+              </div>
+            ))}
+            {localEntries.length === 0 && <div className={styles.empty}>本目录为空</div>}
           </div>
         </div>
 
         <div className={styles.middle}>
           <button
             type="button"
-            className={canSend ? `${styles.transferBtn} ${styles.transferBtnActive}` : styles.transferBtn}
-            disabled={!canSend}
+            className={canSendToRemote ? `${styles.transferBtn} ${styles.transferBtnActive}` : styles.transferBtn}
+            disabled={!canSendToRemote}
             onClick={() => void sendToRemote()}
           >
             发送
@@ -544,9 +812,9 @@ export const FileTransferPage: React.FC = () => {
           </button>
           <button
             type="button"
-            className={canSend ? `${styles.transferBtn} ${styles.transferBtnActive}` : styles.transferBtn}
-            disabled={!canSend}
-            onClick={() => void sendToLocal()}
+            className={canPullToLocal ? `${styles.transferBtn} ${styles.transferBtnActive}` : styles.transferBtn}
+            disabled={!canPullToLocal}
+            onClick={() => void pullToLocal()}
           >
             <ArrowLeftFilled fontSize={12} />
             发送
@@ -556,17 +824,33 @@ export const FileTransferPage: React.FC = () => {
         <div className={styles.pane}>
           <div className={styles.paneHeader}>
             <span className={`${styles.tag} ${styles.tagRemote}`}>远端</span>
-            <span className={styles.paneTitle}>{remoteName}</span>
+            <span className={styles.paneTitle}>远程主机</span>
             <span className={styles.paneSub}>{remoteSelected.size} 个已选</span>
           </div>
           <div className={styles.pathBar}>
-            <button type="button" className={styles.pathIconBtn} aria-label="后退">
+            <button
+              type="button"
+              className={styles.pathIconBtn}
+              aria-label="后退"
+              disabled={remoteHistory.length === 0}
+              onClick={remoteBack}
+            >
               <ArrowLeftRegular fontSize={14} />
             </button>
-            <button type="button" className={styles.pathIconBtn} aria-label="向上一级">
+            <button
+              type="button"
+              className={styles.pathIconBtn}
+              aria-label="向上一级"
+              onClick={() => goRemote(parentDir(remotePath), false)}
+            >
               <ArrowUpRegular fontSize={14} />
             </button>
-            <button type="button" className={styles.pathIconBtn} aria-label="刷新">
+            <button
+              type="button"
+              className={styles.pathIconBtn}
+              aria-label="刷新"
+              onClick={() => void refreshRemote(remotePath)}
+            >
               <ArrowSyncRegular fontSize={14} />
             </button>
             <div className={styles.pathInputWrap}>
@@ -581,23 +865,35 @@ export const FileTransferPage: React.FC = () => {
               <span className={styles.colType}>类型</span>
               <span className={styles.colSize}>大小</span>
             </div>
-            {remoteFiles.map((file, idx) => (
-              <div
-                key={file.name}
-                className={remoteSelected.has(idx) ? `${styles.fileRow} ${styles.fileRowSelected}` : styles.fileRow}
-                onClick={() => setRemoteSelected((prev) => toggleSelect(prev, idx))}
-              >
-                <span className={styles.colName}>
-                  <span className={styles.fileIcon}>
-                    <FileIcon kind={file.kind} type={file.type} />
+            {!connected && <div className={styles.empty}>未连接,无法浏览远端目录</div>}
+            {connected && remoteError && <div className={styles.empty}>加载失败:{remoteError}</div>}
+            {connected &&
+              !remoteError &&
+              remoteEntries.map((file, idx) => (
+                <div
+                  key={file.name}
+                  className={
+                    remoteSelected.has(idx) ? `${styles.fileRow} ${styles.fileRowSelected}` : styles.fileRow
+                  }
+                  onClick={() => setRemoteSelected((prev) => toggleSelect(prev, idx))}
+                  onDoubleClick={() => {
+                    if (file.isDir) goRemote(joinPath(remotePath, file.name), true);
+                  }}
+                >
+                  <span className={styles.colName}>
+                    <span className={styles.fileIcon}>
+                      <FileIcon isDir={file.isDir} ext={file.ext} />
+                    </span>
+                    <span className={styles.fileName}>{file.name}</span>
                   </span>
-                  <span className={styles.fileName}>{file.name}</span>
-                </span>
-                <span className={styles.colDate}>{file.modified}</span>
-                <span className={styles.colType}>{file.type}</span>
-                <span className={styles.colSize}>{formatSize(file.size, file.kind)}</span>
-              </div>
-            ))}
+                  <span className={styles.colDate}>{formatDate(file.modifiedMs)}</span>
+                  <span className={styles.colType}>{file.isDir ? '文件夹' : file.ext || '文件'}</span>
+                  <span className={styles.colSize}>{formatSize(file.size, file.isDir)}</span>
+                </div>
+              ))}
+            {connected && !remoteError && remoteEntries.length === 0 && (
+              <div className={styles.empty}>本目录为空</div>
+            )}
           </div>
         </div>
       </div>
@@ -605,20 +901,8 @@ export const FileTransferPage: React.FC = () => {
       <div className={styles.taskSection}>
         <div className={styles.taskHeader}>
           <span className={styles.taskTitle}>传输列表</span>
-          <span className={styles.taskCount}>已传输 {tasks.length} 个文件</span>
+          <span className={styles.taskCount}>已完成 {completedCount} / {tasks.length}</span>
           <div className={styles.batchOps}>
-            <button type="button" className={styles.batchBtn}>
-              <PauseRegular fontSize={12} />
-              全部暂停
-            </button>
-            <button type="button" className={styles.batchBtn}>
-              <PlayRegular fontSize={12} />
-              全部开始
-            </button>
-            <button type="button" className={styles.batchBtn}>
-              <DismissRegular fontSize={12} />
-              全部取消
-            </button>
             <button
               type="button"
               className={styles.batchBtn}
@@ -626,6 +910,14 @@ export const FileTransferPage: React.FC = () => {
             >
               <CheckmarkCircleFilled fontSize={12} />
               清除完结任务
+            </button>
+            <button
+              type="button"
+              className={styles.batchBtn}
+              onClick={() => setTasks([])}
+            >
+              <DismissRegular fontSize={12} />
+              全部清除
             </button>
           </div>
         </div>
@@ -638,28 +930,48 @@ export const FileTransferPage: React.FC = () => {
             <span className={styles.taskPath}>接收路径</span>
             <span style={{ flex: '0 0 30px' }} />
           </div>
-          {tasks.map((task) => (
-            <div key={task.id} className={styles.taskRow}>
-              <span className={styles.taskName}>
-                <span className={styles.fileIcon}>
-                  <DocumentRegular fontSize={15} style={{ color: palette.textMuted }} />
+          {tasks.map((task) => {
+            const percent = task.size > 0 ? Math.min(100, Math.round((task.received / task.size) * 100)) : 0;
+            return (
+              <div key={task.key} className={styles.taskRow}>
+                <span className={styles.taskName}>
+                  <span className={styles.fileIcon}>
+                    <DocumentRegular fontSize={15} style={{ color: palette.textMuted }} />
+                  </span>
+                  <span className={styles.fileName}>{task.name}</span>
                 </span>
-                <span className={styles.fileName}>{task.name}</span>
-              </span>
-              <span className={styles.taskStatus}>
-                {task.status === 'sent' && <CheckmarkCircleFilled fontSize={14} />}
-                {task.status === 'sent' ? '已发送' : task.status}
-              </span>
-              <span className={styles.taskSize}>{task.size}</span>
-              <span className={styles.taskPath}>{task.sendPath}</span>
-              <span className={styles.taskPath}>{task.recvPath}</span>
-              <span style={{ flex: '0 0 30px' }}>
-                <button type="button" className={styles.taskDel} onClick={() => removeTask(task.id)} aria-label="删除任务">
-                  <DeleteRegular fontSize={14} />
-                </button>
-              </span>
-            </div>
-          ))}
+                <span className={styles.taskStatus}>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    {task.status === 'sent' && <CheckmarkCircleFilled fontSize={14} />}
+                    {task.status === 'sent' ? '已完成' : task.status === 'transferring' ? '传输中' : task.status}
+                  </span>
+                  {task.status === 'transferring' && (
+                    <span className={styles.progressTrack}>
+                      <span className={styles.progressBar} style={{ width: `${percent}%` }} />
+                    </span>
+                  )}
+                  {task.status === 'transferring' && (
+                    <span style={{ color: palette.textMuted, fontSize: '11px', fontWeight: 400 }}>
+                      {formatSize(task.received, false)} / {formatSize(task.size, false)}
+                    </span>
+                  )}
+                </span>
+                <span className={styles.taskSize}>{formatSize(task.size, false)}</span>
+                <span className={styles.taskPath}>{task.sendPath}</span>
+                <span className={styles.taskPath}>{task.recvPath}</span>
+                <span style={{ flex: '0 0 30px' }}>
+                  <button
+                    type="button"
+                    className={styles.taskDel}
+                    onClick={() => removeTask(task.key)}
+                    aria-label="删除任务"
+                  >
+                    <DeleteRegular fontSize={14} />
+                  </button>
+                </span>
+              </div>
+            );
+          })}
           {tasks.length === 0 && <div className={styles.empty}>暂无传输任务</div>}
         </div>
       </div>
