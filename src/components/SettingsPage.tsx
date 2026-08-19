@@ -20,6 +20,7 @@ import {
 import { palette, fontFamily, spacing, radius, shadow } from '../theme/tokens';
 import { startHost, stopHost, isHostRunning, onHostStateChange, type HostState } from '../services/connection';
 import { getAppConfig, saveAppConfig, genPeerId, type AppConfig } from '../services/config';
+import { getOperationLogs, type OperationLogEntry } from '../services/logs';
 
 const useStyles = makeStyles({
   page: {
@@ -251,6 +252,39 @@ const useStyles = makeStyles({
     fontSize: '13px',
     color: palette.primary,
   },
+  logHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '12px 16px',
+    borderBottom: `1px solid ${palette.borderLight}`,
+  },
+  logTitle: {
+    fontFamily,
+    fontSize: '14px',
+    fontWeight: 600,
+    color: palette.textPrimary,
+  },
+  logList: {
+    maxHeight: '360px',
+    overflowY: 'auto',
+    padding: '8px 16px',
+    fontFamily: 'monospace',
+    fontSize: '12px',
+    color: palette.textPrimary,
+  },
+  logRow: {
+    lineHeight: '20px',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  logEmpty: {
+    padding: '16px',
+    fontFamily,
+    fontSize: '13px',
+    color: palette.textMuted,
+  },
 });
 
 const useSwitchStyles = makeStyles({
@@ -337,7 +371,7 @@ function ShieldRegularIcon() {
   );
 }
 
-type TabKey = '常规' | '安全' | '键盘' | '网络';
+type TabKey = '常规' | '安全' | '键盘' | '网络' | '日志';
 
 /** 校验对端地址格式 host:port（IPv4 / hostname，端口 1..65535） */
 function isValidPeerAddr(addr: string): boolean {
@@ -349,10 +383,17 @@ function isValidPeerAddr(addr: string): boolean {
   return port >= 1 && port <= 65535;
 }
 
+/** 格式化日志时间：ISO 转「YYYY-MM-DD HH:mm:ss.mmm」，截断到毫秒 */
+function formatLogTime(time: string): string {
+  const s = time.replace('T', ' ').replace('Z', '');
+  const dotIndex = s.indexOf('.');
+  return dotIndex >= 0 ? s.slice(0, dotIndex + 4) : s;
+}
+
 /**
- * 设置界面：顶部「常规/安全/键盘/网络」标签页 + 卡片式设置项。
+ * 设置界面：顶部「常规/安全/键盘/网络/日志」标签页 + 卡片式设置项。
  * 「网络」tab 为真实功能（被控端模式 + 对端设备列表，读写持久化配置），
- * 其余 tab 保持静态展示。
+ * 「日志」tab 展示操作日志，其余 tab 保持静态展示。
  */
 export const SettingsPage: React.FC = () => {
   const styles = useStyles();
@@ -379,8 +420,21 @@ export const SettingsPage: React.FC = () => {
   const [newPeerAddr, setNewPeerAddr] = useState('');
   const [peerError, setPeerError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [logs, setLogs] = useState<OperationLogEntry[]>([]);
+  const [logsError, setLogsError] = useState<string | null>(null);
 
   const toggle = (key: string) => setToggles((prev) => ({ ...prev, [key]: !prev[key] }));
+
+  // 加载操作日志（最新在前）
+  const loadLogs = async () => {
+    setLogsError(null);
+    try {
+      const entries = await getOperationLogs(100);
+      setLogs(entries);
+    } catch (error) {
+      setLogsError(`加载操作日志失败: ${String(error)}`);
+    }
+  };
 
   // 进入页面时加载配置 + 被控端状态，并订阅 host-state 事件
   useEffect(() => {
@@ -394,6 +448,7 @@ export const SettingsPage: React.FC = () => {
     void onHostStateChange((state) => setHostState(state)).then((fn) => {
       unlisten = fn;
     });
+    void loadLogs();
     return () => unlisten?.();
   }, []);
 
@@ -473,7 +528,7 @@ export const SettingsPage: React.FC = () => {
       <h1 className={styles.title}>设置</h1>
 
       <div className={styles.tabs}>
-        {(['常规', '安全', '键盘', '网络'] as TabKey[]).map((t) => (
+        {(['常规', '安全', '键盘', '网络', '日志'] as TabKey[]).map((t) => (
           <button
             key={t}
             type="button"
@@ -746,6 +801,33 @@ export const SettingsPage: React.FC = () => {
 
           {notice && <div className={styles.noticeText}>{notice}</div>}
         </>
+      )}
+
+      {tab === '日志' && (
+        <div className={styles.card}>
+          <div className={styles.logHeader}>
+            <div className={styles.logTitle}>操作日志</div>
+            <button
+              type="button"
+              className={styles.pathIconBtn}
+              onClick={() => void loadLogs()}
+              aria-label="刷新日志"
+            >
+              <ArrowSyncRegular fontSize={14} />
+            </button>
+          </div>
+          {logsError && <div className={styles.errorText}>{logsError}</div>}
+          {logs.length === 0 && !logsError && <div className={styles.logEmpty}>暂无操作日志</div>}
+          {logs.length > 0 && (
+            <div className={styles.logList}>
+              {logs.map((entry, idx) => (
+                <div key={`${entry.time}-${idx}`} className={styles.logRow}>
+                  {formatLogTime(entry.time)} [{entry.module}] {entry.action} {entry.detail}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
