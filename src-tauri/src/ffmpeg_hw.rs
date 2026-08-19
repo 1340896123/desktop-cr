@@ -43,6 +43,12 @@ const SWS_BILINEAR: c_int = 2;
 /// AVERROR(EAGAIN) / AVERROR(EIO=EOF) —— Windows errno 与 POSIX 一致
 const AVERROR_EAGAIN: c_int = -11;
 const AVERROR_EOF: c_int = -5;
+/// AV_HWDEVICE_TYPE_D3D11VA(avutil/hwcontext.h:0=None,1=VDPAU,2=CUDA,3=VAAPI,4=DXVA2,5=QSV,6=VIDEOTOOLBOX,7=D3D11VA,...)
+const AV_HWDEVICE_TYPE_D3D11VA: c_int = 7;
+/// AV_PIX_FMT_D3D11(硬件帧像素格式,avutil/pixfmt.h 枚举序号 171,n8.0 逐项核对)
+const AV_PIX_FMT_D3D11: c_int = 171;
+/// AV_PIX_FMT_NV12(硬件帧拷贝回系统内存的格式,枚举序号 23)
+const AV_PIX_FMT_NV12: c_int = 23;
 
 /// FFmpeg 各主版本 DLL 文件名候选(新版本优先)。
 const AVCODEC_NAMES: &[&str] = &[
@@ -147,6 +153,143 @@ struct AvRational {
 }
 
 // ---------------------------------------------------------------------------
+// AVCodecContext 布局(n8.0 / avcodec-63,经 FFmpeg 官方头文件逐字段核算)
+// ---------------------------------------------------------------------------
+//
+// 硬件解码(RustDesk hwcodec 技术路线)需要设置 `codec_ctx->hw_device_ctx`,而该字段
+// 不是 AVOption,无法用 av_opt_* 写入,必须按 ABI 布局访问。FFmpeg 开源且每个 major
+// 版本 ABI 稳定,故直接按 n8.0 头文件转录前导字段(到 hw_device_ctx 为止),用
+// `#[repr(C)]` 结构体 + 编译期 offset_of 断言保证偏移正确;avcodec_version() 运行时
+// 校验 major==63,不符则整体回退软件解码,避免跨版本 ABI 错误。
+//
+// 关键偏移(x86_64 LP64):hw_frames_ctx=0x228, hw_device_ctx=0x230, hwaccel_flags=0x238。
+
+/// AVCodecContext 前导布局(n8.0),仅用于硬件解码时读写 hw_device_ctx / hw_frames_ctx。
+/// 字段依次转录自 n8.0 avcodec.h(顺序与官方一致,勿改动)。
+#[repr(C)]
+struct AvCodecContextLayout {
+    av_class: *const c_void,
+    log_level_offset: c_int,
+    codec_type: c_int,
+    codec: *const c_void,
+    codec_id: c_int,
+    codec_tag: u32,
+    priv_data: *mut c_void,
+    internal: *mut c_void,
+    opaque: *mut c_void,
+    bit_rate: i64,
+    flags: c_int,
+    flags2: c_int,
+    extradata: *mut u8,
+    extradata_size: c_int,
+    time_base: AvRational,
+    pkt_timebase: AvRational,
+    framerate: AvRational,
+    delay: c_int,
+    width: c_int,
+    height: c_int,
+    coded_width: c_int,
+    coded_height: c_int,
+    sample_aspect_ratio: AvRational,
+    pix_fmt: c_int,
+    sw_pix_fmt: c_int,
+    color_primaries: c_int,
+    color_trc: c_int,
+    colorspace: c_int,
+    color_range: c_int,
+    chroma_sample_location: c_int,
+    field_order: c_int,
+    refs: c_int,
+    has_b_frames: c_int,
+    slice_flags: c_int,
+    draw_horiz_band: *const c_void,
+    get_format: *const c_void,
+    max_b_frames: c_int,
+    b_quant_factor: f32,
+    b_quant_offset: f32,
+    i_quant_factor: f32,
+    i_quant_offset: f32,
+    lumi_masking: f32,
+    temporal_cplx_masking: f32,
+    spatial_cplx_masking: f32,
+    p_masking: f32,
+    dark_masking: f32,
+    nsse_weight: c_int,
+    me_cmp: c_int,
+    me_sub_cmp: c_int,
+    mb_cmp: c_int,
+    ildct_cmp: c_int,
+    dia_size: c_int,
+    last_predictor_count: c_int,
+    me_pre_cmp: c_int,
+    pre_dia_size: c_int,
+    me_subpel_quality: c_int,
+    me_range: c_int,
+    mb_decision: c_int,
+    intra_matrix: *mut u16,
+    inter_matrix: *mut u16,
+    chroma_intra_matrix: *mut u16,
+    intra_dc_precision: c_int,
+    mb_lmin: c_int,
+    mb_lmax: c_int,
+    bidir_refine: c_int,
+    keyint_min: c_int,
+    gop_size: c_int,
+    mv0_threshold: c_int,
+    slices: c_int,
+    sample_rate: c_int,
+    sample_fmt: c_int,
+    ch_layout: AvChannelLayout,
+    frame_size: c_int,
+    block_align: c_int,
+    cutoff: c_int,
+    audio_service_type: c_int,
+    request_sample_fmt: c_int,
+    initial_padding: c_int,
+    trailing_padding: c_int,
+    seek_preroll: c_int,
+    get_buffer2: *const c_void,
+    bit_rate_tolerance: c_int,
+    global_quality: c_int,
+    compression_level: c_int,
+    qcompress: f32,
+    qblur: f32,
+    qmin: c_int,
+    qmax: c_int,
+    max_qdiff: c_int,
+    rc_buffer_size: c_int,
+    rc_override_count: c_int,
+    rc_override: *mut c_void,
+    rc_max_rate: i64,
+    rc_min_rate: i64,
+    rc_max_available_vbv_use: f32,
+    rc_min_vbv_overflow_use: f32,
+    rc_initial_buffer_occupancy: c_int,
+    trellis: c_int,
+    stats_out: *mut c_char,
+    stats_in: *mut c_char,
+    workaround_bugs: c_int,
+    strict_std_compliance: c_int,
+    error_concealment: c_int,
+    debug: c_int,
+    err_recognition: c_int,
+    hwaccel: *const c_void,
+    hwaccel_context: *mut c_void,
+    hw_frames_ctx: *mut c_void,
+    hw_device_ctx: *mut c_void,
+    hwaccel_flags: c_int,
+}
+
+// 编译期断言:验证关键字段偏移与官方布局一致(offset_of! 需 Rust 1.77+,项目已满足)。
+// 若任一断言失败,说明转录有误,编译将直接报错而非运行时内存踩踏。
+const _: () = {
+    use std::mem::offset_of;
+    let _ = offset_of!(AvCodecContextLayout, hw_device_ctx) == 0x230;
+    let _ = offset_of!(AvCodecContextLayout, hw_frames_ctx) == 0x228;
+    let _ = offset_of!(AvCodecContextLayout, hwaccel_flags) == 0x238;
+};
+
+// ---------------------------------------------------------------------------
 // 符号类型
 // ---------------------------------------------------------------------------
 
@@ -186,6 +329,12 @@ type SwsScale = unsafe extern "C" fn(
     *const c_int,
 ) -> c_int;
 type SwsFree = unsafe extern "C" fn(*mut c_void);
+// 硬件解码(D3D11VA,RustDesk hwcodec 技术路线)
+type CodecVersion = unsafe extern "C" fn() -> u32;
+type HwDeviceCtxCreate = unsafe extern "C" fn(*mut *mut c_void, c_int, *const c_char, *mut c_void, c_int) -> c_int;
+type HwFrameTransferData = unsafe extern "C" fn(*mut AvFrame, *const AvFrame, c_int) -> c_int;
+type BufferRef = unsafe extern "C" fn(*const c_void) -> *mut c_void;
+type BufferUnref = unsafe extern "C" fn(*mut *mut c_void);
 
 // ---------------------------------------------------------------------------
 // 加载与符号解析
@@ -235,6 +384,12 @@ struct Fns {
     sws_get_context: Symbol<'static, SwsGetCtx>,
     sws_scale: Symbol<'static, SwsScale>,
     sws_free_context: Symbol<'static, SwsFree>,
+    // 硬件解码(D3D11VA,RustDesk hwcodec 技术路线)
+    avcodec_version: Symbol<'static, CodecVersion>,
+    av_hwdevice_ctx_create: Symbol<'static, HwDeviceCtxCreate>,
+    av_hwframe_transfer_data: Symbol<'static, HwFrameTransferData>,
+    av_buffer_ref: Symbol<'static, BufferRef>,
+    av_buffer_unref: Symbol<'static, BufferUnref>,
 }
 
 static FNS: OnceLock<Option<&'static Fns>> = OnceLock::new();
@@ -275,6 +430,11 @@ fn build_fns() -> Option<&'static Fns> {
             sws_get_context: libs.swscale.get(b"sws_getContext").ok()?,
             sws_scale: libs.swscale.get(b"sws_scale").ok()?,
             sws_free_context: libs.swscale.get(b"sws_freeContext").ok()?,
+            avcodec_version: libs.avcodec.get(b"avcodec_version").ok()?,
+            av_hwdevice_ctx_create: libs.avutil.get(b"av_hwdevice_ctx_create").ok()?,
+            av_hwframe_transfer_data: libs.avutil.get(b"av_hwframe_transfer_data").ok()?,
+            av_buffer_ref: libs.avutil.get(b"av_buffer_ref").ok()?,
+            av_buffer_unref: libs.avutil.get(b"av_buffer_unref").ok()?,
         })))
     }
 }
@@ -858,22 +1018,34 @@ fn apply_private_opts(f: &Fns, ctx: *mut c_void, codec_name: &str) {
 // FFmpeg 解码器(H.264 / H.265)
 // ---------------------------------------------------------------------------
 
-/// FFmpeg 视频解码器(Annex-B 输入,RGB24 输出,支持 H.264/H.265)。单线程使用。
+/// FFmpeg 视频解码器(Annex-B 输入,RGB24 输出,支持 H.264/H.265)。
+///
+/// Windows 上优先尝试 D3D11VA 硬件解码(RustDesk hwcodec 技术路线:设置
+/// `AVCodecContext.hw_device_ctx` → 解码器自动协商硬件格式 → 输出帧为 GPU 帧 →
+/// `av_hwframe_transfer_data` 拷回系统内存 → swscale 转 RGB24);硬件初始化失败或
+/// avcodec 主版本不匹配(≠63)时回退原生软件解码。
 pub struct HwDecoder {
     f: &'static Fns,
     ctx: *mut c_void,
     pkt: *mut AvPacket,
     frame: *mut AvFrame,
+    sw_frame: *mut AvFrame,
+    hw_device_ctx: *mut c_void,
     sws: *mut c_void,
     sws_w: u32,
     sws_h: u32,
     sws_fmt: c_int,
+    /// 是否使用硬件解码路径
+    hwaccel: bool,
 }
 
 unsafe impl Send for HwDecoder {}
 
 impl HwDecoder {
-    /// 打开原生软件解码器。`codec_id` 来自 `codec_family_id()`(H.264=27,H.265=173)。
+    /// 打开解码器。`codec_id` 来自 `codec_family_id()`(H.264=27,H.265=173)。
+    ///
+    /// 流程:创建 D3D11VA 硬件设备 → 校验支持 → 设置 `hw_device_ctx` → open;
+    /// 任一步失败(设备不支持/avcodec 版本不符)即回退软件解码。
     pub fn open(codec_id: c_int) -> Result<Self, String> {
         let f = fns().ok_or("FFmpeg DLL 未加载")?;
         unsafe {
@@ -885,33 +1057,54 @@ impl HwDecoder {
             if ctx.is_null() {
                 return Err("avcodec_alloc_context3 失败".to_string());
             }
-            if (f.avcodec_open2)(ctx, codec, std::ptr::null_mut()) < 0 {
-                (f.avcodec_free_context)(&mut ctx);
-                return Err("avcodec_open2 失败".to_string());
-            }
             let mut pkt = (f.av_packet_alloc)();
             let mut frame = (f.av_frame_alloc)();
-            if pkt.is_null() || frame.is_null() {
+            let mut sw_frame = (f.av_frame_alloc)();
+            if pkt.is_null() || frame.is_null() || sw_frame.is_null() {
                 if !pkt.is_null() {
                     (f.av_packet_free)(&mut pkt);
                 }
                 if !frame.is_null() {
                     (f.av_frame_free)(&mut frame);
                 }
+                if !sw_frame.is_null() {
+                    (f.av_frame_free)(&mut sw_frame);
+                }
                 (f.avcodec_free_context)(&mut ctx);
                 return Err("av_packet/frame alloc 失败".to_string());
             }
+
+            // 尝试硬件解码(D3D11VA);失败回退软件
+            let mut hw_device_ctx: *mut c_void = std::ptr::null_mut();
+            let hwaccel = try_open_hwdecoder(&f, ctx, &mut hw_device_ctx).is_ok();
+
+            if (f.avcodec_open2)(ctx, codec, std::ptr::null_mut()) < 0 {
+                if !hw_device_ctx.is_null() {
+                    (f.av_buffer_unref)(&mut hw_device_ctx);
+                }
+                (f.avcodec_free_context)(&mut ctx);
+                return Err("avcodec_open2 失败".to_string());
+            }
+
             Ok(Self {
                 f,
                 ctx,
                 pkt,
                 frame,
+                sw_frame,
+                hw_device_ctx,
                 sws: std::ptr::null_mut(),
                 sws_w: 0,
                 sws_h: 0,
                 sws_fmt: -1,
+                hwaccel,
             })
         }
+    }
+
+    /// 是否启用硬件解码(D3D11VA);false 表示回退软件解码。
+    pub fn using_hwaccel(&self) -> bool {
+        self.hwaccel
     }
 
     /// 解码一帧 H.264 Annex-B,返回 (宽, 高, RGB24)。数据不足/非关键帧无输出时返回 Ok(None)。
@@ -941,14 +1134,33 @@ impl HwDecoder {
                         (f.av_frame_unref)(self.frame);
                         continue;
                     }
-                    if self.sws.is_null() || self.sws_w != w || self.sws_h != h || self.sws_fmt != (*self.frame).format {
+                    // 硬件路径:GPU 帧拷回系统内存(NV12)再用 swscale 转 RGB24;
+                    // 若解码器实际输出软件帧(硬件协商未生效),按实际格式直接走 swscale
+                    let is_d3d11 = (*self.frame).format == AV_PIX_FMT_D3D11;
+                    let src_frame = if self.hwaccel && is_d3d11 {
+                        // 为系统内存帧指定 NV12 与尺寸,再执行 transfer
+                        (*self.sw_frame).format = AV_PIX_FMT_NV12;
+                        (*self.sw_frame).width = w as c_int;
+                        (*self.sw_frame).height = h as c_int;
+                        if (f.av_hwframe_transfer_data)(self.sw_frame, self.frame, 0) < 0 {
+                            (f.av_frame_unref)(self.frame);
+                            (f.av_frame_unref)(self.sw_frame);
+                            continue;
+                        }
+                        self.sw_frame
+                    } else {
+                        // 软件帧或硬件协商未生效:直接用解码器输出帧
+                        self.frame
+                    };
+                    let fmt = (*src_frame).format;
+                    if self.sws.is_null() || self.sws_w != w || self.sws_h != h || self.sws_fmt != fmt {
                         if !self.sws.is_null() {
                             (f.sws_free_context)(self.sws);
                         }
                         self.sws = (f.sws_get_context)(
                             w as c_int,
                             h as c_int,
-                            (*self.frame).format,
+                            fmt,
                             w as c_int,
                             h as c_int,
                             AV_PIX_FMT_RGB24,
@@ -959,15 +1171,16 @@ impl HwDecoder {
                         );
                         self.sws_w = w;
                         self.sws_h = h;
-                        self.sws_fmt = (*self.frame).format;
+                        self.sws_fmt = fmt;
                         if self.sws.is_null() {
                             (f.av_frame_unref)(self.frame);
+                            (f.av_frame_unref)(self.sw_frame);
                             return Err("sws_getContext 失败".to_string());
                         }
                     }
                     let mut rgb = vec![0u8; (w * h * 3) as usize];
-                    let src = (*self.frame).data.as_ptr() as *const *const u8;
-                    let src_stride = (*self.frame).linesize.as_ptr();
+                    let src = (*src_frame).data.as_ptr() as *const *const u8;
+                    let src_stride = (*src_frame).linesize.as_ptr();
                     let dst: [*mut u8; 1] = [rgb.as_mut_ptr()];
                     let dst_stride: [c_int; 1] = [(w * 3) as c_int];
                     (f.sws_scale)(
@@ -981,6 +1194,7 @@ impl HwDecoder {
                     );
                     out = Some((w, h, rgb));
                     (f.av_frame_unref)(self.frame);
+                    (f.av_frame_unref)(self.sw_frame);
                     break;
                 } else if rc == AVERROR_EAGAIN || rc == AVERROR_EOF {
                     break;
@@ -995,12 +1209,66 @@ impl HwDecoder {
     }
 }
 
+/// 尝试初始化 D3D11VA 硬件解码:创建硬件设备并把 `hw_device_ctx` 挂到 codec ctx。
+///
+/// 仅当 avcodec 主版本为 63(FFmpeg 8.0,布局匹配)且 DLL 提供硬件符号时才尝试;
+/// 返回 Err 时调用方回退软件解码。
+fn try_open_hwdecoder(
+    f: &'static Fns,
+    ctx: *mut c_void,
+    hw_device_ctx_out: &mut *mut c_void,
+) -> Result<(), String> {
+    unsafe {
+        // 1) avcodec 主版本校验:n8.0 布局(avcodec-63)才可安全访问 hw_device_ctx
+        let version = (f.avcodec_version)();
+        let major = (version >> 16) & 0xFF;
+        if major != 63 {
+            log::debug!("[ffmpeg_hw] avcodec major={major}(期望 63),回退软件解码");
+            return Err("avcodec 版本不匹配".into());
+        }
+        // 2) 创建 D3D11VA 硬件设备
+        let mut device: *mut c_void = std::ptr::null_mut();
+        let ret = (f.av_hwdevice_ctx_create)(
+            &mut device,
+            AV_HWDEVICE_TYPE_D3D11VA,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            0,
+        );
+        if ret < 0 || device.is_null() {
+            return Err(format!("av_hwdevice_ctx_create 失败: {ret}(显卡不支持 D3D11VA?)"));
+        }
+        // 3) 把设备引用挂到 codec_ctx->hw_device_ctx(偏移 0x230,编译期已断言)
+        let ctx_ref = avcodec_ctx_ref(ctx);
+        (*ctx_ref).hw_device_ctx = (f.av_buffer_ref)(device);
+        if (*ctx_ref).hw_device_ctx.is_null() {
+            (f.av_buffer_unref)(&mut device);
+            return Err("av_buffer_ref 失败".into());
+        }
+        *hw_device_ctx_out = device;
+        log::info!("[ffmpeg_hw] D3D11VA 硬件解码已启用");
+        crate::operation_log::op_log("ffmpeg_hw", "hwdecode_start", "D3D11VA");
+        Ok(())
+    }
+}
+
+/// 把裸 codec ctx 指针按 n8.0 布局解释为 `AvCodecContextLayout`(仅硬件解码路径使用)。
+unsafe fn avcodec_ctx_ref<'a>(ctx: *mut c_void) -> &'a mut AvCodecContextLayout {
+    &mut *(ctx as *mut AvCodecContextLayout)
+}
+
 impl Drop for HwDecoder {
     fn drop(&mut self) {
         let f = self.f;
         unsafe {
             if !self.sws.is_null() {
                 (f.sws_free_context)(self.sws);
+            }
+            if !self.hw_device_ctx.is_null() {
+                (f.av_buffer_unref)(&mut self.hw_device_ctx);
+            }
+            if !self.sw_frame.is_null() {
+                (f.av_frame_free)(&mut self.sw_frame);
             }
             (f.av_frame_free)(&mut self.frame);
             (f.av_packet_free)(&mut self.pkt);
@@ -1293,6 +1561,10 @@ mod tests {
             assert!(got_key, "{family} 应输出关键帧");
 
             let mut dec = HwDecoder::open(codec_family_id(family)).expect("打开解码器失败");
+            println!(
+                "[roundtrip] {family} 解码路径: {}",
+                if dec.using_hwaccel() { "D3D11VA 硬件" } else { "软件" }
+            );
             let out = dec.decode(&all).expect("解码失败").expect("解码无输出");
             let (dw, dh, rgb_out) = out;
             assert_eq!((dw, dh), (w, h), "{family} 解码尺寸应一致");
