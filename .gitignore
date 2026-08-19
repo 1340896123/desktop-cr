@@ -21,3 +21,6 @@ yarn-error.log*
 # Tauri
 src-tauri/target/
 src-tauri/gen/
+
+# CodeBuddy project data
+.codebuddy/
