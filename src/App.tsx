@@ -17,6 +17,7 @@ import {
   type DeviceInfo,
 } from './services/connection';
 import { palette, fontFamily, spacing } from './theme/tokens';
+import { onWindowMaximizedChange } from './services/window';
 
 const useStyles = makeStyles({
   root: {
@@ -64,6 +65,7 @@ export const App: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<View>('home');
   const [connecting, setConnecting] = useState(false);
+  const [maximized, setMaximized] = useState(false);
 
   const load = useCallback(async () => {
     setDevices(await getDevices());
@@ -78,6 +80,14 @@ export const App: React.FC = () => {
     });
     return () => unlisten?.();
   }, [load]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void onWindowMaximizedChange(setMaximized).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
 
   const sidebarDevices: SidebarDevice[] = devices.map((device) => ({
     id: device.id,
@@ -130,7 +140,13 @@ export const App: React.FC = () => {
   };
 
   return (
-    <div className={styles.root}>
+    <div
+      className={styles.root}
+      style={{
+        borderRadius: maximized ? 0 : 8,
+        border: maximized ? 'none' : `1px solid ${palette.borderLight}`,
+      }}
+    >
       <TitleBar
         onBack={
           view === 'session'

@@ -45,10 +45,19 @@ interface IconButtonProps {
   onClick?: () => void;
   disabled?: boolean;
   style?: React.CSSProperties;
+  /** 位于窗口拖拽区域内时设为 true,阻止按钮触发窗口拖动 */
+  dragExclude?: boolean;
 }
 
 /** 截图风格的纯图标按钮：细线性单色图标，hover 出现浅灰圆角背景 */
-export const IconButton: React.FC<IconButtonProps> = ({ label, children, onClick, disabled, style }) => {
+export const IconButton: React.FC<IconButtonProps> = ({
+  label,
+  children,
+  onClick,
+  disabled,
+  style,
+  dragExclude,
+}) => {
   const styles = useStyles();
   return (
     <button
@@ -59,6 +68,7 @@ export const IconButton: React.FC<IconButtonProps> = ({ label, children, onClick
       aria-label={label}
       title={label}
       style={style}
+      data-tauri-drag-region={dragExclude ? 'no' : undefined}
     >
       {children}
     </button>

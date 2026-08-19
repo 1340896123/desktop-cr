@@ -11,6 +11,7 @@ import {
 } from '@fluentui/react-icons';
 import { IconButton } from './shared/IconButton';
 import { palette, fontFamily, radius, titleBarHeight, zIndex } from '../theme/tokens';
+import { minimizeWindow, closeWindow } from '../services/window';
 
 const useStyles = makeStyles({
   bar: {
@@ -132,11 +133,14 @@ export const TitleBar: React.FC<TitleBarProps> = ({
 }) => {
   const styles = useStyles();
 
+  const handleMinimize = () => void (onMinimize ? onMinimize() : minimizeWindow());
+  const handleClose = () => void (onClose ? onClose() : closeWindow());
+
   return (
-    <div className={styles.bar}>
+    <div className={styles.bar} data-tauri-drag-region="">
       <div className={styles.left}>
         {onBack && (
-          <IconButton label="返回" onClick={onBack}>
+          <IconButton label="返回" onClick={onBack} dragExclude>
             <ArrowLeftRegular fontSize={18} />
           </IconButton>
         )}
@@ -154,20 +158,20 @@ export const TitleBar: React.FC<TitleBarProps> = ({
       <div className={styles.right}>
         <div className={styles.iconBtns}>
           {onRefresh && (
-            <IconButton label="刷新" onClick={onRefresh}>
+            <IconButton label="刷新" onClick={onRefresh} dragExclude>
               <ArrowSyncRegular fontSize={16} />
             </IconButton>
           )}
-          <IconButton label="复制窗口信息" onClick={() => {}}>
+          <IconButton label="复制窗口信息" onClick={() => {}} dragExclude>
             <CopyRegular fontSize={16} />
           </IconButton>
-          <IconButton label="设置" onClick={onSettings}>
+          <IconButton label="设置" onClick={onSettings} dragExclude>
             <SettingsRegular fontSize={16} />
           </IconButton>
-          <span className={styles.avatar} title="账户">
+          <span className={styles.avatar} title="账户" data-tauri-drag-region="no">
             U
           </span>
-          <IconButton label="更多" onClick={() => {}}>
+          <IconButton label="更多" onClick={() => {}} dragExclude>
             <MoreHorizontalRegular fontSize={16} />
           </IconButton>
         </div>
@@ -175,16 +179,24 @@ export const TitleBar: React.FC<TitleBarProps> = ({
         <div className={styles.divider} />
 
         <div className={styles.winControls}>
-          {onMinimize && (
-            <button type="button" className={styles.winBtn} onClick={onMinimize} aria-label="最小化">
-              <SubtractRegular fontSize={14} />
-            </button>
-          )}
-          {onClose && (
-            <button type="button" className={`${styles.winBtn} ${styles.winBtnClose}`} onClick={onClose} aria-label="关闭">
-              <DismissRegular fontSize={14} />
-            </button>
-          )}
+          <button
+            type="button"
+            className={styles.winBtn}
+            onClick={handleMinimize}
+            aria-label="最小化"
+            data-tauri-drag-region="no"
+          >
+            <SubtractRegular fontSize={14} />
+          </button>
+          <button
+            type="button"
+            className={`${styles.winBtn} ${styles.winBtnClose}`}
+            onClick={handleClose}
+            aria-label="关闭"
+            data-tauri-drag-region="no"
+          >
+            <DismissRegular fontSize={14} />
+          </button>
         </div>
       </div>
     </div>

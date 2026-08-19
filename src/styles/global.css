@@ -58,7 +58,7 @@ body {
     system-ui, sans-serif;
   font-size: 14px;
   color: var(--rd-text-primary);
-  background-color: var(--rd-bg);
+  background-color: transparent;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }
