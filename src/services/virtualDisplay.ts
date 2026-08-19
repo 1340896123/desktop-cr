@@ -11,13 +11,13 @@ export interface VirtualMonitor {
   connected: boolean;
 }
 
-/** 安装虚拟显示器驱动（模拟显示器） */
-export async function installVirtualDisplayDriver(): Promise<void> {
+/** 安装虚拟显示器驱动（真实安装，返回安装结果信息） */
+export async function installVirtualDisplayDriver(): Promise<string> {
   if (!isTauri()) {
     console.warn('[vdisplay] 非 Tauri 环境，mock 安装驱动');
-    return;
+    return '浏览器模式：跳过真实驱动安装';
   }
-  await invoke('install_virtual_display_driver');
+  return invoke<string>('install_virtual_display_driver');
 }
 
 /** 新增虚拟显示器，返回新显示器 id */

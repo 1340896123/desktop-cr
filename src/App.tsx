@@ -93,7 +93,12 @@ export const App: React.FC = () => {
   const quickDevices = devices.slice(0, 2).map((device) => ({
     id: device.id,
     name: device.name,
-    meta: device.status === 'online' ? '在线 · 可连接' : '离线',
+    meta:
+      device.status === 'online'
+        ? '在线 · 可连接'
+        : device.status === 'idle'
+          ? '等待连接'
+          : '离线',
     online: device.status === 'online',
   }));
 
@@ -162,10 +167,7 @@ export const App: React.FC = () => {
           )}
 
           {view === 'vdisplay' && selected && (
-            <VirtualDisplayPanel
-              deviceName={selected.name}
-              connected={state.connected && state.peerId === selected.id}
-            />
+            <VirtualDisplayPanel deviceName={selected.name} />
           )}
 
           {view === 'transfer' && (
