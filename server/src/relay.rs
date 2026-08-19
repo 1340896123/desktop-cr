@@ -98,23 +98,27 @@ impl RelayManager {
     }
 }
 
-/// 把两段连接做双向字节透明转发,任一端断开则关闭另一端。
+/// 把两段连接做双向字节透明转发;任一端 EOF 时对另一端的写半部发 FIN(半关闭
+/// 传播),使对端读到 EOF 正常收尾,而不是等对方强制断开。
 async fn pipe(
     host: HostParts,
-    mut client_write: tokio::net::tcp::OwnedWriteHalf,
-    mut client_read: tokio::net::tcp::OwnedReadHalf,
+    client_write: tokio::net::tcp::OwnedWriteHalf,
+    client_read: tokio::net::tcp::OwnedReadHalf,
 ) {
     let (mut hr, mut hw) = (host.read, host.write);
-    // host.read → client.write 与 client.read → host.write 两条单向拷贝并行执行
+    // host.read → client.write 与 client.read → host.write 两条单向拷贝并行执行;
+    // 任一侧读 EOF 即对另一侧写半部 shutdown(半关闭传播),避免全连接强关
     let a = async {
-        let _ = tokio::io::copy(&mut hr, &mut client_write).await;
+        let mut cw = client_write;
+        let _ = tokio::io::copy(&mut hr, &mut cw).await;
+        let _ = cw.shutdown().await;
     };
     let b = async {
-        let _ = tokio::io::copy(&mut client_read, &mut hw).await;
+        let mut cr = client_read;
+        let _ = tokio::io::copy(&mut cr, &mut hw).await;
+        let _ = hw.shutdown().await;
     };
     tokio::join!(a, b);
-    // 任一端结束,关闭另一端
-    let _ = hw.shutdown().await;
 }
 
 /// 处理单个中继 TCP 连接:首条消息必须是 `allocate`。

@@ -24,6 +24,7 @@ src-tauri/gen/
 
 # server crate build output
 server/target/
+server/deploy/
 
 # CodeBuddy project data
 .codebuddy/
