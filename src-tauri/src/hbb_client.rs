@@ -101,6 +101,8 @@ pub(crate) struct StreamConfig {
     pub jpeg_quality: u8,
     pub target_width: u32,
     pub target_height: u32,
+    /// 编码类型:"jpeg"(默认)或 "h264"(FFmpeg 硬件编码可用时由控制端下发)。
+    pub codec: String,
 }
 
 impl Default for StreamConfig {
@@ -110,6 +112,7 @@ impl Default for StreamConfig {
             jpeg_quality: 70,
             target_width: 1920,
             target_height: 1080,
+            codec: "jpeg".into(),
         }
     }
 }
@@ -126,6 +129,7 @@ static STREAM_CFG: Mutex<StreamConfig> = Mutex::new(StreamConfig {
     jpeg_quality: 70,
     target_width: 1920,
     target_height: 1080,
+    codec: String::new(),
 });
 
 /// 注册配置目录(main.rs setup 中调用)。
@@ -138,8 +142,19 @@ pub(crate) fn stream_cfg() -> StreamConfig {
     STREAM_CFG.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// 控制端流编码选择:本机 FFmpeg 可用(可解码 H.264)时首选 h264,否则 jpeg。
+fn stream_codec_choice() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        if crate::ffmpeg_hw::available() {
+            return "h264".into();
+        }
+    }
+    "jpeg".into()
+}
+
 /// 应用被控端收到的流参数(控制端经协议下发,见 network::Msg::Stream)。
-pub(crate) fn apply_stream_cfg(fps: u32, jpeg_quality: u8, width: u32, height: u32) {
+pub(crate) fn apply_stream_cfg(fps: u32, jpeg_quality: u8, width: u32, height: u32, codec: String) {
     let mut cfg = STREAM_CFG.lock().unwrap_or_else(|e| e.into_inner());
     if fps > 0 {
         cfg.fps = fps.clamp(1, 30);
@@ -153,19 +168,24 @@ pub(crate) fn apply_stream_cfg(fps: u32, jpeg_quality: u8, width: u32, height: u
     if height > 0 {
         cfg.target_height = height.clamp(1, 1920);
     }
+    // codec 为空视为 jpeg(默认),仅接受已知值
+    if !codec.is_empty() {
+        cfg.codec = if codec == "h264" { "h264".into() } else { "jpeg".into() };
+    }
     log::info!(
-        "[hbb_client] apply_stream_cfg: {}x{} @ {}fps, jpeg_quality={}",
+        "[hbb_client] apply_stream_cfg: {}x{} @ {}fps, jpeg_quality={}, codec={}",
         cfg.target_width,
         cfg.target_height,
         cfg.fps,
-        cfg.jpeg_quality
+        cfg.jpeg_quality,
+        cfg.codec
     );
     crate::operation_log::op_log(
         "hbb_client",
         "apply_stream_cfg",
         &format!(
-            "{}x{} @ {}fps jpeg_quality={}",
-            cfg.target_width, cfg.target_height, cfg.fps, cfg.jpeg_quality
+            "{}x{} @ {}fps jpeg_quality={} codec={}",
+            cfg.target_width, cfg.target_height, cfg.fps, cfg.jpeg_quality, cfg.codec
         ),
     );
 }
@@ -479,6 +499,7 @@ pub async fn set_stream_quality(fps: u32, bitrate: Option<u32>, quality: String)
             width,
             height,
             monitor: None,
+            codec: stream_codec_choice(),
         })
         .await;
     }
@@ -514,6 +535,7 @@ pub async fn set_stream_resolution(width: u32, height: u32, fps: u32) -> Result<
             width: width.clamp(1, 1920),
             height: height.clamp(1, 1920),
             monitor: None,
+            codec: stream_codec_choice(),
         })
         .await;
     }
@@ -626,6 +648,7 @@ pub async fn select_session_monitor(monitor_id: u32) -> Result<(), String> {
         width: cfg.target_width,
         height: cfg.target_height,
         monitor: Some(monitor_id),
+        codec: stream_codec_choice(),
     })
     .await;
     if !sent {
@@ -957,7 +980,7 @@ mod tests {
         // 持锁避免与 operation_log 测试并发写同一日志文件
         let _guard = crate::operation_log::test_lock::LOG_WRITE_LOCK.lock().unwrap();
         // 越界输入: fps>30 截到 30、quality>100 截到 100、超大分辨率截到 1920
-        apply_stream_cfg(99, 200, 4000, 3000);
+        apply_stream_cfg(99, 200, 4000, 3000, String::new());
         let cfg = stream_cfg();
         assert_eq!(cfg.fps, 30);
         assert_eq!(cfg.jpeg_quality, 100);
@@ -965,12 +988,18 @@ mod tests {
         assert_eq!(cfg.target_height, 1920);
 
         // width/height/fps 为 0 时保持原值不变
-        apply_stream_cfg(0, 0, 0, 0);
+        apply_stream_cfg(0, 0, 0, 0, String::new());
         let cfg = stream_cfg();
         assert_eq!(cfg.fps, 30);
         assert_eq!(cfg.jpeg_quality, 100);
         assert_eq!(cfg.target_width, 1920);
         assert_eq!(cfg.target_height, 1920);
+
+        // codec 仅接受 h264/jpeg(空视为 jpeg,非法值归一为 jpeg)
+        apply_stream_cfg(0, 0, 0, 0, "h264".into());
+        assert_eq!(stream_cfg().codec, "h264");
+        apply_stream_cfg(0, 0, 0, 0, "vp8".into());
+        assert_eq!(stream_cfg().codec, "jpeg");
     }
 
     #[test]

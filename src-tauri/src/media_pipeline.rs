@@ -87,6 +87,8 @@ async fn loopback_transport_video(
                     seq: _,
                     jpeg,
                     dur: _,
+                    codec: _,
+                    key: _,
                 }) => {
                     let data = base64::engine::general_purpose::STANDARD
                         .decode(&jpeg)
@@ -112,6 +114,8 @@ async fn loopback_transport_video(
                 seq: i as u64,
                 jpeg: base64::engine::general_purpose::STANDARD.encode(jpeg),
                 dur: 0,
+                codec: "jpeg".into(),
+                key: false,
             },
         )
         .await

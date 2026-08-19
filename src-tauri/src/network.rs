@@ -29,6 +29,11 @@ const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// 握手超时。
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// serde 默认编码类型(兼容旧版本帧消息)。
+fn default_codec() -> String {
+    "jpeg".to_string()
+}
+
 /// 协议消息(以 `t` 字段区分类型;变体名转 kebab-case,如 HelloAck → "hello-ack")。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "kebab-case")]
@@ -43,13 +48,18 @@ pub enum Msg {
     HelloAck {
         id: String,
     },
-    /// 视频帧(jpeg 为 base64 编码;dur 为被控端编码耗时毫秒,用于性能统计)
+    /// 视频帧(jpeg 为 base64 编码;dur 为被控端编码耗时毫秒,用于性能统计;
+/// codec 为 "jpeg" | "h264",h264 时 jpeg 字段为 Annex-B 字节的 base64)。
     Frame {
         w: u32,
         h: u32,
         seq: u64,
         jpeg: String,
         dur: u32,
+        #[serde(default = "default_codec")]
+        codec: String,
+        #[serde(default)]
+        key: bool,
     },
     /// 鼠标事件(x/y 为 0..1 归一化坐标;kind: move|down|up|wheel;button: left|right|middle;delta: 滚轮增量)
     Mouse {
@@ -70,13 +80,16 @@ pub enum Msg {
     Clipboard {
         text: String,
     },
-    /// 流参数调整(控制端 → 被控端,被控端抓帧循环实时应用;monitor 为可选的目标显示器)
+    /// 流参数调整(控制端 → 被控端,被控端抓帧循环实时应用;monitor 为可选的目标显示器;
+/// codec 为 "jpeg" | "h264",控制端无 FFmpeg 时应下发 "jpeg")。
     Stream {
         fps: u32,
         jpeg_quality: u8,
         width: u32,
         height: u32,
         monitor: Option<u32>,
+        #[serde(default = "default_codec")]
+        codec: String,
     },
     /// 请求远程显示器列表(控制端 → 被控端)
     Monitors,
@@ -541,9 +554,10 @@ async fn host_read_loop(app: AppHandle, mut read_half: tokio::net::tcp::OwnedRea
                 width,
                 height,
                 monitor,
+                codec,
             } => {
                 // 控制端调整画质/分辨率:实时应用到被控端抓帧配置
-                crate::hbb_client::apply_stream_cfg(fps, jpeg_quality, width, height);
+                crate::hbb_client::apply_stream_cfg(fps, jpeg_quality, width, height, codec);
                 // 目标显示器变化时重启抓帧循环
                 if let Some(target) = monitor {
                     let current = host_monitor();
@@ -622,14 +636,31 @@ async fn host_write_loop(
         let wait_ms = (1000u64 / u64::from(cfg.fps.clamp(1, 30))).max(1);
         let outgoing: Option<Msg> = tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(wait_ms)) => {
-                // 有最新帧才推送(没有帧则跳过本轮)
-                match crate::capture::latest_frame() {
-                    Some((w, h, jpeg)) => Some(Msg::Frame {
+                // 有最新帧才推送(没有帧则跳过本轮);codec 依流配置选 H.264 或 JPEG
+                let frame = if cfg.codec == "h264" {
+                    crate::capture::latest_h264()
+                        .map(|(w, h, data, key)| (w, h, data, "h264".to_string(), key))
+                        .or_else(|| {
+                            crate::capture::latest_frame()
+                                .map(|(w, h, j)| (w, h, j, "jpeg".to_string(), false))
+                        })
+                } else {
+                    crate::capture::latest_frame()
+                        .map(|(w, h, j)| (w, h, j, "jpeg".to_string(), false))
+                };
+                match frame {
+                    Some((w, h, data, codec, key)) => Some(Msg::Frame {
                         w,
                         h,
                         seq,
-                        jpeg: base64::engine::general_purpose::STANDARD.encode(&jpeg),
-                        dur: crate::capture::latest_frame_dur_ms(),
+                        jpeg: base64::engine::general_purpose::STANDARD.encode(&data),
+                        dur: if codec == "h264" {
+                            crate::capture::latest_h264_dur_ms()
+                        } else {
+                            crate::capture::latest_frame_dur_ms()
+                        },
+                        codec,
+                        key,
                     }),
                     None => None,
                 }
@@ -929,6 +960,8 @@ async fn peer_read_loop(
     peer_id: String,
     peer_addr: String,
 ) {
+    // H.264 解码器(懒创建,会话内复用)
+    let mut decoder: Option<crate::ffmpeg_hw::HwDecoder> = None;
     let result: Result<(), String> = async {
         loop {
             let msg = read_msg(&mut read_half).await?;
@@ -939,20 +972,43 @@ async fn peer_read_loop(
                     seq,
                     jpeg,
                     dur,
+                    codec,
+                    key: _,
                 } => {
                     // base64 解码后推送远程帧(携带序号与编码耗时供性能统计)
                     match base64::engine::general_purpose::STANDARD.decode(&jpeg) {
                         Ok(data) => {
-                            let _ = app.emit(
-                                "remote-frame",
-                                RemoteFrameEvent {
-                                    width: w,
-                                    height: h,
-                                    jpeg: data,
-                                    seq,
-                                    dur,
-                                },
-                            );
+                            if codec == "h264" {
+                                // H.264 → 解码 → 缩放 → JPEG,前端渲染方式不变
+                                match decode_h264_to_jpeg(&mut decoder, &data, 1280, 720, 80) {
+                                    Some((dw, dh, jpeg_bytes)) => {
+                                        let _ = app.emit(
+                                            "remote-frame",
+                                            RemoteFrameEvent {
+                                                width: dw,
+                                                height: dh,
+                                                jpeg: jpeg_bytes,
+                                                seq,
+                                                dur,
+                                            },
+                                        );
+                                    }
+                                    None => log::warn!(
+                                        "[network] H.264 帧解码失败(seq={seq}),跳过"
+                                    ),
+                                }
+                            } else {
+                                let _ = app.emit(
+                                    "remote-frame",
+                                    RemoteFrameEvent {
+                                        width: w,
+                                        height: h,
+                                        jpeg: data,
+                                        seq,
+                                        dur,
+                                    },
+                                );
+                            }
                         }
                         Err(e) => log::warn!("[network] 帧数据 base64 解码失败: {e}"),
                     }
@@ -1021,6 +1077,28 @@ async fn peer_write_loop(
     Ok(())
 }
 
+/// 将 H.264 Annex-B 帧解码为 JPEG(控制器端,供前端渲染)。
+///
+/// 内部复用会话级解码器;解码 → RGB24 → 等比缩放到 (max_w, max_h) → JPEG。
+fn decode_h264_to_jpeg(
+    decoder: &mut Option<crate::ffmpeg_hw::HwDecoder>,
+    data: &[u8],
+    max_w: u32,
+    max_h: u32,
+    quality: u8,
+) -> Option<(u32, u32, Vec<u8>)> {
+    if decoder.is_none() {
+        if let Ok(d) = crate::ffmpeg_hw::HwDecoder::open() {
+            *decoder = Some(d);
+        }
+    }
+    let d = decoder.as_mut()?;
+    let (dw, dh, rgb) = d.decode(data).ok()??;
+    let (jw, jh) = crate::capture::scale_dimensions(dw, dh, max_w, max_h);
+    let (_, _, jpeg) = crate::capture::rgb_to_jpeg(&rgb, dw, dh, jw, jh, quality).ok()?;
+    Some((jw, jh, jpeg))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1038,6 +1116,8 @@ mod tests {
             seq: 3,
             jpeg: "AQID".into(),
             dur: 2,
+            codec: "jpeg".into(),
+            key: false,
         };
         let s = serde_json::to_string(&frame).unwrap();
         assert!(s.contains("\"t\":\"frame\""));
@@ -1069,6 +1149,8 @@ mod tests {
                 seq: 42,
                 jpeg: "aGVsbG8=".into(),
                 dur: 8,
+                codec: "h264".into(),
+                key: true,
             },
             Msg::Mouse {
                 x: 0.5,
@@ -1090,6 +1172,7 @@ mod tests {
                 width: 1920,
                 height: 1080,
                 monitor: Some(1),
+                codec: "h264".into(),
             },
             Msg::Ping { ts: 111 },
             Msg::Pong { ts: 222 },
@@ -1121,6 +1204,8 @@ mod tests {
             seq: 9,
             jpeg: "AQIDBAUG".into(),
             dur: 3,
+            codec: "jpeg".into(),
+            key: false,
         };
         write_msg(&mut server, &frame).await.unwrap();
         let got = read_msg(&mut client).await.unwrap();

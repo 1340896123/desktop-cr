@@ -2,6 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod capture;
+#[cfg(target_os = "windows")]
+mod ffmpeg_hw;
 mod hbb_client;
 mod input_injector;
 mod media_pipeline;
