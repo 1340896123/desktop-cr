@@ -688,21 +688,39 @@ pub async fn send_file(path: String, app: AppHandle) -> Result<u32, String> {
     if crate::network::session_peer().is_none() {
         return Err("无活跃会话".into());
     }
-    let meta = std::fs::metadata(&path).map_err(|e| format!("读取文件信息失败: {e}"))?;
+    static FILE_ID: AtomicU32 = AtomicU32::new(1);
+    let id = FILE_ID.fetch_add(1, Ordering::SeqCst);
+    if !send_file_with_id(id, path.clone(), app) {
+        return Err("读取文件信息失败(路径不存在或不是文件)".into());
+    }
+    Ok(id)
+}
+
+/// 以指定 id 发送文件(被控端响应控制端 FileRequest 时复用其分配的 id,保证两侧任务可对账)。
+/// 校验会话与文件存在性;返回是否成功发起。
+pub(crate) fn send_file_with_id(id: u32, path: String, app: AppHandle) -> bool {
+    if crate::network::session_peer().is_none() {
+        return false;
+    }
+    let meta = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!("[hbb_client] 读取文件信息失败(id={id}): {e}");
+            return false;
+        }
+    };
     if !meta.is_file() {
-        return Err("路径不是文件".into());
+        return false;
     }
     let size = meta.len();
     let name = std::path::Path::new(&path)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "file.bin".into());
-    static FILE_ID: AtomicU32 = AtomicU32::new(1);
-    let id = FILE_ID.fetch_add(1, Ordering::SeqCst);
     tokio::spawn(async move {
         send_file_task(id, path, name, size, app).await;
     });
-    Ok(id)
+    true
 }
 
 /// 后台发送文件:FileStart → FileData(64KB 块)→ FileEnd,逐块上报本地进度。
@@ -755,7 +773,13 @@ async fn send_file_task(id: u32, path: String, name: String, size: u64, app: App
         seq += 1;
         let _ = app.emit(
             "file-progress",
-            serde_json::json!({ "id": id, "received": sent_bytes, "total": size }),
+            serde_json::json!({
+                "id": id,
+                "received": sent_bytes,
+                "total": size,
+                "name": name,
+                "direction": "send",
+            }),
         );
     }
     if !crate::network::session_send(crate::network::Msg::FileEnd { id, total_chunks: seq }).await {
@@ -768,6 +792,44 @@ async fn send_file_task(id: u32, path: String, name: String, size: u64, app: App
         "send_file",
         &format!("id={id} name={name} size={size}"),
     );
+}
+
+/// 列出本机目录内容(文件传输页「我的电脑」面板真实浏览)。
+#[tauri::command]
+pub fn list_directory(path: String) -> Result<Vec<crate::network::FileEntry>, String> {
+    crate::network::list_dir(&path)
+}
+
+/// 本机接收目录(对端推送的文件落盘于此,文件传输页「接收」展示用)。
+#[tauri::command]
+pub fn get_incoming_dir() -> String {
+    incoming_dir().to_string_lossy().to_string()
+}
+
+/// 请求对端目录列表(控制端 → 被控端,应答经 `remote-directory` 事件返回)。
+#[tauri::command]
+pub async fn request_remote_dir(path: String) -> Result<(), String> {
+    if crate::network::session_peer().is_none() {
+        return Err("无活跃会话".into());
+    }
+    let sent = crate::network::session_send(crate::network::Msg::DirList { path }).await;
+    if !sent {
+        return Err("会话已断开".into());
+    }
+    Ok(())
+}
+
+/// 请求对端发送指定文件(控制端 → 被控端;id 由控制端分配,对端按此 id 回传)。
+#[tauri::command]
+pub async fn request_file_pull(id: u32, path: String) -> Result<(), String> {
+    if crate::network::session_peer().is_none() {
+        return Err("无活跃会话".into());
+    }
+    let sent = crate::network::session_send(crate::network::Msg::FileRequest { id, path }).await;
+    if !sent {
+        return Err("会话已断开".into());
+    }
+    Ok(())
 }
 
 /// 会话实时指标(RTT 等,供性能浮窗)。

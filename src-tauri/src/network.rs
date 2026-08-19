@@ -23,7 +23,7 @@ use base64::Engine as _;
 
 /// 协议常量(与对端握手校验)。
 const APP_NAME: &str = "desktop-cr";
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = 2;
 /// 单帧 JSON 消息上限(16MB,避免畸形长度导致内存暴涨)。
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// 握手超时。
@@ -199,6 +199,61 @@ fn set_host_monitor(m: Option<u32>) {
     *HOST_MONITOR.lock().unwrap_or_else(|e| e.into_inner()) = m;
 }
 
+/// 目录项(文件/文件夹;camelCase 序列化,直接对前端)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileEntry {
+    /// 文件名(不含路径)
+    pub name: String,
+    /// 是否为目录
+    pub is_dir: bool,
+    /// 最后修改时间(Unix 毫秒;目录为 None)
+    pub modified_ms: Option<u64>,
+    /// 文件大小(字节;目录为 0)
+    pub size: u64,
+    /// 扩展名(不含点、小写;目录为空串)
+    pub ext: String,
+}
+
+/// 列出目录内容(目录优先、再按名称排序;错误返回可读信息)。
+pub fn list_dir(path: &str) -> Result<Vec<FileEntry>, String> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(path).map_err(|e| format!("读取目录失败: {e}"))? {
+        let entry = entry.map_err(|e| format!("读取目录项失败: {e}"))?;
+        let ftype = entry.file_type().map_err(|e| format!("读取文件类型失败: {e}"))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        // 目录符号链接按文件处理,避免递归循环
+        let is_dir = ftype.is_dir() && !ftype.is_symlink();
+        let metadata = entry.metadata().ok();
+        let size = if is_dir {
+            0
+        } else {
+            metadata.as_ref().map(|m| m.len()).unwrap_or(0)
+        };
+        let modified_ms = metadata
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64);
+        let ext = if is_dir {
+            String::new()
+        } else {
+            std::path::Path::new(&name)
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default()
+        };
+        entries.push(FileEntry {
+            name,
+            is_dir,
+            size,
+            modified_ms,
+            ext,
+        });
+    }
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+    Ok(entries)
+}
+
 /// 被控端接收中的文件状态(FileStart → FileData... → FileEnd)。
 struct IncomingFile {
     name: String,
@@ -243,13 +298,13 @@ async fn network_file_start(id: u32, name: &str, size: u64) {
     }
 }
 
-/// 文件数据块:写入文件并回传进度应答。
-async fn network_file_data(id: u32, seq: u64, data: &str) {
+/// 文件数据块:写入文件并回传进度应答;返回 (received, total),未知文件返回 None。
+async fn network_file_data(id: u32, seq: u64, data: &str) -> Option<(u64, u64)> {
     let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
         Ok(b) => b,
         Err(e) => {
             log::warn!("[network] 文件数据块 base64 解码失败: {e}");
-            return;
+            return None;
         }
     };
     let received;
@@ -269,7 +324,7 @@ async fn network_file_data(id: u32, seq: u64, data: &str) {
             total = f.size;
         } else {
             log::debug!("[network] 收到未知文件 id={id} 的数据块(seq={seq}),忽略");
-            return;
+            return None;
         }
     }
     // 释放锁后再回传进度(每块一次,供前端进度条)
@@ -279,10 +334,11 @@ async fn network_file_data(id: u32, seq: u64, data: &str) {
         total,
     })
     .await;
+    Some((received, total))
 }
 
-/// 文件传输结束:关闭文件、记录日志。
-async fn network_file_end(id: u32, total_chunks: u64) {
+/// 文件传输结束:关闭文件、记录日志;返回 (received, size),未知文件返回 None。
+async fn network_file_end(id: u32, total_chunks: u64) -> Option<(u64, u64)> {
     let (received, size, name, completed) = {
         let mut map = INCOMING.lock().unwrap_or_else(|e| e.into_inner());
         match map.remove(&id) {
@@ -291,7 +347,7 @@ async fn network_file_end(id: u32, total_chunks: u64) {
                 f.writer = None;
                 (f.received, f.size, f.name.clone(), completed)
             }
-            None => return,
+            None => return None,
         }
     };
     // 释放锁后再回传最终进度
@@ -309,6 +365,7 @@ async fn network_file_end(id: u32, total_chunks: u64) {
         "file_end",
         &format!("id={id} name={name} ok={completed}"),
     );
+    Some((received, size))
 }
 
 /// 活跃会话信息。
@@ -615,10 +672,37 @@ async fn host_read_loop(app: AppHandle, mut read_half: tokio::net::tcp::OwnedRea
                 network_file_start(id, &name, size).await;
             }
             Msg::FileData { id, seq, data } => {
-                network_file_data(id, seq, &data).await;
+                let _ = network_file_data(id, seq, &data).await;
             }
             Msg::FileEnd { id, total_chunks } => {
-                network_file_end(id, total_chunks).await;
+                let _ = network_file_end(id, total_chunks).await;
+            }
+            Msg::DirList { path } => {
+                // 远程目录浏览:列出对端目录并应答
+                match list_dir(&path) {
+                    Ok(entries) => {
+                        let _ = session_send(Msg::DirListAck {
+                            path,
+                            entries,
+                            error: None,
+                        })
+                        .await;
+                    }
+                    Err(err) => {
+                        let _ = session_send(Msg::DirListAck {
+                            path,
+                            entries: vec![],
+                            error: Some(err),
+                        })
+                        .await;
+                    }
+                }
+            }
+            Msg::FileRequest { id, path } => {
+                // 控制端请求拉取文件:以控制端分配的 id 发送指定文件
+                if !crate::hbb_client::send_file_with_id(id, path.clone(), app.clone()) {
+                    log::warn!("[network] 文件拉取失败: id={id} path={path}");
+                }
             }
             Msg::Ping { ts } => {
                 // 心跳:回 pong
@@ -1053,21 +1137,42 @@ async fn peer_read_loop(
                     let _ = app.emit("remote-monitors", serde_json::json!({ "monitors": monitors }));
                 }
                 Msg::FileAck { id, received, total } => {
-                    // 文件传输进度
+                    // 文件传输进度(发送端收到对端确认;方向 send 与发送端本地进度合并展示)
                     let _ = app.emit(
                         "file-progress",
-                        serde_json::json!({ "id": id, "received": received, "total": total }),
+                        serde_json::json!({ "id": id, "received": received, "total": total, "direction": "send" }),
                     );
                 }
                 Msg::FileStart { id, name, size } => {
                     // 被控端 → 控制端反向文件传输:复用接收状态机(落盘 + 回 FileAck)
                     network_file_start(id, &name, size).await;
+                    let _ = app.emit(
+                        "file-progress",
+                        serde_json::json!({ "id": id, "received": 0, "total": size, "name": name, "direction": "recv" }),
+                    );
                 }
                 Msg::FileData { id, seq, data } => {
-                    network_file_data(id, seq, &data).await;
+                    if let Some((received, total)) = network_file_data(id, seq, &data).await {
+                        let _ = app.emit(
+                            "file-progress",
+                            serde_json::json!({ "id": id, "received": received, "total": total, "direction": "recv" }),
+                        );
+                    }
                 }
                 Msg::FileEnd { id, total_chunks } => {
-                    network_file_end(id, total_chunks).await;
+                    if let Some((received, total)) = network_file_end(id, total_chunks).await {
+                        let _ = app.emit(
+                            "file-progress",
+                            serde_json::json!({ "id": id, "received": received, "total": total, "direction": "recv" }),
+                        );
+                    }
+                }
+                Msg::DirListAck { path, entries, error } => {
+                    // 远程目录列表应答
+                    let _ = app.emit(
+                        "remote-directory",
+                        serde_json::json!({ "path": path, "entries": entries, "error": error }),
+                    );
                 }
                 Msg::Pong { ts } => {
                     // 记录 ping/pong 往返延迟(实时指标)
@@ -1343,8 +1448,12 @@ mod tests {
         loop {
             match read_msg(&mut read_half).await {
                 Ok(Msg::FileStart { id, name, size }) => network_file_start(id, &name, size).await,
-                Ok(Msg::FileData { id, seq, data }) => network_file_data(id, seq, &data).await,
-                Ok(Msg::FileEnd { id, total_chunks }) => network_file_end(id, total_chunks).await,
+                Ok(Msg::FileData { id, seq, data }) => {
+                    let _ = network_file_data(id, seq, &data).await;
+                }
+                Ok(Msg::FileEnd { id, total_chunks }) => {
+                    let _ = network_file_end(id, total_chunks).await;
+                }
                 Ok(_) => {}
                 Err(_) => break,
             }

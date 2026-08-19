@@ -46,6 +46,10 @@ fn main() {
             hbb_client::select_session_monitor,
             hbb_client::send_file,
             hbb_client::get_session_metrics,
+            hbb_client::list_directory,
+            hbb_client::get_incoming_dir,
+            hbb_client::request_remote_dir,
+            hbb_client::request_file_pull,
             // 被控端管理
             hbb_client::start_host,
             hbb_client::stop_host,
