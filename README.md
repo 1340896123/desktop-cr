@@ -11,6 +11,8 @@
 - [5. UI 架构设计](#5-ui-架构设计)
 - [6. 项目工程目录结构](#6-项目工程目录结构)
 - [7. 开发里程碑路线图](#7-开发里程碑路线图)
+- [8. 已交付能力清单](#8-已交付能力清单)
+- [9. 信令 / STUN / TURN 服务](#9-信令--stun--turn-服务)
 
 ## 1. 整体架构与设计理念
 
@@ -272,3 +274,33 @@ my-tauri-remote-desktop/
 - **配置持久化**:对端设备列表、被控端口、被控自启开关持久化到 `%APPDATA%/com.example.winui-remote-desktop/config.json`。
 
 > 说明:HBBS/HBBR 信令服务器、NAT 打洞与 WebRTC 视频轨道依赖 RustDesk 官方服务器基础设施与重依赖链,属外部依赖项;当前直连 TCP 已实现完整远程桌面功能,该层替换不影响前端与注入/抓帧模块。
+
+## 9. 信令 / STUN / TURN 服务
+
+基于 RustDesk hbbs/hbbr 思路,本项目自研了三件套服务器(`server/` crate,Windows 可直接运行):
+
+| exe | 角色 | 端口 | 能力 |
+| --- | --- | --- | --- |
+| `dcr-signal.exe` | 信令 + STUN | TCP 21116 / UDP 21115 | 设备注册/心跳/查找/在线列表(连接断开自动注销);RFC 5389 二进制 STUN Binding(XOR-MAPPED-ADDRESS)+ 不同源端口 NAT 探测;`--relay-hint` 下发中继地址 |
+| `dcr-relay.exe` | TURN-like 中继 | TCP 21117 / UDP 21119 | TCP `allocate {id,role}` 配对后双向字节透明转发;UDP `alloc-udp`/`data` 数据报转发 |
+
+**构建**(Windows):
+```powershell
+cd server
+cargo build --release   # 产出 server\target\release\dcr-signal.exe、dcr-relay.exe
+```
+
+**部署**(需公网 IP 的 VPS 或可端口转发的主机,云安全组放行 21115-21119):
+```bash
+# 信令 + STUN(relay-hint 告诉控制端中继地址)
+./dcr-signal --bind 0.0.0.0 --port 21116 --udp-port 21115 --relay-hint <中继IP:21117>
+# 中继
+./dcr-relay --bind 0.0.0.0 --port 21117 --udp-port 21119
+```
+
+**客户端接入**:设置页「网络 → 服务器与 ID」配置 信令服务器 / 中继服务器 / 本机 ID 后:
+
+- **被控端**启动时向信令注册本机 ID 与局域网地址并 20s 心跳(配置即生效);
+- **控制端**设备列表自动合并信令发现的在线设备;连接回退链为 `配置 LAN 直连 → 信令外部地址 → 中继兜底`,直连/打洞失败时经中继透明转发(上层 framing 原样透传)。
+
+协议细节(长度前缀 JSON 帧):信令 `register/heartbeat/unregister/lookup/list`;中继 `allocate/allocated`。消息类型与 framing 由客户端经 `dcr-server = { path = "../server" }` 共享,与 `network.rs` 保持一致。
