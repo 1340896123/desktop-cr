@@ -498,7 +498,9 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
                 cfg.target_height,
                 cfg.fps,
                 app.clone(),
-            ) {
+            )
+            .await
+            {
                 log::warn!("[hbb_client] host 抓帧启动失败(继续以无帧模式运行): {e}");
             }
             if let Err(e) = crate::network::serve_host(app.clone(), listener).await {
