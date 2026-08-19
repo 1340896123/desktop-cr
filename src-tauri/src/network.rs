@@ -24,8 +24,7 @@ const APP_NAME: &str = "desktop-cr";
 const PROTOCOL_VERSION: u32 = 1;
 /// 单帧 JSON 消息上限(16MB,避免畸形长度导致内存暴涨)。
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
-/// 连接超时 / 握手超时。
-const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+/// 握手超时。
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// 协议消息(以 `t` 字段区分类型;变体名转 kebab-case,如 HelloAck → "hello-ack")。
@@ -426,12 +425,20 @@ async fn host_write_loop(
 }
 
 /// 控制端:连接对端(8 秒超时)→ 握手 → 启动收发循环。
-pub async fn connect_peer(app: AppHandle, id: String, addr: String) -> Result<(), String> {
-    // 1) 连接(超时)
-    let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr))
-        .await
-        .map_err(|_| format!("连接 {addr} 超时(8秒)"))?
-        .map_err(|e| format!("连接 {addr} 失败: {e}"))?;
+///
+/// 连接路径回退链:先直连配置的 `addr`(LAN)→ 信令服务器返回的外部地址
+/// (`external`)→ 中继服务器(`relay`)兜底;返回路径描述供日志/前端展示。
+pub async fn connect_peer(
+    app: AppHandle,
+    id: String,
+    addr: String,
+    external: Option<String>,
+    relay: Option<String>,
+) -> Result<String, String> {
+    // 1) 打开传输通道(直连 → 外部 → 中继)
+    let (mut stream, via) =
+        open_transport(Some(&addr), external.as_deref(), relay.as_deref(), &id).await?;
+    log::info!("[network] 传输路径: {via}");
 
     // 2) 握手:发 hello,收 hello-ack
     write_msg(
@@ -448,11 +455,11 @@ pub async fn connect_peer(app: AppHandle, id: String, addr: String) -> Result<()
         .map_err(|_| "握手超时(未收到 hello-ack)".to_string())??;
     match ack {
         Msg::HelloAck { id: host_id } => {
-            log::info!("[network] 握手成功,对端: {host_id} ({addr})");
+            log::info!("[network] 握手成功,对端: {host_id} ({via})");
             crate::operation_log::op_log(
                 "network",
                 "connect",
-                &format!("peer={host_id} addr={addr}"),
+                &format!("peer={host_id} via={via}"),
             );
         }
         other => return Err(format!("握手响应异常: {other:?}")),
@@ -480,7 +487,212 @@ pub async fn connect_peer(app: AppHandle, id: String, addr: String) -> Result<()
         }
     });
 
-    Ok(())
+    Ok(via)
+}
+
+/// 获取本机局域网 IPv4(通过 UDP socket 路由探测,不实际发包)。
+pub fn local_ipv4() -> Option<std::net::Ipv4Addr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:53").ok()?;
+    match sock.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(v4) => Some(v4),
+        _ => None,
+    }
+}
+
+/// 连接信令服务器并发起一次请求,读取应答后断开。
+async fn signal_query<T>(addr: &str, send: dcr_server::message::SignalMsg) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        TcpStream::connect(addr),
+    )
+    .await
+    .map_err(|_| format!("连接信令服务器 {addr} 超时"))?
+    .map_err(|e| format!("连接信令服务器 {addr} 失败: {e}"))?;
+    dcr_server::framing::write_msg(&mut stream, &send).await?;
+    dcr_server::framing::read_msg(&mut stream).await
+}
+
+/// 查询对端在信令服务器上的信息,返回 (lan, external, relay_hint);离线返回 None。
+pub async fn signal_lookup(
+    signal_addr: &str,
+    id: &str,
+) -> Result<Option<(String, String, String)>, String> {
+    use dcr_server::message::SignalMsg;
+    let ack: SignalMsg = signal_query(
+        signal_addr,
+        SignalMsg::Lookup {
+            id: id.to_string(),
+        },
+    )
+    .await?;
+    match ack {
+        SignalMsg::LookupAck {
+            online,
+            lan,
+            external,
+            relay_hint,
+        } => {
+            if online {
+                Ok(Some((lan, external, relay_hint)))
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Err("信令服务器应答异常".into()),
+    }
+}
+
+/// 查询信令服务器在线设备列表。
+pub async fn signal_list(signal_addr: &str) -> Result<Vec<dcr_server::message::PeerEntry>, String> {
+    use dcr_server::message::SignalMsg;
+    let ack: SignalMsg = signal_query(signal_addr, SignalMsg::List).await?;
+    match ack {
+        SignalMsg::ListAck { peers } => Ok(peers),
+        _ => Err("信令服务器应答异常".into()),
+    }
+}
+
+/// 经中继服务器连接对端(role=client),返回已建立的连接。
+async fn open_relay_stream(relay_addr: &str, peer_id: &str) -> Result<TcpStream, String> {
+    use dcr_server::message::RelayMsg;
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        TcpStream::connect(relay_addr),
+    )
+    .await
+    .map_err(|_| format!("连接中继服务器 {relay_addr} 超时"))?
+    .map_err(|e| format!("连接中继服务器 {relay_addr} 失败: {e}"))?;
+    dcr_server::framing::write_msg(
+        &mut stream,
+        &RelayMsg::Allocate {
+            id: peer_id.to_string(),
+            role: "client".into(),
+        },
+    )
+    .await?;
+    let ack: RelayMsg = dcr_server::framing::read_msg(&mut stream).await?;
+    match ack {
+        RelayMsg::Allocated { peer_connected, .. } => {
+            if peer_connected {
+                Ok(stream)
+            } else {
+                Err(format!("对端 {peer_id} 未接入中继"))
+            }
+        }
+        other => Err(format!("中继应答异常: {other:?}")),
+    }
+}
+
+/// 打开到对端的传输通道:直连(配置 LAN)→ 外部地址(信令返回)→ 中继兜底。
+///
+/// 返回 (已建立的 TcpStream, 路径描述)。
+pub(crate) async fn open_transport(
+    direct: Option<&str>,
+    external: Option<&str>,
+    relay: Option<&str>,
+    peer_id: &str,
+) -> Result<(TcpStream, String), String> {
+    // 1) 直连配置地址(LAN)
+    if let Some(addr) = direct {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            TcpStream::connect(addr),
+        )
+        .await
+        {
+            Ok(Ok(s)) => return Ok((s, format!("直连 {addr}"))),
+            Ok(Err(e)) => log::info!("[network] 直连 {addr} 失败: {e}"),
+            Err(_) => log::info!("[network] 直连 {addr} 超时(3秒)"),
+        }
+    }
+    // 2) 外部地址(信令服务器返回的反射地址)
+    if let Some(addr) = external {
+        if direct.map(|d| d != addr).unwrap_or(true) {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                TcpStream::connect(addr),
+            )
+            .await
+            {
+                Ok(Ok(s)) => return Ok((s, format!("直连外部 {addr}"))),
+                Ok(Err(e)) => log::info!("[network] 直连外部 {addr} 失败: {e}"),
+                Err(_) => log::info!("[network] 直连外部 {addr} 超时(3秒)"),
+            }
+        }
+    }
+    // 3) 中继兜底
+    if let Some(relay) = relay {
+        match open_relay_stream(relay, peer_id).await {
+            Ok(s) => return Ok((s, format!("中继 {relay}"))),
+            Err(e) => log::info!("[network] 中继连接失败: {e}"),
+        }
+    }
+    Err("所有连接路径均失败(直连/外部/中继)".into())
+}
+
+/// 向信令服务器注册本机并持续心跳(host 侧,连接断开自动重连)。
+pub(crate) async fn signal_register_loop(
+    signal_addr: Option<String>,
+    host_id: String,
+    lan: String,
+) {
+    let Some(signal_addr) = signal_addr else {
+        return;
+    };
+    log::info!("[network] 信令注册循环启动: id={host_id}, lan={lan}, server={signal_addr}");
+    loop {
+        // 注册
+        match signal_query(
+            &signal_addr,
+            dcr_server::message::SignalMsg::Register {
+                id: host_id.clone(),
+                lan: lan.clone(),
+            },
+        )
+        .await
+        {
+            Ok(dcr_server::message::SignalMsg::RegisterAck { ok, msg }) => {
+                log::info!("[network] 信令注册完成: ok={ok}, {msg}");
+            }
+            Ok(_) => log::warn!("[network] 信令注册应答异常"),
+            Err(e) => {
+                log::warn!("[network] 信令注册失败: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
+            }
+        }
+        // 心跳(20 秒间隔;失败则重连注册)
+        let mut heartbeat_ok = true;
+        while heartbeat_ok {
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            match signal_query(
+                &signal_addr,
+                dcr_server::message::SignalMsg::Heartbeat {
+                    id: host_id.clone(),
+                },
+            )
+            .await
+            {
+                Ok(dcr_server::message::SignalMsg::RegisterAck { ok, .. }) => {
+                    if !ok {
+                        log::warn!("[network] 信令心跳被拒,重新注册");
+                        heartbeat_ok = false;
+                    }
+                }
+                Ok(_) => log::warn!("[network] 信令心跳应答异常"),
+                Err(e) => {
+                    log::warn!("[network] 信令心跳失败: {e},重新注册");
+                    heartbeat_ok = false;
+                }
+            }
+        }
+        // 等待后重新注册
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
 }
 
 /// 控制端收消息循环:远程帧推送、剪贴板同步、心跳记录;断线清理会话并广播。

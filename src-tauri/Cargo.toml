@@ -28,6 +28,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 hound = "3"
 cpal = "0.16"
 libloading = "0.8"
+# 信令/中继服务器协议库(dcr-server 的 lib,与 server/dcr-signal、dcr-relay 共享消息类型)
+dcr-server = { path = "../server" }
 
 # ----------------------------------------------------------------------
 # RustDesk 生态复用说明：
