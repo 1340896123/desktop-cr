@@ -137,7 +137,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
   const handleClose = () => void (onClose ? onClose() : closeWindow());
 
   return (
-    <div className={styles.bar} data-tauri-drag-region="">
+    <div className={styles.bar} data-tauri-drag-region="deep">
       <div className={styles.left}>
         {onBack && (
           <IconButton label="返回" onClick={onBack} dragExclude>
@@ -168,7 +168,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
           <IconButton label="设置" onClick={onSettings} dragExclude>
             <SettingsRegular fontSize={16} />
           </IconButton>
-          <span className={styles.avatar} title="账户" data-tauri-drag-region="no">
+          <span className={styles.avatar} title="账户" data-tauri-drag-region="false">
             U
           </span>
           <IconButton label="更多" onClick={() => {}} dragExclude>
@@ -184,7 +184,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
             className={styles.winBtn}
             onClick={handleMinimize}
             aria-label="最小化"
-            data-tauri-drag-region="no"
+            data-tauri-drag-region="false"
           >
             <SubtractRegular fontSize={14} />
           </button>
@@ -193,7 +193,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
             className={`${styles.winBtn} ${styles.winBtnClose}`}
             onClick={handleClose}
             aria-label="关闭"
-            data-tauri-drag-region="no"
+            data-tauri-drag-region="false"
           >
             <DismissRegular fontSize={14} />
           </button>

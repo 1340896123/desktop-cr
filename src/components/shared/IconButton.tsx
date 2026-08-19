@@ -68,7 +68,7 @@ export const IconButton: React.FC<IconButtonProps> = ({
       aria-label={label}
       title={label}
       style={style}
-      data-tauri-drag-region={dragExclude ? 'no' : undefined}
+      data-tauri-drag-region={dragExclude ? 'false' : undefined}
     >
       {children}
     </button>
