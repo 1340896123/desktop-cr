@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { makeStyles, tokens } from '@fluentui/react-components';
 import { sendKeyEvent, sendMouseEvent, type MouseInputPayload } from '../services/input';
 import { onFrame, onRemoteFrame } from '../services/capture';
+import { normalizePointer } from '../utils/coords';
 
 const useStyles = makeStyles({
   container: {
@@ -78,11 +79,7 @@ export const RemoteCanvas: React.FC<RemoteCanvasProps> = ({
       const canvas = canvasRef.current;
       if (!canvas) return null;
       const rect = canvas.getBoundingClientRect();
-      const xCss = clientX - rect.left;
-      const yCss = clientY - rect.top;
-      const xRemote = Math.min(Math.max((xCss * remoteWidth) / rect.width, 0), remoteWidth);
-      const yRemote = Math.min(Math.max((yCss * remoteHeight) / rect.height, 0), remoteHeight);
-      return { x: xRemote, y: yRemote };
+      return normalizePointer(clientX, clientY, rect, remoteWidth, remoteHeight);
     },
     [remoteWidth, remoteHeight],
   );
