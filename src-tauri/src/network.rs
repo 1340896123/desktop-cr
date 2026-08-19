@@ -120,6 +120,21 @@ pub enum Msg {
         received: u64,
         total: u64,
     },
+    /// 请求对端目录列表(控制端 → 被控端)
+    DirList {
+        path: String,
+    },
+    /// 目录列表应答(被控端 → 控制端)
+    DirListAck {
+        path: String,
+        entries: Vec<FileEntry>,
+        error: Option<String>,
+    },
+    /// 请求对端发送指定文件(控制端 → 被控端;id 由控制端分配,对端复用)
+    FileRequest {
+        id: u32,
+        path: String,
+    },
     /// 心跳(毫秒时间戳)
     Ping {
         ts: u64,
@@ -1044,6 +1059,16 @@ async fn peer_read_loop(
                         serde_json::json!({ "id": id, "received": received, "total": total }),
                     );
                 }
+                Msg::FileStart { id, name, size } => {
+                    // 被控端 → 控制端反向文件传输:复用接收状态机(落盘 + 回 FileAck)
+                    network_file_start(id, &name, size).await;
+                }
+                Msg::FileData { id, seq, data } => {
+                    network_file_data(id, seq, &data).await;
+                }
+                Msg::FileEnd { id, total_chunks } => {
+                    network_file_end(id, total_chunks).await;
+                }
                 Msg::Pong { ts } => {
                     // 记录 ping/pong 往返延迟(实时指标)
                     let now = now_ms();
@@ -1229,6 +1254,324 @@ mod tests {
         write_msg(&mut server, &frame).await.unwrap();
         let got = read_msg(&mut client).await.unwrap();
         assert_eq!(got, frame);
+    }
+
+    // ------------------------------------------------------------------
+    // 文件传输:单元测试 + 全双工并发双向 + 最大速率基准
+    // ------------------------------------------------------------------
+
+    /// 文件传输测试串行锁:接收状态机依赖全局 SESSION/INCOMING/临时目录,
+    /// 并行执行会互相覆盖,串行执行保证隔离。
+    static FILE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// 测试辅助:注册唯一临时配置目录(OnceLock 首次生效,后续测试共用),
+    /// 并返回实际生效的接收目录(首个注册者的目录,与接收状态机落盘路径一致)。
+    fn test_file_env(tag: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("desktop-cr-ft-{tag}-{stamp}"));
+        // 忽略失败:首个测试注册成功即可,其余测试共用同一目录
+        let _ = crate::hbb_client::register_config_dir(dir.clone());
+        crate::hbb_client::incoming_dir()
+    }
+
+    /// 测试辅助:构造假会话,使接收状态机回传的 FileAck 进入可读通道。
+    fn fake_session(tx: mpsc::Sender<Msg>) {
+        *session_guard() = Some(SessionInner {
+            peer_id: "test-peer".into(),
+            peer_addr: "127.0.0.1:0".into(),
+            tx,
+        });
+    }
+
+    /// 测试辅助:生成带模式的测试文件(每文件唯一偏移,便于字节级比对)。
+    fn make_src_file(path: &std::path::Path, base: u8, size: usize) {
+        let bytes: Vec<u8> = (0..size).map(|i| base.wrapping_add((i % 251) as u8)).collect();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// 测试辅助:发送端核心循环 —— FileStart → 64KB 块 FileData → FileEnd(与 send_file_task 同块尺寸/编码)。
+    async fn test_send_file(
+        writer: std::sync::Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+        path: std::path::PathBuf,
+        id: u32,
+    ) {
+        use tokio::io::AsyncReadExt;
+        let size = std::fs::metadata(&path).unwrap().len();
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file.bin".into());
+        write_msg(
+            &mut *writer.lock().await,
+            &Msg::FileStart { id, name, size },
+        )
+        .await
+        .unwrap();
+        let mut file = tokio::fs::File::open(&path).await.unwrap();
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut seq = 0u64;
+        loop {
+            let n = file.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            write_msg(
+                &mut *writer.lock().await,
+                &Msg::FileData {
+                    id,
+                    seq,
+                    data: base64::engine::general_purpose::STANDARD.encode(&buf[..n]),
+                },
+            )
+            .await
+            .unwrap();
+            seq += 1;
+        }
+        write_msg(
+            &mut *writer.lock().await,
+            &Msg::FileEnd { id, total_chunks: seq },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// 测试辅助:接收端循环 —— 分发 FileStart/FileData/FileEnd 到真实接收状态机,直到对端关闭连接。
+    async fn test_recv_loop(mut read_half: tokio::net::tcp::OwnedReadHalf) {
+        loop {
+            match read_msg(&mut read_half).await {
+                Ok(Msg::FileStart { id, name, size }) => network_file_start(id, &name, size).await,
+                Ok(Msg::FileData { id, seq, data }) => network_file_data(id, seq, &data).await,
+                Ok(Msg::FileEnd { id, total_chunks }) => network_file_end(id, total_chunks).await,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn file_transfer_receive_state_machine() {
+        // 直接驱动接收状态机:FileStart → 3×FileData → FileEnd
+        // 验证:每块回 FileAck、结束回最终进度、文件按块拼接落盘且字节一致。
+        let _ft = FILE_TEST_LOCK.lock().await;
+        let _log = crate::operation_log::test_lock::LOG_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let incoming = test_file_env("sm");
+        let (tx, mut rx) = mpsc::channel::<Msg>(64);
+        fake_session(tx);
+
+        let id: u32 = 41_001;
+        let name = "state-machine.bin";
+        let payload: Vec<u8> = (0..256u32).map(|i| (i % 251) as u8).collect();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&payload);
+        let total = (payload.len() * 3) as u64;
+
+        network_file_start(id, name, total).await;
+        for seq in 0..3u64 {
+            network_file_data(id, seq, &b64).await;
+        }
+        network_file_end(id, 3).await;
+
+        // 3 块各一次 FileAck + 结束一次最终进度
+        let mut acks: Vec<Msg> = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            acks.push(m);
+        }
+        assert_eq!(acks.len(), 4, "应收到 4 条 FileAck,实际: {acks:?}");
+        for a in &acks {
+            match a {
+                Msg::FileAck { id: aid, received, total: t } => {
+                    assert_eq!(*aid, id);
+                    assert_eq!(total, *t);
+                    assert!(*received <= total);
+                }
+                _ => panic!("应只收到 FileAck,实际: {a:?}"),
+            }
+        }
+        // 结束应答应报完整进度
+        match acks.last() {
+            Some(Msg::FileAck { received, total: t, .. }) => {
+                assert_eq!(*received, total);
+                assert_eq!(*t, total);
+            }
+            _ => unreachable!(),
+        }
+
+        // 落盘字节 = 3 × payload 拼接
+        let disk = std::fs::read(incoming.join(name)).unwrap();
+        let mut expect = Vec::with_capacity(total as usize);
+        for _ in 0..3 {
+            expect.extend_from_slice(&payload);
+        }
+        assert_eq!(disk, expect, "落盘内容应与发送内容逐字节一致");
+
+        std::fs::remove_file(incoming.join(name)).ok();
+        close_session();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn file_transfer_duplex_concurrent_loopback() {
+        // 真实 TCP 全双工:双向同时各传 2 个并发文件(共 4 个),验证字节一致。
+        let _ft = FILE_TEST_LOCK.lock().await;
+        let _log = crate::operation_log::test_lock::LOG_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let incoming = test_file_env("duplex");
+        let (tx, _ack_drain) = mpsc::channel::<Msg>(256);
+        fake_session(tx);
+
+        // 生成 4 个源文件(各 512KB,唯一模式)
+        let src_dir = std::env::temp_dir().join(format!(
+            "desktop-cr-ft-src-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let size = 512 * 1024;
+        let a1 = src_dir.join("a1.bin");
+        let a2 = src_dir.join("a2.bin");
+        let b1 = src_dir.join("b1.bin");
+        let b2 = src_dir.join("b2.bin");
+        make_src_file(&a1, 1, size);
+        make_src_file(&a2, 2, size);
+        make_src_file(&b1, 3, size);
+        make_src_file(&b2, 4, size);
+
+        // A=客户端(发送 a1/a2,接收 B 的 b1/b2);B=服务端(发送 b1/b2,接收 A 的 a1/a2)
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (c_read, c_write) = client.into_split();
+        let (s_read, s_write) = server.into_split();
+
+        let c_write = std::sync::Arc::new(tokio::sync::Mutex::new(c_write));
+        let s_write = std::sync::Arc::new(tokio::sync::Mutex::new(s_write));
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let side_a = async {
+                let recv = tokio::spawn(test_recv_loop(c_read));
+                let s1 = tokio::spawn(test_send_file(c_write.clone(), a1.clone(), 51_001));
+                let s2 = tokio::spawn(test_send_file(c_write.clone(), a2.clone(), 51_002));
+                s1.await.unwrap();
+                s2.await.unwrap();
+                drop(c_write); // 关闭本侧写半部 → 对端 recv EOF
+                recv.await.unwrap();
+            };
+            let side_b = async {
+                let recv = tokio::spawn(test_recv_loop(s_read));
+                let s1 = tokio::spawn(test_send_file(s_write.clone(), b1.clone(), 52_001));
+                let s2 = tokio::spawn(test_send_file(s_write.clone(), b2.clone(), 52_002));
+                s1.await.unwrap();
+                s2.await.unwrap();
+                drop(s_write); // 关闭本侧写半部 → 对端 recv EOF
+                recv.await.unwrap();
+            };
+            tokio::join!(side_a, side_b);
+        })
+        .await;
+
+        assert!(result.is_ok(), "全双工双向传输超时(30 秒)");
+
+        // 校验 4 个接收文件与源逐字节一致
+        for (src, recv_name) in [
+            (&a1, "a1.bin"),
+            (&a2, "a2.bin"),
+            (&b1, "b1.bin"),
+            (&b2, "b2.bin"),
+        ] {
+            let disk = std::fs::read(incoming.join(recv_name)).unwrap();
+            let orig = std::fs::read(src).unwrap();
+            assert_eq!(disk, orig, "接收文件 {recv_name} 与源内容不一致");
+        }
+
+        for f in ["a1.bin", "a2.bin", "b1.bin", "b2.bin"] {
+            std::fs::remove_file(incoming.join(f)).ok();
+        }
+        std::fs::remove_dir_all(&src_dir).ok();
+        close_session();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn file_transfer_max_rate_loopback() {
+        // 最大速率基准:双向同时各传一个文件(各 16MB),测量聚合吞吐。
+        let _ft = FILE_TEST_LOCK.lock().await;
+        let _log = crate::operation_log::test_lock::LOG_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let incoming = test_file_env("rate");
+        let (tx, _ack_drain) = mpsc::channel::<Msg>(1024);
+        fake_session(tx);
+
+        let src_dir = std::env::temp_dir().join(format!(
+            "desktop-cr-ft-rate-src-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let size = 16 * 1024 * 1024;
+        let up = src_dir.join("up.bin");
+        let down = src_dir.join("down.bin");
+        make_src_file(&up, 7, size);
+        make_src_file(&down, 9, size);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (c_read, c_write) = client.into_split();
+        let (s_read, s_write) = server.into_split();
+
+        let c_write = std::sync::Arc::new(tokio::sync::Mutex::new(c_write));
+        let s_write = std::sync::Arc::new(tokio::sync::Mutex::new(s_write));
+
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            let side_a = async {
+                let recv = tokio::spawn(test_recv_loop(c_read));
+                let s = tokio::spawn(test_send_file(c_write.clone(), up.clone(), 61_001));
+                s.await.unwrap();
+                drop(c_write); // 关闭本侧写半部 → 对端 recv EOF
+                recv.await.unwrap();
+            };
+            let side_b = async {
+                let recv = tokio::spawn(test_recv_loop(s_read));
+                let s = tokio::spawn(test_send_file(s_write.clone(), down.clone(), 62_001));
+                s.await.unwrap();
+                drop(s_write); // 关闭本侧写半部 → 对端 recv EOF
+                recv.await.unwrap();
+            };
+            tokio::join!(side_a, side_b);
+        })
+        .await;
+        assert!(result.is_ok(), "速率基准超时(60 秒)");
+        let elapsed = started.elapsed().as_secs_f64();
+
+        // 双向同时传输 → 每条方向都传了 size 字节,聚合为 2×size
+        let total_bytes = (size * 2) as f64;
+        let mbps_total = total_bytes / elapsed / 1024.0 / 1024.0;
+        let mbps_each = size as f64 / elapsed / 1024.0 / 1024.0;
+        println!(
+            "[文件传输速率基准] 双向同时: 总耗时 {elapsed:.3}s, 单方向 {mbps_each:.1} MB/s, 聚合 {mbps_total:.1} MB/s (回环 TCP + base64/JSON framing)"
+        );
+        // 回环下限保守断言,防止极端环境导致基准退化为不可用
+        assert!(mbps_total > 1.0, "聚合吞吐异常偏低: {mbps_total:.2} MB/s");
+
+        for f in ["up.bin", "down.bin"] {
+            let disk = std::fs::read(incoming.join(f)).unwrap();
+            let orig = std::fs::read(src_dir.join(f)).unwrap();
+            assert_eq!(disk, orig, "接收文件 {f} 与源内容不一致");
+            std::fs::remove_file(incoming.join(f)).ok();
+        }
+        std::fs::remove_dir_all(&src_dir).ok();
+        close_session();
     }
 }
 
