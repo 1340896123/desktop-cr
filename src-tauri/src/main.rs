@@ -39,6 +39,11 @@ fn main() {
             hbb_client::get_clipboard_text,
             hbb_client::set_clipboard_text,
             hbb_client::sync_clipboard,
+            // 会话扩展:远程显示器 / 文件传输 / 实时指标
+            hbb_client::request_remote_monitors,
+            hbb_client::select_session_monitor,
+            hbb_client::send_file,
+            hbb_client::get_session_metrics,
             // 被控端管理
             hbb_client::start_host,
             hbb_client::stop_host,

@@ -13,9 +13,13 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::task::JoinHandle;
+
+// base64 的 encode 是 Engine trait 方法,需将 trait 引入作用域
+use base64::Engine as _;
 
 /// Tauri 应用标识(与 tauri.conf.json 保持一致,用于兜底配置目录解析)。
 const APP_IDENTIFIER: &str = "com.example.winui-remote-desktop";
@@ -62,8 +66,9 @@ impl Default for AppConfig {
             host_enabled: false,
             host_port: 21118,
             peers: Vec::new(),
-            signal_server: None,
-            relay_server: None,
+            // 默认信令/中继服务器(公网 VPS),被控端注册与跨网段连接兜底
+            signal_server: Some("120.78.77.248:21116".into()),
+            relay_server: Some("120.78.77.248:21117".into()),
             host_id: default_host_id(),
         }
     }
@@ -281,7 +286,7 @@ pub async fn list_devices() -> Vec<DeviceInfo> {
                                 id: p.id.clone(),
                                 name: p.id.clone(),
                                 status: "online".into(),
-                                platform: "unknown".into(),
+                                platform: "signal".into(),
                             });
                         }
                     }
@@ -473,6 +478,7 @@ pub async fn set_stream_quality(fps: u32, bitrate: Option<u32>, quality: String)
             jpeg_quality,
             width,
             height,
+            monitor: None,
         })
         .await;
     }
@@ -507,6 +513,7 @@ pub async fn set_stream_resolution(width: u32, height: u32, fps: u32) -> Result<
             jpeg_quality,
             width: width.clamp(1, 1920),
             height: height.clamp(1, 1920),
+            monitor: None,
         })
         .await;
     }
@@ -585,6 +592,145 @@ pub async fn sync_clipboard(app: AppHandle) -> Result<String, String> {
         &format!("len={}", text.chars().count()),
     );
     Ok(text)
+}
+
+/// 被控端文件接收目录(app_config_dir/incoming)。
+pub(crate) fn incoming_dir() -> PathBuf {
+    let dir = CONFIG_DIR.get().cloned().unwrap_or_else(default_config_dir);
+    dir.join("incoming")
+}
+
+/// 请求远程显示器列表(经会话发送 Monitors,应答通过 `remote-monitors` 事件返回)。
+#[tauri::command]
+pub async fn request_remote_monitors() -> Result<(), String> {
+    if crate::network::session_peer().is_none() {
+        return Err("无活跃会话".into());
+    }
+    let sent = crate::network::session_send(crate::network::Msg::Monitors).await;
+    if !sent {
+        return Err("会话已断开".into());
+    }
+    Ok(())
+}
+
+/// 切换远程会话的目标显示器(下发 Stream.monitor 到被控端,实时切换其抓帧)。
+#[tauri::command]
+pub async fn select_session_monitor(monitor_id: u32) -> Result<(), String> {
+    if crate::network::session_peer().is_none() {
+        return Err("无活跃会话".into());
+    }
+    let cfg = stream_cfg();
+    let sent = crate::network::session_send(crate::network::Msg::Stream {
+        fps: cfg.fps,
+        jpeg_quality: cfg.jpeg_quality,
+        width: cfg.target_width,
+        height: cfg.target_height,
+        monitor: Some(monitor_id),
+    })
+    .await;
+    if !sent {
+        return Err("会话已断开".into());
+    }
+    crate::operation_log::op_log(
+        "hbb_client",
+        "select_session_monitor",
+        &format!("monitor={monitor_id}"),
+    );
+    Ok(())
+}
+
+/// 发送本地文件到对端(经会话文件传输协议;进度通过 `file-progress` 事件上报)。
+#[tauri::command]
+pub async fn send_file(path: String, app: AppHandle) -> Result<u32, String> {
+    if crate::network::session_peer().is_none() {
+        return Err("无活跃会话".into());
+    }
+    let meta = std::fs::metadata(&path).map_err(|e| format!("读取文件信息失败: {e}"))?;
+    if !meta.is_file() {
+        return Err("路径不是文件".into());
+    }
+    let size = meta.len();
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file.bin".into());
+    static FILE_ID: AtomicU32 = AtomicU32::new(1);
+    let id = FILE_ID.fetch_add(1, Ordering::SeqCst);
+    tokio::spawn(async move {
+        send_file_task(id, path, name, size, app).await;
+    });
+    Ok(id)
+}
+
+/// 后台发送文件:FileStart → FileData(64KB 块)→ FileEnd,逐块上报本地进度。
+async fn send_file_task(id: u32, path: String, name: String, size: u64, app: AppHandle) {
+    use tokio::io::AsyncReadExt;
+    if !crate::network::session_send(crate::network::Msg::FileStart {
+        id,
+        name: name.clone(),
+        size,
+    })
+    .await
+    {
+        log::warn!("[hbb_client] 文件发送失败: 会话已断开(id={id})");
+        return;
+    }
+    let mut file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(e) => {
+            log::error!("[hbb_client] 打开文件失败: {e}");
+            return;
+        }
+    };
+    const CHUNK: usize = 64 * 1024;
+    let mut buf = vec![0u8; CHUNK];
+    let mut seq: u64 = 0;
+    let mut sent_bytes: u64 = 0;
+    loop {
+        let n = match file.read(&mut buf).await {
+            Ok(n) => n,
+            Err(e) => {
+                log::error!("[hbb_client] 读取文件失败: {e}");
+                return;
+            }
+        };
+        if n == 0 {
+            break;
+        }
+        let chunk = &buf[..n];
+        if !crate::network::session_send(crate::network::Msg::FileData {
+            id,
+            seq,
+            data: base64::engine::general_purpose::STANDARD.encode(chunk),
+        })
+        .await
+        {
+            log::warn!("[hbb_client] 文件发送中断: 会话已断开(id={id})");
+            return;
+        }
+        sent_bytes += n as u64;
+        seq += 1;
+        let _ = app.emit(
+            "file-progress",
+            serde_json::json!({ "id": id, "received": sent_bytes, "total": size }),
+        );
+    }
+    if !crate::network::session_send(crate::network::Msg::FileEnd { id, total_chunks: seq }).await {
+        log::warn!("[hbb_client] 文件结束通知失败: 会话已断开(id={id})");
+        return;
+    }
+    log::info!("[hbb_client] 文件发送完成: id={id}, name={name}, size={size}, chunks={seq}");
+    crate::operation_log::op_log(
+        "hbb_client",
+        "send_file",
+        &format!("id={id} name={name} size={size}"),
+    );
+}
+
+/// 会话实时指标(RTT 等,供性能浮窗)。
+#[tauri::command]
+pub fn get_session_metrics() -> crate::network::SessionMetrics {
+    crate::network::get_session_metrics()
 }
 
 /// 启动被控端(真实监听 0.0.0.0:port,并自动启动抓帧)。

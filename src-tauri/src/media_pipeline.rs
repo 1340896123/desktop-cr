@@ -81,7 +81,13 @@ async fn loopback_transport_video(
         let mut collected: Vec<(u32, u32, Vec<u8>)> = Vec::new();
         loop {
             match read_msg(&mut stream).await {
-                Ok(Msg::Frame { w, h, seq: _, jpeg }) => {
+                Ok(Msg::Frame {
+                    w,
+                    h,
+                    seq: _,
+                    jpeg,
+                    dur: _,
+                }) => {
                     let data = base64::engine::general_purpose::STANDARD
                         .decode(&jpeg)
                         .map_err(|e| format!("视频帧 base64 解码失败: {e}"))?;
@@ -105,6 +111,7 @@ async fn loopback_transport_video(
                 h: *h,
                 seq: i as u64,
                 jpeg: base64::engine::general_purpose::STANDARD.encode(jpeg),
+                dur: 0,
             },
         )
         .await

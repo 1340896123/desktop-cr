@@ -27,8 +27,8 @@ const DEFAULT_CONFIG: AppConfig = {
   hostEnabled: false,
   hostPort: 21118,
   peers: [],
-  signalServer: undefined,
-  relayServer: undefined,
+  signalServer: '120.78.77.248:21116',
+  relayServer: '120.78.77.248:21117',
   hostId: 'dcr-browser',
 };
 

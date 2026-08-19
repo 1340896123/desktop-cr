@@ -9,13 +9,13 @@
 //! 目标尺寸/帧率/画质实时读取 `crate::hbb_client::stream_cfg()`(set_stream_* 命令即时生效)。
 //! 非 Windows 平台保留程序化动画帧(仅编译占位,保证跨平台可编译)。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter};
 use tokio::task::JoinHandle;
 
 /// 显示器信息(供多屏选择 / IDD 虚拟屏识别)。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MonitorInfo {
     pub id: u32,
@@ -49,6 +49,9 @@ pub struct CapturedFrameEvent {
 
 /// 最新帧快照:未开始抓帧时为 None。
 static LATEST_FRAME: Mutex<Option<CapturedFrame>> = Mutex::new(None);
+
+/// 最近一帧 JPEG 编码耗时(毫秒,供远程性能统计)。
+static LATEST_ENCODE_DUR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// 当前抓帧循环任务句柄:用于 stop_capture 取消循环。
 static CAPTURE_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
@@ -170,6 +173,11 @@ pub fn latest_frame() -> Option<(u32, u32, Vec<u8>)> {
     let slot = LATEST_FRAME.lock().ok()?;
     let frame = slot.as_ref()?;
     Some((frame.width, frame.height, frame.data.clone()))
+}
+
+/// 最近一帧 JPEG 编码耗时(毫秒)。
+pub fn latest_frame_dur_ms() -> u32 {
+    LATEST_ENCODE_DUR.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// 按最大尺寸等比缩放(只缩小不放大),返回缩放后的 (宽, 高)。纯函数无平台依赖。
@@ -450,7 +458,8 @@ async fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String
         // 7) BGRA → RGB
         let rgb = bgra_to_rgb(&bgra, src_w, src_h);
 
-        // 8) 缩放 + JPEG 编码(目标尺寸/画质来自流配置)
+        // 8) 缩放 + JPEG 编码(目标尺寸/画质来自流配置),记录编码耗时
+        let encode_start = std::time::Instant::now();
         let (jw, jh, jpeg) = match rgb_to_jpeg(
             &rgb,
             src_w,
@@ -465,6 +474,10 @@ async fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String
                 continue;
             }
         };
+        LATEST_ENCODE_DUR.store(
+            encode_start.elapsed().as_millis() as u32,
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         // 9) 推送事件并缓存最新帧
         let payload = CapturedFrameEvent {
@@ -568,8 +581,7 @@ async fn mock_capture_loop(app: AppHandle, monitor_id: u32, width: u32, height: 
                 frame_idx = frame_idx.wrapping_add(1);
                 continue;
             }
-        };
-        let payload = CapturedFrameEvent {
+        };        let payload = CapturedFrameEvent {
             monitor_id,
             width: w,
             height: h,

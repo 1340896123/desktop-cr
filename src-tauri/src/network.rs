@@ -10,7 +10,9 @@
 //! 会话管理通过 `static SESSION` 保存对端信息与发送通道。
 
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::io::Write;
+use std::sync::{LazyLock, Mutex};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -41,12 +43,13 @@ pub enum Msg {
     HelloAck {
         id: String,
     },
-    /// 视频帧(jpeg 为 base64 编码)
+    /// 视频帧(jpeg 为 base64 编码;dur 为被控端编码耗时毫秒,用于性能统计)
     Frame {
         w: u32,
         h: u32,
         seq: u64,
         jpeg: String,
+        dur: u32,
     },
     /// 鼠标事件(x/y 为 0..1 归一化坐标;kind: move|down|up|wheel;button: left|right|middle;delta: 滚轮增量)
     Mouse {
@@ -67,12 +70,42 @@ pub enum Msg {
     Clipboard {
         text: String,
     },
-    /// 流参数调整(控制端 → 被控端,被控端抓帧循环实时应用)
+    /// 流参数调整(控制端 → 被控端,被控端抓帧循环实时应用;monitor 为可选的目标显示器)
     Stream {
         fps: u32,
         jpeg_quality: u8,
         width: u32,
         height: u32,
+        monitor: Option<u32>,
+    },
+    /// 请求远程显示器列表(控制端 → 被控端)
+    Monitors,
+    /// 远程显示器列表应答(被控端 → 控制端)
+    MonitorsAck {
+        monitors: Vec<crate::capture::MonitorInfo>,
+    },
+    /// 文件传输开始(控制端 → 被控端;id 为本次传输标识)
+    FileStart {
+        id: u32,
+        name: String,
+        size: u64,
+    },
+    /// 文件数据块(data 为 base64 编码的字节块)
+    FileData {
+        id: u32,
+        seq: u64,
+        data: String,
+    },
+    /// 文件传输结束(control 端发送,表示所有块已发完)
+    FileEnd {
+        id: u32,
+        total_chunks: u64,
+    },
+    /// 文件传输进度应答(被控端 → 控制端)
+    FileAck {
+        id: u32,
+        received: u64,
+        total: u64,
     },
     /// 心跳(毫秒时间戳)
     Ping {
@@ -102,6 +135,152 @@ pub struct RemoteFrameEvent {
     pub height: u32,
     /// 已解码的 JPEG 字节
     pub jpeg: Vec<u8>,
+    /// 帧序号(用于丢包统计)
+    pub seq: u64,
+    /// 被控端编码耗时(毫秒)
+    pub dur: u32,
+}
+
+/// 会话实时指标(前端性能浮窗)。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMetrics {
+    /// 最近一次 ping/pong 往返延迟(毫秒)
+    pub rtt_ms: Option<u64>,
+}
+
+/// 会话实时指标(仅控制端更新)。
+static SESSION_METRICS: Mutex<SessionMetrics> = Mutex::new(SessionMetrics { rtt_ms: None });
+
+/// 读取会话实时指标。
+pub fn get_session_metrics() -> SessionMetrics {
+    SESSION_METRICS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// 被控端当前抓帧显示器(Stream.monitor 切换用)。
+static HOST_MONITOR: Mutex<Option<u32>> = Mutex::new(None);
+
+fn host_monitor() -> Option<u32> {
+    HOST_MONITOR.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn set_host_monitor(m: Option<u32>) {
+    *HOST_MONITOR.lock().unwrap_or_else(|e| e.into_inner()) = m;
+}
+
+/// 被控端接收中的文件状态(FileStart → FileData... → FileEnd)。
+struct IncomingFile {
+    name: String,
+    size: u64,
+    received: u64,
+    writer: Option<std::fs::File>,
+}
+
+/// 被控端接收中的文件(id → 状态)。
+static INCOMING: LazyLock<Mutex<HashMap<u32, IncomingFile>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 文件传输开始:在被控端接收目录创建文件。
+async fn network_file_start(id: u32, name: &str, size: u64) {
+    let safe_name = std::path::Path::new(name)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file.bin".into());
+    let dir = crate::hbb_client::incoming_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        log::warn!("[network] 创建接收目录失败: {e}");
+        return;
+    }
+    let path = dir.join(&safe_name);
+    match std::fs::File::create(&path) {
+        Ok(writer) => {
+            if let Ok(mut map) = INCOMING.lock() {
+                map.insert(
+                    id,
+                    IncomingFile {
+                        name: safe_name.clone(),
+                        size,
+                        received: 0,
+                        writer: Some(writer),
+                    },
+                );
+            }
+            log::info!("[network] 接收文件开始: id={id}, name={safe_name}, size={size}");
+            crate::operation_log::op_log("network", "file_start", &format!("id={id} name={safe_name} size={size}"));
+        }
+        Err(e) => log::warn!("[network] 创建接收文件 {safe_name} 失败: {e}"),
+    }
+}
+
+/// 文件数据块:写入文件并回传进度应答。
+async fn network_file_data(id: u32, seq: u64, data: &str) {
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("[network] 文件数据块 base64 解码失败: {e}");
+            return;
+        }
+    };
+    let received;
+    let total;
+    {
+        let mut map = INCOMING.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(f) = map.get_mut(&id) {
+            if let Some(writer) = f.writer.as_mut() {
+                if let Err(e) = writer.write_all(&bytes) {
+                    log::warn!("[network] 写入文件数据失败: {e}");
+                    f.writer = None;
+                } else {
+                    f.received += bytes.len() as u64;
+                }
+            }
+            received = f.received;
+            total = f.size;
+        } else {
+            log::debug!("[network] 收到未知文件 id={id} 的数据块(seq={seq}),忽略");
+            return;
+        }
+    }
+    // 释放锁后再回传进度(每块一次,供前端进度条)
+    let _ = session_send(Msg::FileAck {
+        id,
+        received,
+        total,
+    })
+    .await;
+}
+
+/// 文件传输结束:关闭文件、记录日志。
+async fn network_file_end(id: u32, total_chunks: u64) {
+    let (received, size, name, completed) = {
+        let mut map = INCOMING.lock().unwrap_or_else(|e| e.into_inner());
+        match map.remove(&id) {
+            Some(mut f) => {
+                let completed = f.received == f.size;
+                f.writer = None;
+                (f.received, f.size, f.name.clone(), completed)
+            }
+            None => return,
+        }
+    };
+    // 释放锁后再回传最终进度
+    let _ = session_send(Msg::FileAck {
+        id,
+        received,
+        total: size,
+    })
+    .await;
+    log::info!(
+        "[network] 接收文件完成: id={id}, name={name}, received={received}/{size} bytes, chunks={total_chunks}, ok={completed}"
+    );
+    crate::operation_log::op_log(
+        "network",
+        "file_end",
+        &format!("id={id} name={name} ok={completed}"),
+    );
 }
 
 /// 活跃会话信息。
@@ -361,9 +540,56 @@ async fn host_read_loop(app: AppHandle, mut read_half: tokio::net::tcp::OwnedRea
                 jpeg_quality,
                 width,
                 height,
+                monitor,
             } => {
                 // 控制端调整画质/分辨率:实时应用到被控端抓帧配置
                 crate::hbb_client::apply_stream_cfg(fps, jpeg_quality, width, height);
+                // 目标显示器变化时重启抓帧循环
+                if let Some(target) = monitor {
+                    let current = host_monitor();
+                    if current != Some(target) {
+                        log::info!("[network] 切换被控端抓帧显示器: {:?} → {target}", current);
+                        let _ = crate::capture::stop_capture();
+                        let cfg = crate::hbb_client::stream_cfg();
+                        if let Err(e) = crate::capture::start_capture(
+                            target,
+                            cfg.target_width,
+                            cfg.target_height,
+                            cfg.fps,
+                            app.clone(),
+                        )
+                        .await
+                        {
+                            log::warn!("[network] 切换抓帧显示器失败: {e}");
+                        }
+                        set_host_monitor(Some(target));
+                    }
+                }
+            }
+            Msg::Monitors => {
+                // 应答远程显示器列表
+                #[cfg(target_os = "windows")]
+                {
+                    match crate::capture::list_monitors(app.clone()) {
+                        Ok(monitors) => {
+                            let _ = session_send(Msg::MonitorsAck { monitors }).await;
+                        }
+                        Err(e) => log::warn!("[network] 枚举显示器失败: {e}"),
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = session_send(Msg::MonitorsAck { monitors: vec![] }).await;
+                }
+            }
+            Msg::FileStart { id, name, size } => {
+                network_file_start(id, &name, size).await;
+            }
+            Msg::FileData { id, seq, data } => {
+                network_file_data(id, seq, &data).await;
+            }
+            Msg::FileEnd { id, total_chunks } => {
+                network_file_end(id, total_chunks).await;
             }
             Msg::Ping { ts } => {
                 // 心跳:回 pong
@@ -403,6 +629,7 @@ async fn host_write_loop(
                         h,
                         seq,
                         jpeg: base64::engine::general_purpose::STANDARD.encode(&jpeg),
+                        dur: crate::capture::latest_frame_dur_ms(),
                     }),
                     None => None,
                 }
@@ -706,8 +933,14 @@ async fn peer_read_loop(
         loop {
             let msg = read_msg(&mut read_half).await?;
             match msg {
-                Msg::Frame { w, h, seq: _, jpeg } => {
-                    // base64 解码后推送远程帧
+                Msg::Frame {
+                    w,
+                    h,
+                    seq,
+                    jpeg,
+                    dur,
+                } => {
+                    // base64 解码后推送远程帧(携带序号与编码耗时供性能统计)
                     match base64::engine::general_purpose::STANDARD.decode(&jpeg) {
                         Ok(data) => {
                             let _ = app.emit(
@@ -716,6 +949,8 @@ async fn peer_read_loop(
                                     width: w,
                                     height: h,
                                     jpeg: data,
+                                    seq,
+                                    dur,
                                 },
                             );
                         }
@@ -726,10 +961,27 @@ async fn peer_read_loop(
                     // 对端剪贴板同步
                     let _ = app.emit("clipboard-synced", serde_json::json!({ "text": text }));
                 }
+                Msg::MonitorsAck { monitors } => {
+                    // 远程显示器列表
+                    let _ = app.emit("remote-monitors", serde_json::json!({ "monitors": monitors }));
+                }
+                Msg::FileAck { id, received, total } => {
+                    // 文件传输进度
+                    let _ = app.emit(
+                        "file-progress",
+                        serde_json::json!({ "id": id, "received": received, "total": total }),
+                    );
+                }
                 Msg::Pong { ts } => {
-                    // 记录心跳延迟(仅调试)
+                    // 记录 ping/pong 往返延迟(实时指标)
                     let now = now_ms();
-                    log::debug!("[network] pong 延迟: {} ms", now.saturating_sub(ts));
+                    let rtt = now.saturating_sub(ts);
+                    *SESSION_METRICS
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = SessionMetrics {
+                        rtt_ms: Some(rtt),
+                    };
+                    log::debug!("[network] pong 延迟: {rtt} ms");
                 }
                 _ => {}
             }
@@ -785,7 +1037,10 @@ mod tests {
             h: 360,
             seq: 3,
             jpeg: "AQID".into(),
+            dur: 2,
         };
+        let s = serde_json::to_string(&frame).unwrap();
+        assert!(s.contains("\"t\":\"frame\""));
         let s = serde_json::to_string(&frame).unwrap();
         assert!(s.contains("\"t\":\"frame\""));
 
@@ -813,6 +1068,7 @@ mod tests {
                 h: 720,
                 seq: 42,
                 jpeg: "aGVsbG8=".into(),
+                dur: 8,
             },
             Msg::Mouse {
                 x: 0.5,
@@ -833,6 +1089,7 @@ mod tests {
                 jpeg_quality: 85,
                 width: 1920,
                 height: 1080,
+                monitor: Some(1),
             },
             Msg::Ping { ts: 111 },
             Msg::Pong { ts: 222 },
@@ -863,6 +1120,7 @@ mod tests {
             h: 540,
             seq: 9,
             jpeg: "AQIDBAUG".into(),
+            dur: 3,
         };
         write_msg(&mut server, &frame).await.unwrap();
         let got = read_msg(&mut client).await.unwrap();
