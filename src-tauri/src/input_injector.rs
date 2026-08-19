@@ -5,6 +5,145 @@
 
 use serde::Serialize;
 
+/// DOM KeyboardEvent.code(或按键文本)→ 虚拟键码(VK),纯函数、无平台依赖。
+///
+/// 返回 VK 数值(如 KeyA→0x41);无法映射返回 None。
+/// 非 Windows 非测试构建下仅被测试引用,允许 dead_code。
+#[cfg_attr(all(not(target_os = "windows"), not(test)), allow(dead_code))]
+pub(crate) fn code_to_vk(code: &str) -> Option<u16> {
+    // 小键盘数字与运算符
+    let numpad = match code {
+        "Numpad0" => Some(0x60),
+        "Numpad1" => Some(0x61),
+        "Numpad2" => Some(0x62),
+        "Numpad3" => Some(0x63),
+        "Numpad4" => Some(0x64),
+        "Numpad5" => Some(0x65),
+        "Numpad6" => Some(0x66),
+        "Numpad7" => Some(0x67),
+        "Numpad8" => Some(0x68),
+        "Numpad9" => Some(0x69),
+        "NumpadAdd" => Some(0x6B),
+        "NumpadSubtract" => Some(0x6D),
+        "NumpadMultiply" => Some(0x6A),
+        "NumpadDivide" => Some(0x6F),
+        "NumpadDecimal" => Some(0x6E),
+        // 小键盘 Enter 与主键盘 Enter 共用 VK_RETURN(0x0D),靠 EXTENDEDKEY 区分
+        "NumpadEnter" => Some(0x0D),
+        // 控制与编辑键
+        "Space" => Some(0x20),
+        "Enter" => Some(0x0D),
+        "Tab" => Some(0x09),
+        "Backspace" => Some(0x08),
+        "Escape" => Some(0x1B),
+        "Delete" => Some(0x2E),
+        "Insert" => Some(0x2D),
+        "Home" => Some(0x24),
+        "End" => Some(0x23),
+        "PageUp" => Some(0x21),
+        "PageDown" => Some(0x22),
+        // 方向键
+        "ArrowUp" => Some(0x26),
+        "ArrowDown" => Some(0x28),
+        "ArrowLeft" => Some(0x25),
+        "ArrowRight" => Some(0x27),
+        // 锁定键
+        "CapsLock" => Some(0x14),
+        "NumLock" => Some(0x90),
+        "ScrollLock" => Some(0x91),
+        // 修饰键(右 Control / 右 Alt 靠 EXTENDEDKEY 区分左右)
+        "ControlLeft" => Some(0xA2),
+        "ControlRight" => Some(0xA3),
+        "ShiftLeft" => Some(0xA0),
+        "ShiftRight" => Some(0xA1),
+        "AltLeft" => Some(0xA4),
+        "AltRight" => Some(0xA5),
+        // Win 键
+        "MetaLeft" => Some(0x5B),
+        "MetaRight" => Some(0x5C),
+        // 符号键
+        "Minus" => Some(0xBD),
+        "Equal" => Some(0xBB),
+        "BracketLeft" => Some(0xDB),
+        "BracketRight" => Some(0xDD),
+        "Semicolon" => Some(0xBA),
+        "Quote" => Some(0xDE),
+        "Backquote" => Some(0xC0),
+        "Comma" => Some(0xBC),
+        "Period" => Some(0xBE),
+        "Slash" => Some(0xBF),
+        "Backslash" => Some(0xDC),
+        "IntlBackslash" => Some(0xDC),
+        "ContextMenu" => Some(0x5D),
+        _ => None,
+    };
+    if let Some(vk) = numpad {
+        return Some(vk);
+    }
+
+    // 字母区 A-Z(如 "KeyA")
+    if let Some(rest) = code.strip_prefix("Key") {
+        if rest.len() == 1 {
+            let ch = rest.as_bytes()[0];
+            if ch.is_ascii_alphabetic() {
+                return Some(0x41 + (ch.to_ascii_uppercase() - b'A') as u16);
+            }
+        }
+    }
+    // 数字区 0-9(如 "Digit9")
+    if let Some(rest) = code.strip_prefix("Digit") {
+        if rest.len() == 1 {
+            let ch = rest.as_bytes()[0];
+            if ch.is_ascii_digit() {
+                return Some(0x30 + (ch - b'0') as u16);
+            }
+        }
+    }
+
+    // 功能键 F1-F24(VK_F1..VK_F24 连续)
+    if let Some(n) = code.strip_prefix('F').and_then(|s| s.parse::<u16>().ok()) {
+        if (1..=24).contains(&n) {
+            return Some(0x70 + n - 1);
+        }
+    }
+
+    // 兜底:单个可打印字符(按键文本,如 "a" / "5");多字符串(如 "Foo")不映射
+    if code.chars().count() == 1 {
+        let ch = code.chars().next()?;
+        if ch.is_ascii_alphabetic() {
+            let base = if ch.is_ascii_lowercase() { b'a' } else { b'A' };
+            return Some(0x41 + (ch as u8 - base) as u16);
+        }
+        if ch.is_ascii_digit() {
+            return Some(0x30 + (ch as u8 - b'0') as u16);
+        }
+    }
+    None
+}
+
+/// 该 DOM code 是否为扩展键(需 KEYEVENTF_EXTENDEDKEY 标志),纯函数无平台依赖。
+#[cfg_attr(all(not(target_os = "windows"), not(test)), allow(dead_code))]
+pub(crate) fn is_extended_code(code: &str) -> bool {
+    matches!(
+        code,
+        "NumpadEnter"
+            | "Delete"
+            | "Insert"
+            | "Home"
+            | "End"
+            | "PageUp"
+            | "PageDown"
+            | "ArrowUp"
+            | "ArrowDown"
+            | "ArrowLeft"
+            | "ArrowRight"
+            | "ControlRight"
+            | "AltRight"
+            | "MetaLeft"
+            | "MetaRight"
+    )
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct InputEventReceipt {
     pub ok: bool,
@@ -138,188 +277,28 @@ pub(crate) fn inject_key_event_windows(
 ) -> Result<InputEventReceipt, String> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_ADD, VK_APPS, VK_BACK,
-        VK_CAPITAL, VK_DECIMAL, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_HOME,
-        VK_INSERT, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MULTIPLY, VK_NEXT,
-        VK_NUMLOCK, VK_NUMPAD0, VK_OEM_1, VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6,
-        VK_OEM_7, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_PRIOR, VK_RCONTROL,
-        VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SCROLL, VK_SPACE, VK_SUBTRACT,
-        VK_TAB, VK_UP, VK_0, VK_A,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
 
-    // 将 DOM KeyboardEvent.code 映射为 (虚拟键码, 是否需要 KEYEVENTF_EXTENDEDKEY)。
-    // 方向键、右 Control/右 Alt、Win 键、编辑键等扩展键必须带 EXTENDEDKEY 标志。
-    fn map_code(code: &str) -> Option<(VIRTUAL_KEY, bool)> {
-        let vk = |c: &str| -> Option<(VIRTUAL_KEY, bool)> {
-            use windows::Win32::UI::Input::KeyboardAndMouse::{
-                VK_0, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_A, VK_B, VK_C,
-                VK_D, VK_E, VK_F, VK_G, VK_H, VK_I, VK_J, VK_K, VK_L, VK_M, VK_N, VK_O, VK_P,
-                VK_Q, VK_R, VK_S, VK_T, VK_U, VK_V, VK_W, VK_X, VK_Y, VK_Z,
-            };
-            let letters = [
-                ("KeyA", VK_A),
-                ("KeyB", VK_B),
-                ("KeyC", VK_C),
-                ("KeyD", VK_D),
-                ("KeyE", VK_E),
-                ("KeyF", VK_F),
-                ("KeyG", VK_G),
-                ("KeyH", VK_H),
-                ("KeyI", VK_I),
-                ("KeyJ", VK_J),
-                ("KeyK", VK_K),
-                ("KeyL", VK_L),
-                ("KeyM", VK_M),
-                ("KeyN", VK_N),
-                ("KeyO", VK_O),
-                ("KeyP", VK_P),
-                ("KeyQ", VK_Q),
-                ("KeyR", VK_R),
-                ("KeyS", VK_S),
-                ("KeyT", VK_T),
-                ("KeyU", VK_U),
-                ("KeyV", VK_V),
-                ("KeyW", VK_W),
-                ("KeyX", VK_X),
-                ("KeyY", VK_Y),
-                ("KeyZ", VK_Z),
-                ("Digit0", VK_0),
-                ("Digit1", VK_1),
-                ("Digit2", VK_2),
-                ("Digit3", VK_3),
-                ("Digit4", VK_4),
-                ("Digit5", VK_5),
-                ("Digit6", VK_6),
-                ("Digit7", VK_7),
-                ("Digit8", VK_8),
-                ("Digit9", VK_9),
-            ];
-            letters
-                .iter()
-                .find(|(name, _)| *name == c)
-                .map(|(_, vk)| (*vk, false))
-        };
-
-        match code {
-            // 小键盘数字与运算符
-            "Numpad0" => Some((VIRTUAL_KEY(VK_NUMPAD0.0 + 0), false)),
-            "Numpad1" => Some((VIRTUAL_KEY(VK_NUMPAD0.0 + 1), false)),
-            "Numpad2" => Some((VIRTUAL_KEY(VK_NUMPAD0.0 + 2), false)),
-            "Numpad3" => Some((VIRTUAL_KEY(VK_NUMPAD0.0 + 3), false)),
-            "Numpad4" => Some((VIRTUAL_KEY(VK_NUMPAD0.0 + 4), false)),
-            "Numpad5" => Some((VIRTUAL_KEY(VK_NUMPAD0.0 + 5), false)),
-            "Numpad6" => Some((VIRTUAL_KEY(VK_NUMPAD0.0 + 6), false)),
-            "Numpad7" => Some((VIRTUAL_KEY(VK_NUMPAD0.0 + 7), false)),
-            "Numpad8" => Some((VIRTUAL_KEY(VK_NUMPAD0.0 + 8), false)),
-            "Numpad9" => Some((VIRTUAL_KEY(VK_NUMPAD0.0 + 9), false)),
-            "NumpadAdd" => Some((VK_ADD, false)),
-            "NumpadSubtract" => Some((VK_SUBTRACT, false)),
-            "NumpadMultiply" => Some((VK_MULTIPLY, false)),
-            "NumpadDivide" => Some((VK_DIVIDE, false)),
-            "NumpadDecimal" => Some((VK_DECIMAL, false)),
-            // 小键盘 Enter 与主键盘 Enter 共用 VK_RETURN，靠 EXTENDEDKEY 区分
-            "NumpadEnter" => Some((VK_RETURN, true)),
-            // 控制与编辑键
-            "Space" => Some((VK_SPACE, false)),
-            "Enter" => Some((VK_RETURN, false)),
-            "Tab" => Some((VK_TAB, false)),
-            "Backspace" => Some((VK_BACK, false)),
-            "Escape" => Some((VK_ESCAPE, false)),
-            "Delete" => Some((VK_DELETE, true)),
-            "Insert" => Some((VK_INSERT, true)),
-            "Home" => Some((VK_HOME, true)),
-            "End" => Some((VK_END, true)),
-            "PageUp" => Some((VK_PRIOR, true)),
-            "PageDown" => Some((VK_NEXT, true)),
-            // 方向键（扩展键）
-            "ArrowUp" => Some((VK_UP, true)),
-            "ArrowDown" => Some((VK_DOWN, true)),
-            "ArrowLeft" => Some((VK_LEFT, true)),
-            "ArrowRight" => Some((VK_RIGHT, true)),
-            // 锁定键
-            "CapsLock" => Some((VK_CAPITAL, false)),
-            "NumLock" => Some((VK_NUMLOCK, false)),
-            "ScrollLock" => Some((VK_SCROLL, false)),
-            // 修饰键（右 Control / 右 Alt 带 EXTENDEDKEY 区分左右）
-            "ControlLeft" => Some((VK_LCONTROL, false)),
-            "ControlRight" => Some((VK_RCONTROL, true)),
-            "ShiftLeft" => Some((VK_LSHIFT, false)),
-            "ShiftRight" => Some((VK_RSHIFT, false)),
-            "AltLeft" => Some((VK_LMENU, false)),
-            "AltRight" => Some((VK_RMENU, true)),
-            // Win 键
-            "MetaLeft" => Some((VK_LWIN, true)),
-            "MetaRight" => Some((VK_RWIN, true)),
-            // 符号键
-            "Minus" => Some((VK_OEM_MINUS, false)),
-            "Equal" => Some((VK_OEM_PLUS, false)),
-            "BracketLeft" => Some((VK_OEM_4, false)),
-            "BracketRight" => Some((VK_OEM_6, false)),
-            "Semicolon" => Some((VK_OEM_1, false)),
-            "Quote" => Some((VK_OEM_7, false)),
-            "Backquote" => Some((VK_OEM_3, false)),
-            "Comma" => Some((VK_OEM_COMMA, false)),
-            "Period" => Some((VK_OEM_PERIOD, false)),
-            "Slash" => Some((VK_OEM_2, false)),
-            "Backslash" => Some((VK_OEM_5, false)),
-            "IntlBackslash" => Some((VK_OEM_5, false)),
-            "ContextMenu" => Some((VK_APPS, false)),
-            // 字母区 A-Z / 数字区 0-9 及功能键 F1-F24：动态构造 VK
-            _ => {
-                // F1-F24（VK_F1..VK_F24 连续）
-                if let Some(n) = code.strip_prefix('F').and_then(|s| s.parse::<u16>().ok()) {
-                    if (1..=24).contains(&n) {
-                        return Some((VIRTUAL_KEY(VK_F1.0 + n - 1), false));
-                    }
-                }
-                // KeyX / DigitN 由 vk 表精确匹配
-                vk(code)
-            }
-        }
-    }
-
-    // 兜底 1：code 以 "Key" 开头且长度为 4（如 "KeyQ"），按字母映射。
-    // 兜底 2：单个可打印字符走字符 -> VK 映射。
-    let fallback = |c: &str| -> Option<(VIRTUAL_KEY, bool)> {
-        if c.len() == 4 && c.starts_with("Key") {
-            let ch = c.as_bytes()[3];
-            if ch.is_ascii_alphabetic() {
-                let vk = if ch.is_ascii_lowercase() {
-                    VK_A.0 + (ch - b'a') as u16
-                } else {
-                    VK_A.0 + (ch - b'A') as u16
-                };
-                return Some((VIRTUAL_KEY(vk), false));
-            }
-            return None;
-        }
-        let ch = c.chars().next()?;
-        if ch.is_ascii_alphabetic() {
-            let base = if ch.is_ascii_lowercase() { b'a' } else { b'A' };
-            return Some((VIRTUAL_KEY(VK_A.0 + (ch as u8 - base) as u16), false));
-        }
-        if ch.is_ascii_digit() {
-            return Some((VIRTUAL_KEY(VK_0.0 + (ch as u8 - b'0') as u16), false));
-        }
-        None
-    };
-
+    // DOM KeyboardEvent.code → 虚拟键码(纯函数 code_to_vk,含字母/数字/符号/F 键/小键盘/修饰键);
+    // 方向键、右 Control/右 Alt、Win 键、编辑键等扩展键必须带 EXTENDEDKEY 标志(由 is_extended_code 判定)。
     let code = code.map(|c| c.to_string()).unwrap_or_else(|| key.to_string());
-    let (vk, extended) = map_code(&code)
-        .or_else(|| fallback(&code))
-        .or_else(|| fallback(key))
+    let vk_num = code_to_vk(&code)
+        .or_else(|| code_to_vk(key))
         .unwrap_or_else(|| {
             log::warn!(
                 "[input] 无法映射按键 code={code}, key={key}, modifiers={modifiers:?}，忽略本次注入"
             );
-            return (VIRTUAL_KEY(0), false);
+            0
         });
-    if vk.0 == 0 {
+    if vk_num == 0 {
         return Ok(InputEventReceipt {
             ok: false,
             message: format!("unmappable key: code={code}, key={key}"),
         });
     }
+    let vk = VIRTUAL_KEY(vk_num);
+    let extended = is_extended_code(&code);
 
     // 组装并发送按键事件（keydown 无标志，keyup 带 KEYEVENTF_KEYUP）
     let mut flags = if extended {
@@ -357,3 +336,22 @@ pub(crate) fn inject_key_event_windows(
         message: "key event sent".into(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_to_vk_mapping() {
+        assert_eq!(code_to_vk("KeyA"), Some(0x41));
+        assert_eq!(code_to_vk("Digit9"), Some(0x39));
+        assert_eq!(code_to_vk("F12"), Some(0x7B));
+        assert_eq!(code_to_vk("Space"), Some(0x20));
+        assert_eq!(code_to_vk("ArrowUp"), Some(0x26));
+        assert_eq!(code_to_vk("ControlLeft"), Some(0xA2));
+        assert_eq!(code_to_vk("MetaRight"), Some(0x5C));
+        assert_eq!(code_to_vk("NumpadEnter"), Some(0x0D));
+        assert_eq!(code_to_vk("Foo"), None);
+    }
+}
+

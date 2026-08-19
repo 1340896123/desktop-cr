@@ -134,6 +134,14 @@ pub(crate) fn apply_stream_cfg(fps: u32, jpeg_quality: u8, width: u32, height: u
         cfg.fps,
         cfg.jpeg_quality
     );
+    crate::operation_log::op_log(
+        "hbb_client",
+        "apply_stream_cfg",
+        &format!(
+            "{}x{} @ {}fps jpeg_quality={}",
+            cfg.target_width, cfg.target_height, cfg.fps, cfg.jpeg_quality
+        ),
+    );
 }
 
 fn config_file() -> PathBuf {
@@ -183,7 +191,13 @@ pub fn get_app_config() -> AppConfig {
 /// 保存应用配置(真实写文件,目录不存在先创建)。
 #[tauri::command]
 pub fn save_app_config(config: AppConfig) -> Result<(), String> {
-    save_app_config_inner(&config)
+    let result = save_app_config_inner(&config);
+    crate::operation_log::op_log(
+        "hbb_client",
+        "save_app_config",
+        &format!("host_port={} peers={}", config.host_port, config.peers.len()),
+    );
+    result
 }
 
 /// 发现/检索设备列表(真实:读取配置 peers 并通过 TCP 探测在线状态)。
@@ -268,16 +282,20 @@ async fn tcp_probe(addr: &str) -> bool {
 pub async fn connect_to_device(peer_id: String, app: AppHandle) -> Result<ConnectionState, String> {
     // 本机不能连接自己
     if peer_id == "local-host" {
-        return Err("本机不能连接自己".to_string());
+        let err = "本机不能连接自己".to_string();
+        crate::operation_log::op_log("hbb_client", "connect_to_device", &format!("失败: {err}"));
+        return Err(err);
     }
     // 从配置查找对端地址
     let cfg = load_app_config();
-    let peer = cfg
-        .peers
-        .iter()
-        .find(|p| p.id == peer_id)
-        .cloned()
-        .ok_or_else(|| format!("未找到对端设备: {peer_id}"))?;
+    let peer = match cfg.peers.iter().find(|p| p.id == peer_id).cloned() {
+        Some(peer) => peer,
+        None => {
+            let err = format!("未找到对端设备: {peer_id}");
+            crate::operation_log::op_log("hbb_client", "connect_to_device", &format!("失败: {err}"));
+            return Err(err);
+        }
+    };
 
     // 真实建立连接;失败时广播断开并返回错误
     if let Err(e) = crate::network::connect_peer(app.clone(), peer_id.clone(), peer.addr.clone()).await
@@ -288,6 +306,7 @@ pub async fn connect_to_device(peer_id: String, app: AppHandle) -> Result<Connec
             error: Some(e.clone()),
         };
         let _ = app.emit("connection-state", &state);
+        crate::operation_log::op_log("hbb_client", "connect_to_device", &format!("失败: {e}"));
         return Err(e);
     }
 
@@ -298,12 +317,15 @@ pub async fn connect_to_device(peer_id: String, app: AppHandle) -> Result<Connec
     };
     app.emit("connection-state", &state)
         .map_err(|e| format!("failed to emit connection-state: {e}"))?;
+    crate::operation_log::op_log("hbb_client", "connect_to_device", &format!("成功: peer={peer_id}"));
     Ok(state)
 }
 
 /// 断开当前连接。
 #[tauri::command]
 pub fn disconnect_from_device(app: AppHandle) -> Result<(), String> {
+    let peer = crate::network::session_peer().unwrap_or_default();
+    crate::operation_log::op_log("hbb_client", "disconnect_from_device", &format!("peer={peer}"));
     crate::network::close_session();
     let state = ConnectionState {
         connected: false,
@@ -332,6 +354,16 @@ pub fn get_connection_state() -> ConnectionState {
     }
 }
 
+/// 画质档位 → (jpeg 质量, 默认帧率):low→(50,10)、medium→(70,20)、high→(85,30)、未知→(70,15)。
+pub(crate) fn quality_params(quality: &str) -> (u8, u32) {
+    match quality {
+        "low" => (50u8, 10u32),
+        "medium" => (70u8, 20u32),
+        "high" => (85u8, 30u32),
+        _ => (70u8, 15u32),
+    }
+}
+
 /// 设置画面质量(真实生效:写入 STREAM_CFG,被控端抓帧循环实时读取)。
 ///
 /// quality: "low/medium/high" → jpeg 质量 50/70/85,档位默认帧率 10/20/30;
@@ -339,12 +371,7 @@ pub fn get_connection_state() -> ConnectionState {
 #[tauri::command]
 pub async fn set_stream_quality(fps: u32, bitrate: Option<u32>, quality: String) -> Result<(), String> {
     let _ = bitrate; // 协议保留参数(LAN 直连下无需码率控制)
-    let (jpeg_quality, default_fps) = match quality.as_str() {
-        "low" => (50u8, 10u32),
-        "medium" => (70u8, 20u32),
-        "high" => (85u8, 30u32),
-        _ => (70u8, 15u32),
-    };
+    let (jpeg_quality, default_fps) = quality_params(&quality);
     let fps = if fps == 0 {
         default_fps
     } else {
@@ -361,6 +388,11 @@ pub async fn set_stream_quality(fps: u32, bitrate: Option<u32>, quality: String)
     };
     log::info!(
         "[hbb_client] set_stream_quality: fps={fps}, quality={quality}, jpeg_quality={jpeg_quality}"
+    );
+    crate::operation_log::op_log(
+        "hbb_client",
+        "set_stream_quality",
+        &format!("fps={fps} quality={quality} jpeg_quality={jpeg_quality}"),
     );
     // 有活跃会话时实时下发到被控端
     if crate::network::session_peer().is_some() {
@@ -391,6 +423,11 @@ pub async fn set_stream_resolution(width: u32, height: u32, fps: u32) -> Result<
         (f, q)
     };
     log::info!("[hbb_client] set_stream_resolution: {width}x{height} @ {fps}fps");
+    crate::operation_log::op_log(
+        "hbb_client",
+        "set_stream_resolution",
+        &format!("{width}x{height} @ {fps}fps"),
+    );
     // 有活跃会话时实时下发到被控端
     if crate::network::session_peer().is_some() {
         let _ = crate::network::session_send(crate::network::Msg::Stream {
@@ -410,9 +447,15 @@ pub fn set_fullscreen(fullscreen: bool, app: AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "找不到主窗口 (main)".to_string())?;
-    window
+    let result = window
         .set_fullscreen(fullscreen)
-        .map_err(|e| format!("设置全屏失败: {e}"))
+        .map_err(|e| format!("设置全屏失败: {e}"));
+    crate::operation_log::op_log(
+        "hbb_client",
+        "set_fullscreen",
+        &format!("fullscreen={fullscreen}"),
+    );
+    result
 }
 
 /// 读取系统剪贴板文本。
@@ -464,6 +507,11 @@ pub async fn sync_clipboard(app: AppHandle) -> Result<String, String> {
     }
     app.emit("clipboard-synced", serde_json::json!({ "text": text }))
         .map_err(|e| format!("failed to emit clipboard-synced: {e}"))?;
+    crate::operation_log::op_log(
+        "hbb_client",
+        "sync_clipboard",
+        &format!("len={}", text.chars().count()),
+    );
     Ok(text)
 }
 
@@ -513,6 +561,7 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
             .lock()
             .map_err(|e| format!("failed to lock host task: {e}"))? = Some(handle);
         log::info!("[hbb_client] start_host: 监听 0.0.0.0:{port}");
+        crate::operation_log::op_log("hbb_client", "start_host", &format!("port={port}"));
         Ok(())
     }
     #[cfg(not(target_os = "windows"))]
@@ -520,6 +569,11 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
         // 非 Windows:仅编译占位(host 仅 Windows 可用)
         log::info!("[hbb_client] start_host (非 Windows,模拟成功)");
         let _ = app.emit("host-state", serde_json::json!({ "running": true, "port": port }));
+        crate::operation_log::op_log(
+            "hbb_client",
+            "start_host",
+            &format!("port={port} (非 Windows 模拟)"),
+        );
         Ok(())
     }
 }
@@ -537,6 +591,7 @@ pub fn stop_host(app: AppHandle) -> Result<(), String> {
     app.emit("host-state", serde_json::json!({ "running": false, "port": 0 }))
         .map_err(|e| format!("failed to emit host-state: {e}"))?;
     log::info!("[hbb_client] stop_host: 已停止");
+    crate::operation_log::op_log("hbb_client", "stop_host", "");
     Ok(())
 }
 
@@ -639,3 +694,66 @@ fn clipboard_write_windows(text: &str) -> Result<(), String> {
     let _ = unsafe { CloseClipboard() };
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quality_params_mapping() {
+        assert_eq!(quality_params("low"), (50u8, 10u32));
+        assert_eq!(quality_params("medium"), (70u8, 20u32));
+        assert_eq!(quality_params("high"), (85u8, 30u32));
+        assert_eq!(quality_params("ultra"), (70u8, 15u32));
+    }
+
+    #[test]
+    fn apply_stream_cfg_clamps() {
+        // 持锁避免与 operation_log 测试并发写同一日志文件
+        let _guard = crate::operation_log::test_lock::LOG_WRITE_LOCK.lock().unwrap();
+        // 越界输入: fps>30 截到 30、quality>100 截到 100、超大分辨率截到 1920
+        apply_stream_cfg(99, 200, 4000, 3000);
+        let cfg = stream_cfg();
+        assert_eq!(cfg.fps, 30);
+        assert_eq!(cfg.jpeg_quality, 100);
+        assert_eq!(cfg.target_width, 1920);
+        assert_eq!(cfg.target_height, 1920);
+
+        // width/height/fps 为 0 时保持原值不变
+        apply_stream_cfg(0, 0, 0, 0);
+        let cfg = stream_cfg();
+        assert_eq!(cfg.fps, 30);
+        assert_eq!(cfg.jpeg_quality, 100);
+        assert_eq!(cfg.target_width, 1920);
+        assert_eq!(cfg.target_height, 1920);
+    }
+
+    #[test]
+    fn app_config_camel_case_json() {
+        let cfg = AppConfig {
+            host_enabled: true,
+            host_port: 21118,
+            peers: vec![PeerConfig {
+                id: "peer-1".into(),
+                name: "本机".into(),
+                addr: "192.168.1.5:21118".into(),
+                platform: Some("windows".into()),
+            }],
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        // camelCase 字段名
+        assert!(json.contains("\"hostEnabled\""));
+        assert!(json.contains("\"hostPort\""));
+        assert!(json.contains("\"peers\""));
+        assert!(json.contains("\"addr\""));
+
+        // serde roundtrip 后内容一致
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.host_enabled, cfg.host_enabled);
+        assert_eq!(back.host_port, cfg.host_port);
+        assert_eq!(back.peers.len(), 1);
+        assert_eq!(back.peers[0].addr, "192.168.1.5:21118");
+        assert_eq!(back.peers[0].platform.as_deref(), Some("windows"));
+    }
+}
+

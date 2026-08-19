@@ -65,6 +65,7 @@ pub fn list_monitors(_app: AppHandle) -> Result<Vec<MonitorInfo>, String> {
     #[cfg(not(target_os = "windows"))]
     {
         log::info!("[capture] list_monitors (非 Windows,返回空列表)");
+        crate::operation_log::op_log("capture", "list_monitors", "count=0 (非 Windows 模拟)");
         Ok(Vec::new())
     }
 }
@@ -98,6 +99,11 @@ pub async fn start_capture(
             .lock()
             .map_err(|e| format!("failed to lock capture task: {e}"))? = Some(handle);
         log::info!("[capture] DXGI 抓屏启动: monitor {monitor_id}");
+        crate::operation_log::op_log(
+            "capture",
+            "start_capture",
+            &format!("monitor={monitor_id} {width}x{height} @ {fps}fps"),
+        );
         Ok(())
     }
 
@@ -110,6 +116,11 @@ pub async fn start_capture(
             .lock()
             .map_err(|e| format!("failed to lock capture task: {e}"))? = Some(handle);
         log::info!("[capture] 模拟抓屏启动(非 Windows): monitor {monitor_id}, {width}x{height} @ {fps}fps");
+        crate::operation_log::op_log(
+            "capture",
+            "start_capture",
+            &format!("monitor={monitor_id} {width}x{height} @ {fps}fps (非 Windows 模拟)"),
+        );
         Ok(())
     }
 }
@@ -119,6 +130,7 @@ pub async fn start_capture(
 pub fn stop_capture() -> Result<(), String> {
     stop_capture_inner();
     log::info!("[capture] 停止抓屏循环");
+    crate::operation_log::op_log("capture", "stop_capture", "");
     Ok(())
 }
 
@@ -160,6 +172,33 @@ pub fn latest_frame() -> Option<(u32, u32, Vec<u8>)> {
     Some((frame.width, frame.height, frame.data.clone()))
 }
 
+/// 按最大尺寸等比缩放(只缩小不放大),返回缩放后的 (宽, 高)。纯函数无平台依赖。
+pub(crate) fn scale_dimensions(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    let src_w = src_w.max(1);
+    let src_h = src_h.max(1);
+    let max_w = max_w.max(1);
+    let max_h = max_h.max(1);
+    // 同时受限于两个方向的最大值,且不超过源分辨率(不放大)
+    let scale = (max_w as f64 / src_w as f64)
+        .min(max_h as f64 / src_h as f64)
+        .min(1.0);
+    let w = ((src_w as f64 * scale).round() as u32).max(1);
+    let h = ((src_h as f64 * scale).round() as u32).max(1);
+    (w, h)
+}
+
+/// 将 BGRA 像素(每像素 4 字节,丢弃 alpha)转换为 RGB(每像素 3 字节)。纯函数无平台依赖。
+pub(crate) fn bgra_to_rgb(data: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let n = (w as usize) * (h as usize);
+    let mut out = Vec::with_capacity(n * 3);
+    for px in data.chunks_exact(4).take(n) {
+        out.push(px[2]);
+        out.push(px[1]);
+        out.push(px[0]);
+    }
+    out
+}
+
 /// 将 RGB 数据(每像素 3 字节)按目标尺寸等比缩放(双线性,不放大)并编码为 JPEG。
 ///
 /// 返回 (jpeg 宽, jpeg 高, jpeg 字节)。目标尺寸 clamp ≤ 1920,且不超过源分辨率。
@@ -173,13 +212,8 @@ fn rgb_to_jpeg(
 ) -> Result<(u32, u32, Vec<u8>), String> {
     let src_w = src_w.max(1);
     let src_h = src_h.max(1);
-    let tw = target_w.clamp(1, 1920).min(src_w);
-    let th = target_h.clamp(1, 1920).min(src_h);
-    let scale = (tw as f64 / src_w as f64)
-        .min(th as f64 / src_h as f64)
-        .min(1.0);
-    let jw = ((src_w as f64 * scale).round() as u32).max(1);
-    let jh = ((src_h as f64 * scale).round() as u32).max(1);
+    let (jw, jh) = scale_dimensions(src_w, src_h, target_w.min(1920), target_h.min(1920));
+    let scale = jw as f64 / src_w as f64;
 
     let mut out = Vec::with_capacity((jw * jh * 3) as usize);
     if jw == src_w && jh == src_h {
@@ -275,6 +309,11 @@ fn list_monitors_windows() -> Result<Vec<MonitorInfo>, String> {
         i += 1;
     }
     log::info!("[capture] list_monitors 枚举到 {} 台显示器", monitors.len());
+    crate::operation_log::op_log(
+        "capture",
+        "list_monitors",
+        &format!("count={}", monitors.len()),
+    );
     Ok(monitors)
 }
 
@@ -409,12 +448,7 @@ async fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String
         let _ = unsafe { dup.ReleaseFrame() };
 
         // 7) BGRA → RGB
-        let mut rgb = Vec::with_capacity((src_w as usize) * (src_h as usize) * 3);
-        for px in bgra.chunks_exact(4) {
-            rgb.push(px[2]);
-            rgb.push(px[1]);
-            rgb.push(px[0]);
-        }
+        let rgb = bgra_to_rgb(&bgra, src_w, src_h);
 
         // 8) 缩放 + JPEG 编码(目标尺寸/画质来自流配置)
         let (jw, jh, jpeg) = match rgb_to_jpeg(
@@ -556,3 +590,42 @@ async fn mock_capture_loop(app: AppHandle, monitor_id: u32, width: u32, height: 
         frame_idx = frame_idx.wrapping_add(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scale_dimensions_shrinks_and_never_enlarges() {
+        // 等比缩小:1920x1080 → 960x540
+        assert_eq!(scale_dimensions(1920, 1080, 960, 540), (960, 540));
+        // 源比目标小:不放大
+        assert_eq!(scale_dimensions(640, 360, 1920, 1080), (640, 360));
+        assert_eq!(scale_dimensions(240, 135, 1920, 1080), (240, 135));
+    }
+
+    #[test]
+    fn bgra_to_rgb_order_and_length() {
+        // 2x2 = 4 像素 BGRA 输入(B,G,R,A)
+        let data: Vec<u8> = vec![
+            0x11, 0x22, 0x33, 0xFF,
+            0x44, 0x55, 0x66, 0xFF,
+            0x77, 0x88, 0x99, 0xFF,
+            0xAA, 0xBB, 0xCC, 0xFF,
+        ];
+        let out = bgra_to_rgb(&data, 2, 2);
+        // 长度 = w*h*3
+        assert_eq!(out.len(), 12);
+        // 每像素 BGR → RGB 顺序(丢弃 alpha)
+        assert_eq!(
+            out,
+            vec![
+                0x33, 0x22, 0x11,
+                0x66, 0x55, 0x44,
+                0x99, 0x88, 0x77,
+                0xCC, 0xBB, 0xAA,
+            ]
+        );
+    }
+}
+
