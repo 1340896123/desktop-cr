@@ -888,6 +888,10 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
             {
                 log::warn!("[hbb_client] host 抓帧启动失败(继续以无帧模式运行): {e}");
             }
+            // 音频链路:启动被控端音频采集(系统回环);失败不阻塞 host
+            if let Err(e) = crate::audio::start_audio_capture() {
+                log::warn!("[hbb_client] host 音频采集启动失败(继续无音频): {e}");
+            }
             // 配置了信令服务器则后台注册本机并心跳(随 host 停止而取消)
             let reg_task = if signal_addr.is_some() {
                 Some(tokio::spawn(crate::network::signal_register_loop(
@@ -936,8 +940,9 @@ pub fn stop_host(app: AppHandle) -> Result<(), String> {
             handle.abort();
         }
     }
-    // host 停止时一并停止抓帧(该抓帧由 start_host 启动)
+    // host 停止时一并停止抓帧与音频采集(由 start_host 启动)
     let _ = crate::capture::stop_capture();
+    crate::audio::stop_audio_capture();
     app.emit("host-state", serde_json::json!({ "running": false, "port": 0 }))
         .map_err(|e| format!("failed to emit host-state: {e}"))?;
     log::info!("[hbb_client] stop_host: 已停止");

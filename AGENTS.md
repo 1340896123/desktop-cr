@@ -25,6 +25,8 @@ WinUI-style remote desktop client: **Tauri v2 + React 18 + Fluent UI React v9**.
   - `operation_log.rs` — 操作日志持久化(`app_config_dir/logs/operations-YYYYMMDD.log`,按 UTC 日期轮转),命令 `get_operation_logs`,各模块关键操作经 `op_log` 写入。
   - `media_pipeline.rs` — 音视频全链路测试管道:采集(DXGI 单帧 / cpal WASAPI)→ 编码(JPEG / WAV)→ 传输(network.rs 真实 TCP framing loopback)→ 解码(image / hound)→ 存本地文件;命令 `run_media_pipeline_test`;`#[cfg(test)]` 用合成数据覆盖合成链路。
   - `bench.rs` — 实时链路性能基准 `run_realtime_bench_command`(前端可调):模式 `loopback`(本机回环)或 `relay`(经公网中继 `relay_addr` 配对 host/client 透明通道),真实 DXGI 采集 → 缩放+JPEG 编码 → 协议帧发送 → 本机解码渲染,每秒输出实时帧率;静止桌面自动复用上一帧,无帧时回退合成动画帧(`synthetic=true` 直接跳过抓屏);`#[test] #[ignore]` 两个基准(回环 / 中继,`DCR_BENCH_RELAY` 环境变量指定中继地址,缺省 `120.78.77.248:21117`)。
+  - `audio.rs` — 远程会话音频链路:被控端常驻采集(`start_audio_capture`,复用 `media_pipeline::capture_system_audio` 真实 WASAPI 回环/回退 cpal,1s 切块发布),`host_write_loop` 以 `Msg::Audio` 推送新块;控制端 `peer_read_loop` 收到后 `play_audio` 经 cpal i16 输出流播放,断会停止;无输出设备静默跳过。
+  - `ffmpeg_hw.rs` — 视频默认 H.264:编码走硬件(`preferred_encoder` 按 GPU 选 NVENC/QSV/AMF → 软件回退);解码按 RustDesk 技术路线实现 **D3D11VA 硬件解码**(创建 AV_HWDEVICE_TYPE_D3D11VA 设备 → 按 n8.0/avcodec-63 公开布局写 `AVCodecContext.hw_device_ctx` → `av_hwframe_transfer_data` 拷回 NV12 → swscale 转 RGB24),`avcodec_version()` 校验 major==63 且用编译期 `offset_of!` 断言字段偏移,不符或失败自动回退软件解码;`using_hwaccel()` 暴露解码路径。
 - `server/` — **独立 crate**(Windows 可运行 exe):
   - `dcr-signal.exe` — 信令 + STUN:TCP 21116 注册/心跳/查找/在线列表,连接断开自动注销;UDP 21115 RFC 5389 二进制 STUN Binding(XOR-MAPPED-ADDRESS)+ 不同源端口 NAT 探测 + `{"t":"stun"}` 调试;`--relay-hint` 下发中继地址。
   - `dcr-relay.exe` — TURN-like 中继:TCP 21117 `allocate {id,role}` 配对后双向字节透明转发(copy_bidirectional,上层 framing 透传);UDP 21119 `alloc-udp`/`data` 数据报转发。

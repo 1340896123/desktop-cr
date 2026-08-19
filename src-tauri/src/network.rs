@@ -724,16 +724,18 @@ async fn host_read_loop(app: AppHandle, mut read_half: tokio::net::tcp::OwnedRea
     }
 }
 
-/// 被控端推帧循环:按流配置的帧率推送最新 JPEG 帧,同时转发会话消息。
+/// 被控端推帧循环:按流配置的帧率推送最新 JPEG 帧,同时转发会话消息,并推送音频块。
 async fn host_write_loop(
     mut write_half: tokio::net::tcp::OwnedWriteHalf,
     mut rx: mpsc::Receiver<Msg>,
 ) -> Result<(), String> {
     let mut seq: u64 = 0;
+    // 已发送的最新音频块序号(音频链路:新块才推送)
+    let mut sent_audio_seq: u64 = 0;
     loop {
         let cfg = crate::hbb_client::stream_cfg();
         let wait_ms = (1000u64 / u64::from(cfg.fps.clamp(1, 30))).max(1);
-        let outgoing: Option<Msg> = tokio::select! {
+        let outgoing: Vec<Msg> = tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(wait_ms)) => {
                 // 有最新帧才推送(没有帧则跳过本轮);codec 依流配置选 FFmpeg 视频或 JPEG
                 let use_video = cfg.codec == "h264" || cfg.codec == "hevc";
@@ -748,8 +750,9 @@ async fn host_write_loop(
                     crate::capture::latest_frame()
                         .map(|(w, h, j)| (w, h, j, "jpeg".to_string(), false))
                 };
-                match frame {
-                    Some((w, h, data, codec, key)) => Some(Msg::Frame {
+                let mut msgs: Vec<Msg> = Vec::new();
+                if let Some((w, h, data, codec, key)) = frame {
+                    msgs.push(Msg::Frame {
                         w,
                         h,
                         seq,
@@ -761,22 +764,37 @@ async fn host_write_loop(
                         },
                         codec,
                         key,
-                    }),
-                    None => None,
+                    });
+                    seq = seq.wrapping_add(1);
                 }
+                // 音频链路:有新音频块(seq 递增)则一并推送
+                if let Some(ab) = crate::audio::latest_audio() {
+                    if ab.seq != sent_audio_seq {
+                        sent_audio_seq = ab.seq;
+                        msgs.push(Msg::Audio {
+                            sample_rate: ab.sample_rate,
+                            channels: ab.channels,
+                            seq: ab.seq,
+                            wav: base64::engine::general_purpose::STANDARD.encode(&ab.wav),
+                        });
+                    }
+                }
+                msgs
             }
-            m = rx.recv() => m,
+            m = rx.recv() => m.map(|m| vec![m]).unwrap_or_default(),
         };
-        let Some(msg) = outgoing else {
+        if outgoing.is_empty() {
             // 通道关闭 = 会话被替换或主动关闭,结束写循环
-            break;
-        };
-        if let Msg::Frame { seq: s, .. } = &msg {
-            seq = s.wrapping_add(1);
+            if rx.is_closed() {
+                break;
+            }
+            continue;
         }
-        write_msg(&mut write_half, &msg)
-            .await
-            .map_err(|e| format!("发送消息失败: {e}"))?;
+        for msg in outgoing {
+            write_msg(&mut write_half, &msg)
+                .await
+                .map_err(|e| format!("发送消息失败: {e}"))?;
+        }
     }
     log::info!("[network] host 写循环结束");
     Ok(())
@@ -1185,6 +1203,26 @@ async fn peer_read_loop(
                     };
                     log::debug!("[network] pong 延迟: {rtt} ms");
                 }
+                Msg::Audio {
+                    sample_rate,
+                    channels,
+                    seq,
+                    wav,
+                } => {
+                    // 远程音频回传:解码 WAV 后经控制端播放
+                    match base64::engine::general_purpose::STANDARD.decode(&wav) {
+                        Ok(data) => {
+                            if let Err(e) = crate::audio::play_audio(&data) {
+                                log::warn!("[network] 播放远程音频失败(seq={seq}): {e}");
+                            } else {
+                                log::debug!(
+                                    "[network] 收到并播放远程音频 sample_rate={sample_rate} channels={channels} seq={seq}"
+                                );
+                            }
+                        }
+                        Err(e) => log::warn!("[network] 音频帧 base64 解码失败: {e}"),
+                    }
+                }
                 _ => {}
             }
         }
@@ -1199,6 +1237,8 @@ async fn peer_read_loop(
             "disconnect",
             &format!("peer={peer_id} addr={peer_addr} reason={reason}"),
         );
+        // 断开会话时停止控制端音频播放(释放输出设备)
+        crate::audio::stop_audio_playback();
         let _ = app.emit(
             "connection-state",
             serde_json::json!({
@@ -1238,6 +1278,14 @@ fn decode_video_to_jpeg(
     let need_rebuild = decoder.as_ref().map(|(c, _)| c != codec).unwrap_or(true);
     if need_rebuild {
         if let Ok(d) = crate::ffmpeg_hw::HwDecoder::open(crate::ffmpeg_hw::codec_family_id(codec)) {
+            log::info!(
+                "[network] 会话解码器创建: codec={codec}, 路径={}",
+                if d.using_hwaccel() {
+                    "D3D11VA 硬件"
+                } else {
+                    "软件"
+                }
+            );
             *decoder = Some((codec.to_string(), d));
         }
     }
