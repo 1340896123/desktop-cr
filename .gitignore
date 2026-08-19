@@ -22,5 +22,8 @@ yarn-error.log*
 src-tauri/target/
 src-tauri/gen/
 
+# server crate build output
+server/target/
+
 # CodeBuddy project data
 .codebuddy/

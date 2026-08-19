@@ -1,0 +1,24 @@
+[package]
+name = "dcr-server"
+version = "0.1.0"
+edition = "2021"
+description = "dcr 远程桌面信号服务器/中继服务器(脚手架 + 协议基础库)"
+
+[lib]
+name = "dcr_server"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+base64 = "0.22"
+
+[[bin]]
+name = "dcr-signal"
+path = "src/bin/dcr-signal.rs"
+
+[[bin]]
+name = "dcr-relay"
+path = "src/bin/dcr-relay.rs"
