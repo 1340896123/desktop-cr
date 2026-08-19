@@ -23,6 +23,10 @@ env_logger = "0.11"
 # LAN 远程控制协议：帧内 base64、JPEG 编码、动态加载 IDD 控制 DLL
 base64 = "0.22"
 jpeg-encoder = "0.6"
+# 音视频全链路测试:JPEG 解码(image)、WAV 编解码(hound)、音频采集(cpal)
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+hound = "3"
+cpal = "0.16"
 libloading = "0.8"
 
 # ----------------------------------------------------------------------

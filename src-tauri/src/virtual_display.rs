@@ -28,12 +28,30 @@ pub struct VirtualMonitor {
     pub connected: bool,
 }
 
+/// 虚拟屏分辨率对应的注册表值名(如 1920x1080 → "1920x1080")。纯函数无平台依赖。
+pub(crate) fn monitor_registry_value(width: u32, height: u32) -> String {
+    format!("{width}x{height}")
+}
+
 /// 安装虚拟显示器驱动。
 #[tauri::command]
 pub fn install_virtual_display_driver(app: AppHandle) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
-        install_virtual_display_driver_windows(&app)
+        let result = install_virtual_display_driver_windows(&app);
+        match &result {
+            Ok(msg) => crate::operation_log::op_log(
+                "virtual_display",
+                "install_driver",
+                &format!("成功: {msg}"),
+            ),
+            Err(e) => crate::operation_log::op_log(
+                "virtual_display",
+                "install_driver",
+                &format!("失败: {e}"),
+            ),
+        }
+        result
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -60,7 +78,9 @@ pub fn add_virtual_monitor(
         let driver_dir = locate_driver_dir(&app)?;
         let current = enumerate_virtual_monitors();
         if current.len() >= 4 {
-            return Err("最多 4 个虚拟屏".to_string());
+            let err = "最多 4 个虚拟屏".to_string();
+            crate::operation_log::op_log("virtual_display", "add_monitor", &format!("失败: {err}"));
+            return Err(err);
         }
         // 写入注册表,保证目标分辨率在列表首位(需要管理员权限)
         write_monitor_resolutions(width, height)?;
@@ -87,6 +107,11 @@ pub fn add_virtual_monitor(
         log::info!(
             "[virtual_display] 新增虚拟屏 {width}x{height} @ {fps}fps -> id={new_id}"
         );
+        crate::operation_log::op_log(
+            "virtual_display",
+            "add_monitor",
+            &format!("{width}x{height} @ {fps}fps -> id={new_id}"),
+        );
         Ok(new_id)
     }
     #[cfg(not(target_os = "windows"))]
@@ -95,6 +120,11 @@ pub fn add_virtual_monitor(
         let _ = &app;
         log::info!(
             "[virtual_display] (非 Windows) 模拟新增虚拟屏 {width}x{height} @ {fps}fps"
+        );
+        crate::operation_log::op_log(
+            "virtual_display",
+            "add_monitor",
+            &format!("{width}x{height} @ {fps}fps -> id=1 (非 Windows 模拟)"),
         );
         Ok(1)
     }
@@ -107,11 +137,21 @@ pub fn list_virtual_monitors() -> Result<Vec<VirtualMonitor>, String> {
     {
         let monitors = enumerate_virtual_monitors();
         log::info!("[virtual_display] 枚举到 {} 个虚拟屏", monitors.len());
+        crate::operation_log::op_log(
+            "virtual_display",
+            "list_monitors",
+            &format!("count={}", monitors.len()),
+        );
         Ok(monitors)
     }
     #[cfg(not(target_os = "windows"))]
     {
         log::info!("[virtual_display] (非 Windows) 返回空虚拟屏列表");
+        crate::operation_log::op_log(
+            "virtual_display",
+            "list_monitors",
+            "count=0 (非 Windows 模拟)",
+        );
         Ok(Vec::new())
     }
 }
@@ -139,6 +179,11 @@ pub fn remove_virtual_monitor(monitor_id: u32, app: AppHandle) -> Result<(), Str
         }
         emit_monitors_changed(&app)?;
         log::info!("[virtual_display] 移除虚拟屏(monitor_id={monitor_id})");
+        crate::operation_log::op_log(
+            "virtual_display",
+            "remove_monitor",
+            &format!("id={monitor_id}"),
+        );
         Ok(())
     }
     #[cfg(not(target_os = "windows"))]
@@ -146,6 +191,11 @@ pub fn remove_virtual_monitor(monitor_id: u32, app: AppHandle) -> Result<(), Str
         // 非 Windows:仅编译占位
         let _ = &app;
         log::info!("[virtual_display] (非 Windows) 模拟移除虚拟屏 id={monitor_id}");
+        crate::operation_log::op_log(
+            "virtual_display",
+            "remove_monitor",
+            &format!("id={monitor_id} (非 Windows 模拟)"),
+        );
         Ok(())
     }
 }
@@ -291,7 +341,7 @@ fn write_monitor_resolutions(width: u32, height: u32) -> Result<(), String> {
         "2560x1440",
         "3840x2160",
     ];
-    let target = format!("{width}x{height}");
+    let target = monitor_registry_value(width, height);
     let values: Vec<(String, String)> = std::iter::once(target.clone())
         .chain(defaults.iter().map(|s| s.to_string()).filter(|s| *s != target))
         .take(10)
@@ -417,3 +467,15 @@ fn try_dylib_plug(driver_dir: &Path, plug_in: bool, id: u32) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monitor_registry_value_formats() {
+        assert_eq!(monitor_registry_value(1920, 1080), "1920x1080");
+        assert_eq!(monitor_registry_value(2560, 1440), "2560x1440");
+    }
+}
+

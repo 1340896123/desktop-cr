@@ -29,7 +29,7 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// 协议消息(以 `t` 字段区分类型;变体名转 kebab-case,如 HelloAck → "hello-ack")。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "kebab-case")]
 pub enum Msg {
     /// 握手:发送方标识
@@ -82,6 +82,13 @@ pub enum Msg {
     /// 心跳响应
     Pong {
         ts: u64,
+    },
+    /// 音频帧(wav 为 base64 编码;协议预留,当前仅被控端记录日志)
+    Audio {
+        sample_rate: u16,
+        channels: u16,
+        seq: u64,
+        wav: String,
     },
 }
 
@@ -157,7 +164,10 @@ fn now_ms() -> u64 {
 }
 
 /// 写一条消息(4 字节小端长度 + JSON)。
-async fn write_msg<S: AsyncWrite + Unpin>(stream: &mut S, msg: &Msg) -> Result<(), String> {
+pub(crate) async fn write_msg<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    msg: &Msg,
+) -> Result<(), String> {
     let bytes = serde_json::to_vec(msg).map_err(|e| format!("序列化失败: {e}"))?;
     let len = (bytes.len() as u32).to_le_bytes();
     stream
@@ -172,7 +182,7 @@ async fn write_msg<S: AsyncWrite + Unpin>(stream: &mut S, msg: &Msg) -> Result<(
 }
 
 /// 读一条消息(4 字节小端长度 + JSON)。
-async fn read_msg<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Msg, String> {
+pub(crate) async fn read_msg<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Msg, String> {
     let mut len = [0u8; 4];
     stream
         .read_exact(&mut len)
@@ -212,6 +222,7 @@ pub(crate) async fn serve_host(app: AppHandle, listener: TcpListener) -> Result<
             .await
             .map_err(|e| format!("accept 失败: {e}"))?;
         log::info!("[network] 收到连接: {addr}");
+        crate::operation_log::op_log("network", "host_accept", &format!("addr={addr}"));
         // 单连接策略:新连接踢掉旧连接(旧会话发送通道关闭后其任务自然退出)
         close_session();
         let app = app.clone();
@@ -263,18 +274,29 @@ async fn handle_host_connection(
     let read_task = tokio::spawn(host_read_loop(app.clone(), read_half));
     let write_task = tokio::spawn(host_write_loop(write_half, rx));
 
-    tokio::select! {
-        r = read_task => r.map_err(|e| format!("读任务失败: {e}"))??,
-        w = write_task => w.map_err(|e| format!("写任务失败: {e}"))??,
-    }
+    let sess_err: Result<(), String> = tokio::select! {
+        r = read_task => r.map_err(|e| format!("读任务失败: {e}"))?,
+        w = write_task => w.map_err(|e| format!("写任务失败: {e}"))?,
+    };
 
     // 任一路退出即会话结束;仅当会话仍属于自己时才广播断开
     if close_session_if(&peer_id, &addr.to_string()) {
+        let reason = sess_err
+            .as_ref()
+            .err()
+            .cloned()
+            .unwrap_or_else(|| "会话结束(正常)".to_string());
+        crate::operation_log::op_log(
+            "network",
+            "host_session_end",
+            &format!("peer={peer_id} addr={addr} reason={reason}"),
+        );
         let _ = app.emit(
             "connection-state",
             serde_json::json!({ "connected": false, "peerId": peer_id }),
         );
     }
+    sess_err?;
     Ok(())
 }
 
@@ -348,6 +370,17 @@ async fn host_read_loop(app: AppHandle, mut read_half: tokio::net::tcp::OwnedRea
                 // 心跳:回 pong
                 let _ = session_send(Msg::Pong { ts }).await;
             }
+            Msg::Audio {
+                sample_rate,
+                channels,
+                seq,
+                ..
+            } => {
+                // 音频帧(协议预留):仅记录日志,暂不做播放
+                log::info!(
+                    "[network] 收到音频帧 sample_rate={sample_rate} channels={channels} seq={seq}"
+                );
+            }
             _ => {}
         }
     }
@@ -416,6 +449,11 @@ pub async fn connect_peer(app: AppHandle, id: String, addr: String) -> Result<()
     match ack {
         Msg::HelloAck { id: host_id } => {
             log::info!("[network] 握手成功,对端: {host_id} ({addr})");
+            crate::operation_log::op_log(
+                "network",
+                "connect",
+                &format!("peer={host_id} addr={addr}"),
+            );
         }
         other => return Err(format!("握手响应异常: {other:?}")),
     }
@@ -489,12 +527,18 @@ async fn peer_read_loop(
 
     // 断线清理:仅当会话仍属于自己时广播断开
     if close_session_if(&peer_id, &peer_addr) {
+        let reason = result.err().unwrap_or_else(|| "连接已断开".to_string());
+        crate::operation_log::op_log(
+            "network",
+            "disconnect",
+            &format!("peer={peer_id} addr={peer_addr} reason={reason}"),
+        );
         let _ = app.emit(
             "connection-state",
             serde_json::json!({
                 "connected": false,
                 "peerId": peer_id,
-                "error": result.err().unwrap_or_else(|| "连接已断开".to_string()),
+                "error": reason,
             }),
         );
     }
@@ -512,3 +556,105 @@ async fn peer_write_loop(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn msg_tag_serialization() {
+        // 序列化后应含内部标签 `t`
+        let hello_ack = Msg::HelloAck { id: "peer-1".into() };
+        let s = serde_json::to_string(&hello_ack).unwrap();
+        assert!(s.contains("\"t\":\"hello-ack\""));
+
+        let frame = Msg::Frame {
+            w: 640,
+            h: 360,
+            seq: 3,
+            jpeg: "AQID".into(),
+        };
+        let s = serde_json::to_string(&frame).unwrap();
+        assert!(s.contains("\"t\":\"frame\""));
+
+        let audio = Msg::Audio {
+            sample_rate: 48000,
+            channels: 2,
+            seq: 0,
+            wav: "AA==".into(),
+        };
+        let s = serde_json::to_string(&audio).unwrap();
+        assert!(s.contains("\"t\":\"audio\""));
+    }
+
+    #[test]
+    fn msg_roundtrip() {
+        let variants = vec![
+            Msg::Hello {
+                id: "client-1".into(),
+                app: "desktop-cr".into(),
+                ver: 1,
+            },
+            Msg::HelloAck { id: "host-1".into() },
+            Msg::Frame {
+                w: 1280,
+                h: 720,
+                seq: 42,
+                jpeg: "aGVsbG8=".into(),
+            },
+            Msg::Mouse {
+                x: 0.5,
+                y: 0.25,
+                kind: "move".into(),
+                button: None,
+                delta: 0.0,
+            },
+            Msg::Key {
+                key: "a".into(),
+                kind: "down".into(),
+                code: Some("KeyA".into()),
+                mods: vec!["Control".into()],
+            },
+            Msg::Clipboard { text: "你好".into() },
+            Msg::Stream {
+                fps: 30,
+                jpeg_quality: 85,
+                width: 1920,
+                height: 1080,
+            },
+            Msg::Ping { ts: 111 },
+            Msg::Pong { ts: 222 },
+            Msg::Audio {
+                sample_rate: 44100,
+                channels: 1,
+                seq: 7,
+                wav: "d2F2".into(),
+            },
+        ];
+        for v in variants {
+            let bytes = serde_json::to_vec(&v).unwrap();
+            let back: Msg = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(v, back);
+        }
+    }
+
+    #[tokio::test]
+    async fn framing_roundtrip_tcp() {
+        // 监听本地随机端口,一端 write_msg 一端 read_msg,验证 framing 往返一致
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+
+        let frame = Msg::Frame {
+            w: 960,
+            h: 540,
+            seq: 9,
+            jpeg: "AQIDBAUG".into(),
+        };
+        write_msg(&mut server, &frame).await.unwrap();
+        let got = read_msg(&mut client).await.unwrap();
+        assert_eq!(got, frame);
+    }
+}
+
