@@ -9,7 +9,7 @@
 //!
 //! 非 Windows 平台:全部为编译占位,保证跨平台可编译。
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -31,6 +31,30 @@ static LATEST_AUDIO: Mutex<Option<AudioBlock>> = Mutex::new(None);
 
 /// 音频块序号(每次发布递增;host_write_loop 依此判断是否有新块)。
 static AUDIO_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 音频静音标志(控制端收到音频块时据此跳过播放)。
+static AUDIO_MUTED: AtomicBool = AtomicBool::new(false);
+
+/// 当前是否静音(控制端播放远程音频前检查)。
+pub fn is_audio_muted() -> bool {
+    AUDIO_MUTED.load(Ordering::Relaxed)
+}
+
+/// 设置音频静音(前端麦克风按钮真实可用)。
+#[tauri::command]
+pub fn set_audio_muted(muted: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        AUDIO_MUTED.store(muted, Ordering::Relaxed);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = muted;
+    }
+    log::info!("[audio] 音频静音状态: {muted}");
+    crate::operation_log::op_log("audio", "mute", &format!("muted={muted}"));
+    Ok(())
+}
 
 /// 音频采集线程句柄。
 static AUDIO_TASK: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
