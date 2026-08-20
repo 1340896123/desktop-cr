@@ -12,6 +12,7 @@
 //! - 剪贴板:读取本机剪贴板并经 network::session_send 实时同步到对端。
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -322,6 +323,7 @@ pub fn save_app_config(config: AppConfig) -> Result<(), String> {
 ///
 /// 通过 TCP 探测:对每个 peer 用 tokio TcpStream::connect(1 秒超时),
 /// 连通 = online,否则 offline;host_enabled 时追加本机被控端条目。
+/// 直连探测失败但对端已在信令服务器注册(可经外部地址/中继兜底连接)时同样视为在线。
 #[tauri::command]
 pub async fn list_devices() -> Vec<DeviceInfo> {
     #[cfg(target_os = "windows")]
@@ -343,8 +345,19 @@ pub async fn list_devices() -> Vec<DeviceInfo> {
             online.push(h.await.unwrap_or(false));
         }
 
+        // 信令服务器在线列表(直连失败但已注册的对端视为在线)
+        let mut signal_peers = Vec::new();
+        if let Some(sig) = cfg.signal_server.clone() {
+            match crate::network::signal_list(&sig).await {
+                Ok(peers) => signal_peers = peers,
+                Err(e) => log::warn!("[hbb_client] 信令设备列表获取失败: {e}"),
+            }
+        }
+        let signal_online: HashSet<String> = signal_peers.iter().map(|p| p.id.clone()).collect();
+
         for (i, peer) in cfg.peers.iter().enumerate() {
-            let status = if online.get(i).copied().unwrap_or(false) {
+            let probed = online.get(i).copied().unwrap_or(false);
+            let status = if probed || signal_online.contains(&peer.id) {
                 "online"
             } else {
                 "offline"
@@ -369,41 +382,36 @@ pub async fn list_devices() -> Vec<DeviceInfo> {
         }
 
         // 信令服务器发现的在线设备(不在本地配置的按 ID 展示,可经信令/中继连接)
-        if let Some(sig) = cfg.signal_server.clone() {
-            match crate::network::signal_list(&sig).await {
-                Ok(peers) => {
-                    // 本机自身已在 local-host 条目展示,需从信令列表剔除(避免重复出现两台设备码)
-                    let local_id = if cfg.host_id.trim().is_empty() {
-                        default_host_id()
-                    } else {
-                        cfg.host_id.clone()
-                    };
-                    // 已登录账号时仅展示本账号设备,避免混入其他账号的在线设备
-                    let my_user = cfg.account.as_ref().map(|a| a.username.clone());
-                    for p in peers {
-                        if p.id == local_id {
-                            continue;
-                        }
-                        if let Some(u) = &my_user {
-                            if p.owner != *u {
-                                continue;
-                            }
-                        }
-                        if !devices.iter().any(|d| d.id == p.id) {
-                            devices.push(DeviceInfo {
-                                id: p.id.clone(),
-                                name: if p.name.is_empty() {
-                                    p.id.clone()
-                                } else {
-                                    p.name.clone()
-                                },
-                                status: "online".into(),
-                                platform: "signal".into(),
-                            });
-                        }
+        if !signal_peers.is_empty() {
+            // 本机自身已在 local-host 条目展示,需从信令列表剔除(避免重复出现两台设备码)
+            let local_id = if cfg.host_id.trim().is_empty() {
+                default_host_id()
+            } else {
+                cfg.host_id.clone()
+            };
+            // 已登录账号时仅展示本账号设备,避免混入其他账号的在线设备
+            let my_user = cfg.account.as_ref().map(|a| a.username.clone());
+            for p in signal_peers {
+                if p.id == local_id {
+                    continue;
+                }
+                if let Some(u) = &my_user {
+                    if p.owner != *u {
+                        continue;
                     }
                 }
-                Err(e) => log::warn!("[hbb_client] 信令设备列表获取失败: {e}"),
+                if !devices.iter().any(|d| d.id == p.id) {
+                    devices.push(DeviceInfo {
+                        id: p.id.clone(),
+                        name: if p.name.is_empty() {
+                            p.id.clone()
+                        } else {
+                            p.name.clone()
+                        },
+                        status: "online".into(),
+                        platform: "signal".into(),
+                    });
+                }
             }
         }
 

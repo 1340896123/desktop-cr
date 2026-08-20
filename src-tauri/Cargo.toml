@@ -10,6 +10,9 @@ edition = "2021"
 name = "winui-remote-desktop"
 path = "src/main.rs"
 
+[build]
+
+rustc-wrapper = "sccache"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -64,15 +67,22 @@ windows = { version = "0.58", features = [
   "Win32_Media_KernelStreaming",
 ] }
 
+
+
 [profile.dev]
-# debuginfo=1（仅行号表）：规避 rustc 1.97 对 webview2-com 等巨型类型
-# 生成完整调试信息时的 ICE（debuginfo=2 崩溃）
-debug = 1
+opt-level = 0          # 关闭所有优化，这是编译最快的设置[reference:1][reference:2]
+debug = 1              # 只保留行号信息，便于调试，同时比 full debug 信息编译更快[reference:3]
+codegen-units = 256    # 使用大量代码生成单元，最大化并行编译速度[reference:4]
+incremental = true     # 开启增量编译，只重新编译修改过的部分[reference:5][reference:6]
+lto = false            # 关闭链接时优化，它会显著拖慢链接速度[reference:7]
 
 [profile.dev.package."*"]
 # 依赖不生成调试信息，显著加快编译并规避 LLVM debuginfo 崩溃
 debug = 0
 
 [profile.release]
-strip = true
-lto = true
+opt-level = 0          # 关闭所有优化，这是编译最快的设置[reference:1][reference:2]
+debug = 1              # 只保留行号信息，便于调试，同时比 full debug 信息编译更快[reference:3]
+codegen-units = 256    # 使用大量代码生成单元，最大化并行编译速度[reference:4]
+incremental = true     # 开启增量编译，只重新编译修改过的部分[reference:5][reference:6]
+lto = false            # 关闭链接时优化，它会显著拖慢链接速度[reference:7]

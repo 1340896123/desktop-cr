@@ -10,7 +10,7 @@ import {
 import { IconButton } from './shared/IconButton';
 import { WindowControls } from './shared/WindowControls';
 import { UnsupportedTag } from './shared/UnsupportedTag';
-import { fontFamily, titleBarHeight, zIndex } from '../theme/tokens';
+import { fontFamily, palette, titleBarHeight, zIndex } from '../theme/tokens';
 
 const UU_BLUE = '#0066ff';
 
@@ -152,6 +152,99 @@ const useStyles = makeStyles({
     color: '#6B7280',
     marginTop: '2px',
   },
+  userPopover: {
+    position: 'absolute',
+    right: '0',
+    top: 'calc(100% + 8px)',
+    width: '264px',
+    backgroundColor: '#ffffff',
+    borderRadius: '8px',
+    boxShadow: '0 8px 24px rgba(16,24,40,0.12), 0 2px 6px rgba(16,24,40,0.06)',
+    border: '1px solid #f3f4f6',
+    padding: '12px',
+    zIndex: zIndex.modal,
+    textAlign: 'left',
+  },
+  userHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    borderBottom: '1px solid #f3f4f6',
+    paddingBottom: '10px',
+    marginBottom: '10px',
+  },
+  userAvatar: {
+    width: '34px',
+    height: '34px',
+    borderRadius: '50%',
+    backgroundColor: UU_BLUE,
+    color: '#ffffff',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontFamily,
+    fontSize: '15px',
+    fontWeight: 700,
+    flexShrink: 0,
+  },
+  userName: {
+    fontFamily,
+    fontSize: '14px',
+    fontWeight: 600,
+    color: '#1F2937',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  userServer: {
+    fontFamily,
+    fontSize: '11px',
+    color: '#6B7280',
+    marginTop: '2px',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  userInfoRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    padding: '6px 0',
+    fontFamily,
+    fontSize: '12px',
+    color: '#4B5563',
+  },
+  userInfoLabel: {
+    color: '#9CA3AF',
+    flexShrink: 0,
+  },
+  userInfoValue: {
+    color: '#1F2937',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  logoutBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '6px',
+    width: '100%',
+    marginTop: '10px',
+    padding: '8px 0',
+    borderRadius: '6px',
+    backgroundColor: palette.destructive,
+    color: '#ffffff',
+    fontFamily,
+    fontSize: '13px',
+    fontWeight: 600,
+    border: 'none',
+    cursor: 'pointer',
+    transition: 'opacity 150ms ease',
+    '&:hover': {
+      opacity: 0.9,
+    },
+  },
   divider: {
     width: '1px',
     height: '18px',
@@ -173,18 +266,28 @@ const useStyles = makeStyles({
 interface TitleBarProps {
   onRefresh?: () => void;
   onShowToast?: (msg: string) => void;
+  /** 当前登录账号信息(用于用户中心展示) */
+  account?: { username: string; server: string; token: string } | null;
+  /** 退出登录回调 */
+  onLogout?: () => void;
 }
 
 /**
  * 顶部栏：左侧返回 + 蓝色旋转方块图标 + 应用名「网易UU远程」；
- * 右侧刷新 / 独立窗口 / 通知铃铛（红底徽标 + 消息通知弹层）/ 用户 / 汉堡 /
+ * 右侧刷新 / 独立窗口 / 通知铃铛（红底徽标 + 消息通知弹层）/ 用户（账号信息 + 登出浮层）/ 汉堡 /
  * 细分隔线 / 窗口控制组（最小化 / 最大化还原 / 关闭，hover 变红）。
  */
-export const TitleBar: React.FC<TitleBarProps> = ({ onRefresh, onShowToast }) => {
+export const TitleBar: React.FC<TitleBarProps> = ({ onRefresh, onShowToast, account, onLogout }) => {
   const styles = useStyles();
   const [refreshing, setRefreshing] = useState(false);
   const [noticeOpen, setNoticeOpen] = useState(false);
+  const [userOpen, setUserOpen] = useState(false);
   const [unread, setUnread] = useState(2);
+
+  const handleLogout = () => {
+    setUserOpen(false);
+    onLogout?.();
+  };
 
   const handleRefresh = () => {
     if (!onRefresh) return;
@@ -263,9 +366,42 @@ export const TitleBar: React.FC<TitleBarProps> = ({ onRefresh, onShowToast }) =>
             )}
           </span>
 
-          <IconButton label="用户" onClick={() => onShowToast?.('用户中心功能暂未开放')} dragExclude>
-            <PersonRegular fontSize={16} />
-          </IconButton>
+          <span className={styles.iconBtnWrap}>
+            <IconButton label="用户" onClick={() => setUserOpen((prev) => !prev)} dragExclude>
+              <PersonRegular fontSize={16} />
+            </IconButton>
+            {userOpen && (
+              <div className={styles.userPopover}>
+                <div className={styles.userHeader}>
+                  <span className={styles.userAvatar}>
+                    {(account?.username ?? '?').charAt(0).toUpperCase()}
+                  </span>
+                  <div style={{ minWidth: 0 }}>
+                    <div className={styles.userName}>{account?.username ?? '未登录'}</div>
+                    <div className={styles.userServer}>{account?.server ?? '暂无服务地址'}</div>
+                  </div>
+                </div>
+                <div className={styles.userInfoRow}>
+                  <span className={styles.userInfoLabel}>账号状态</span>
+                  <span className={styles.userInfoValue} style={{ color: palette.online }}>
+                    {account ? '已登录' : '未登录'}
+                  </span>
+                </div>
+                <div className={styles.userInfoRow}>
+                  <span className={styles.userInfoLabel}>令牌</span>
+                  <span className={styles.userInfoValue}>
+                    {account?.token
+                      ? `${account.token.slice(0, 8)}…${account.token.slice(-4)}`
+                      : '—'}
+                  </span>
+                </div>
+                <button type="button" className={styles.logoutBtn} onClick={handleLogout}>
+                  <span aria-hidden>↪</span>
+                  退出登录
+                </button>
+              </div>
+            )}
+          </span>
           <IconButton label="菜单" onClick={() => onShowToast?.('菜单功能暂未开放')} dragExclude>
             <NavigationRegular fontSize={16} />
           </IconButton>

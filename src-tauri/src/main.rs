@@ -27,6 +27,19 @@ fn main() {
                 // 注册日志目录(供 operation_log 按日轮转追加操作日志)
                 operation_log::register_log_dir(dir);
             }
+            // 被控端模式持久化开启时,应用启动即自动拉起 host(host 任务仅在内存,
+            // 重启后不自动恢复会导致本机设备永远显示为 idle/灰色)
+            let cfg = hbb_client::load_app_config();
+            if cfg.host_enabled {
+                let handle = app.handle().clone();
+                let port = cfg.host_port;
+                tauri::async_runtime::spawn(async move {
+                    match hbb_client::start_host(port, handle.clone()).await {
+                        Ok(()) => log::info!("[main] 启动时自动开启被控端: 端口 {port}"),
+                        Err(e) => log::warn!("[main] 启动时自动开启被控端失败: {e}"),
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

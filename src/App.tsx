@@ -262,6 +262,8 @@ export const App: React.FC = () => {
       <TitleBar
         onRefresh={() => void load()}
         onShowToast={showToast}
+        account={account}
+        onLogout={() => void handleLogout()}
       />
 
       <div className={styles.body}>
