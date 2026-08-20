@@ -159,6 +159,70 @@ pub fn get_account() -> Option<AccountSession> {
     load_app_config().account
 }
 
+/// 服务端策略配置(从 dcr-signal 管理 API 拉取,需登录令牌)。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerPolicy {
+    /// 公告(服务端维护消息,客户端展示)。
+    pub announcement: String,
+    /// 客户端最低版本(低于该版本服务端拒绝注册)。
+    pub min_client_version: String,
+    /// 维护模式(开启后新设备无法注册)。
+    pub maintenance_mode: bool,
+}
+
+/// 拉取服务端策略配置(公告/客户端版本下限/维护模式)。
+/// 未登录或服务不可用返回默认空值(不阻塞客户端功能)。
+#[tauri::command]
+pub async fn fetch_server_policy(session: AccountSession) -> ServerPolicy {
+    let empty = ServerPolicy {
+        announcement: String::new(),
+        min_client_version: String::new(),
+        maintenance_mode: false,
+    };
+    let server = normalize_server(&session.server);
+    let resp = match http()
+        .get(format!("{server}/api/admin/config"))
+        .bearer_auth(&session.token)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("[auth] 拉取服务端策略失败: {e}");
+            return empty;
+        }
+    };
+    if !resp.status().is_success() {
+        log::warn!("[auth] 拉取服务端策略失败: HTTP {}", resp.status());
+        return empty;
+    }
+    match resp.json::<serde_json::Value>().await {
+        Ok(v) => ServerPolicy {
+            announcement: v
+                .get("announcement")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            min_client_version: v
+                .get("minClientVersion")
+                .or_else(|| v.get("min_client_version"))
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            maintenance_mode: v
+                .get("maintenanceMode")
+                .or_else(|| v.get("maintenance_mode"))
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
+        },
+        Err(e) => {
+            log::warn!("[auth] 服务端策略解析失败: {e}");
+            empty
+        }
+    }
+}
+
 /// 持久化会话到本地配置。
 fn save_session(session: &AccountSession) -> Result<(), String> {
     let mut cfg = load_app_config();

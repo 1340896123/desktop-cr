@@ -36,6 +36,7 @@ fn main() {
             auth::check_account_token,
             auth::logout_account,
             auth::get_account,
+            auth::fetch_server_policy,
             // 应用配置
             hbb_client::get_app_config,
             hbb_client::save_app_config,

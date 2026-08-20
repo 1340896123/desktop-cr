@@ -31,6 +31,9 @@ pub struct UserRecord {
     pub password_hash: String,
     /// 创建时间(ISO 8601)。
     pub created_at: String,
+    /// 是否被管理员禁用(禁用后无法登录)。
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 /// 用户存储:内存 HashMap + `users.json` 落盘。
@@ -154,6 +157,7 @@ impl UserStore {
             password_hash: hash_password(password)?,
             created_at: now_iso(),
             username: username.clone(),
+            disabled: false,
         };
         map.insert(username.clone(), record);
         drop(map);
@@ -194,7 +198,7 @@ impl UserStore {
         Ok(())
     }
 
-    /// 校验登录:用户名 + 密码匹配。
+    /// 校验登录:用户名 + 密码匹配,且账号未被禁用。
     pub fn verify_login(&self, username: &str, password: &str) -> bool {
         let username = username.trim().to_lowercase();
         let rec = self
@@ -203,9 +207,23 @@ impl UserStore {
             .map(|m| m.get(&username).cloned())
             .unwrap_or(None);
         match rec {
-            Some(r) => verify_password(password, &r.password_hash),
+            Some(r) => !r.disabled && verify_password(password, &r.password_hash),
             None => false,
         }
+    }
+
+    /// 启用/禁用账号(管理后台)。禁用后无法登录。
+    pub fn set_disabled(&self, username: &str, disabled: bool) -> Result<(), String> {
+        let username = username.trim().to_lowercase();
+        let mut map = self.users.lock().unwrap_or_else(|e| e.into_inner());
+        let rec = map
+            .get_mut(&username)
+            .ok_or_else(|| format!("账号不存在: {username}"))?;
+        rec.disabled = disabled;
+        drop(map);
+        self.save();
+        log::info!("[auth] 账号 {username} 已{}", if disabled { "禁用" } else { "启用" });
+        Ok(())
     }
 
     /// 账号列表(按用户名排序)。
@@ -330,7 +348,7 @@ fn verify_token(secret: &[u8], token: &str) -> Result<String, String> {
 }
 
 /// 当前时间 ISO 8601(UTC)。
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -345,7 +363,7 @@ fn now_iso() -> String {
 }
 
 /// 天数(自 1970-01-01)转公历年月日(Howard Hinnant 算法)。
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
+pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = (z - era * 146097) as u64;
