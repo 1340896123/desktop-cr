@@ -302,7 +302,7 @@ export const VirtualDisplayPanel: React.FC<VirtualDisplayPanelProps> = ({ device
         <ControlBar
           isFullscreen={isFullscreen}
           onToggleFullscreen={() => setIsFullscreen((prev) => !prev)}
-          onOpenSettings={() => setNotice('设置面板（POC 阶段占位）')}
+          onOpenSettings={() => setNotice('设置面板（虚拟显示器设置暂未提供）')}
         />
         {selectedReal ? (
           <RemoteCanvas

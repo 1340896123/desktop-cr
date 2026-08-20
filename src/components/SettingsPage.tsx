@@ -427,7 +427,6 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
     autoupdate: false,
     dragfloat: true,
     sameAccount: true,
-    allowAssist: true,
     directP2p: true,
     relay: true,
     tcp: false,
@@ -497,6 +496,27 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
 
   const toggleHostEnabled = () => {
     setConfig((prev) => (prev ? { ...prev, hostEnabled: !prev.hostEnabled } : prev));
+  };
+
+  // 允许他人远程协助：持久化 hostEnabled 并真实启停被控端（与远程协助页同一接线）
+  const toggleAllowAssist = async () => {
+    if (!config) return;
+    const next: AppConfig = { ...config, hostEnabled: !config.hostEnabled };
+    setConfig(next);
+    setHostError(null);
+    try {
+      await saveAppConfig(next);
+      if (next.hostEnabled) {
+        await startHost(config.hostPort);
+        setNotice(`已开启远程协助，端口 ${config.hostPort}`);
+      } else {
+        await stopHost();
+        setNotice('已关闭远程协助');
+      }
+    } catch (error) {
+      setHostError(String(error));
+      setNotice(`操作失败: ${String(error)}`);
+    }
   };
 
   const toggleHost = async () => {
@@ -722,7 +742,7 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
               <div className={styles.rowBody}>
                 <div className={styles.rowTitle}>允许他人远程协助</div>
               </div>
-              <ToggleSwitch on={toggles.allowAssist} onChange={() => toggle('allowAssist')} />
+              <ToggleSwitch on={config?.hostEnabled ?? false} onChange={() => void toggleAllowAssist()} />
             </div>
             <div className={styles.rowDivider} />
             <div className={styles.row}>
