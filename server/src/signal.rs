@@ -259,10 +259,13 @@ pub async fn handle_stun_packet(sock: &UdpSocket, probe_sock: &UdpSocket, buf: V
 
 /// 启动完整信令服务(TCP accept + UDP STUN + 定时清理)。
 ///
-/// `listener` 与 `udp_socket` 应已绑定;`relay_hint` 为下发给客户端的可选
-/// 中继服务器地址("host:port",空串表示无)。
-pub async fn serve(listener: TcpListener, udp_socket: UdpSocket, relay_hint: &str) -> Result<(), String> {
-    let core = Arc::new(SignalCore::new(relay_hint));
+/// `listener` 与 `udp_socket` 应已绑定;`core` 为共享信令核心(由调用方创建,
+/// 可同时供 Web 管理后台读取在线设备列表)。
+pub async fn serve(
+    listener: TcpListener,
+    udp_socket: UdpSocket,
+    core: Arc<SignalCore>,
+) -> Result<(), String> {
     let bind_addr = udp_socket.local_addr().map_err(|e| e.to_string())?;
     log::info!("[signal] STUN/UDP 服务地址: {bind_addr}");
 

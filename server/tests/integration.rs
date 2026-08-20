@@ -17,8 +17,9 @@ async fn signal_register_lookup_flow() {
     let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let relay_hint = "relay.example.com:21117";
+    let core = std::sync::Arc::new(signal::SignalCore::new(relay_hint));
     let serve = tokio::spawn(async move {
-        let _ = signal::serve(listener, udp, relay_hint).await;
+        let _ = signal::serve(listener, udp, core).await;
     });
 
     // 客户端 A:注册
@@ -104,8 +105,9 @@ async fn signal_lookup_unknown() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let core = std::sync::Arc::new(signal::SignalCore::new(""));
     let serve = tokio::spawn(async move {
-        let _ = signal::serve(listener, udp, "").await;
+        let _ = signal::serve(listener, udp, core).await;
     });
 
     let mut c = TcpStream::connect(addr).await.unwrap();
