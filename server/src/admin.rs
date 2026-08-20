@@ -1,6 +1,8 @@
 //! Web 管理后台(dcr-signal 内置 HTTP 服务)。
 //!
 //! - `POST /api/auth/login` — 账号登录,返回 JWT;
+//! - `POST /api/auth/register` — 自助注册(默认开放,`--no-register` 关闭),
+//!   成功后自动签发令牌;
 //! - `GET  /api/auth/me` — 校验令牌,返回当前用户名;
 //! - `GET/POST/DELETE /api/admin/users[...]` — 用户增删改(全部管理员权限);
 //! - `GET  /api/admin/peers` — 信令在线的设备列表;
@@ -34,6 +36,8 @@ pub struct AdminState {
     pub auth: AuthState,
     /// 信令核心(读取在线设备列表)。
     pub core: SignalCore,
+    /// 是否开放自助注册(默认开放;生产环境建议关闭)。
+    pub open_register: bool,
 }
 
 /// API 错误响应(JSON `{"error": "..."}`)。
@@ -52,6 +56,12 @@ impl ApiError {
 fn bad_request(msg: String) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
+            message: msg,
+        }
+    }
+    fn forbidden(msg: String) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
             message: msg,
         }
     }
@@ -112,6 +122,40 @@ async fn me(
 ) -> Result<Json<Value>, ApiError> {
     let username = bearer_user(&state, &headers)?;
     Ok(Json(json!({ "username": username })))
+}
+
+/// 自助注册请求。
+#[derive(Debug, Deserialize)]
+pub struct RegisterReq {
+    username: String,
+    password: String,
+}
+
+/// 自助注册:`POST /api/auth/register`。默认开放,`--no-register` 时返回 403;
+/// 注册成功后自动签发令牌(与登录响应同构),客户端可直接进入应用。
+async fn register(
+    State(state): State<AdminState>,
+    Json(req): Json<RegisterReq>,
+) -> Result<Json<LoginResp>, ApiError> {
+    if !state.open_register {
+        return Err(ApiError::forbidden(
+            "服务器未开放自助注册,请联系管理员开通账号".into(),
+        ));
+    }
+    state
+        .auth
+        .store
+        .create_user(&req.username, &req.password)
+        .map_err(ApiError::bad_request)?;
+    log::info!("[admin] 自助注册成功: {}", req.username.trim().to_lowercase());
+    let token = state
+        .auth
+        .login(&req.username, &req.password)
+        .map_err(|e| ApiError::unauthorized(e))?;
+    Ok(Json(LoginResp {
+        token,
+        username: req.username.trim().to_lowercase(),
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -206,8 +250,9 @@ async fn stats(
 
 /// 构建管理路由:API + 静态界面。
 pub fn router(state: AdminState, ui_dir: Option<PathBuf>) -> Router {
-    let api = Router::new()
+let api = Router::new()
         .route("/api/auth/login", post(login))
+        .route("/api/auth/register", post(register))
         .route("/api/auth/me", get(me))
         .route("/api/admin/users", get(list_users).post(create_user))
 .route("/api/admin/users/:username", axum::routing::delete(delete_user))
@@ -408,10 +453,14 @@ mod tests {
         let store = Arc::new(UserStore::new(&dir));
         let pw = store.ensure_bootstrap(Some("bootpass")).unwrap();
         let secret = b"0123456789abcdef0123456789abcdef".to_vec();
-        let auth = AuthState::new(store, secret);
+let auth = AuthState::new(store, secret);
         let core = SignalCore::new("relay.example.com:21117");
         (
-            AdminState { auth, core },
+            AdminState {
+                auth,
+                core,
+                open_register: true,
+            },
             pw,
         )
     }
@@ -559,7 +608,7 @@ let resp = app
         assert_eq!(stats["users"], 1);
         assert_eq!(stats["peersOnline"], 0);
 
-        // 界面回退页(无 ui_dir)可访问
+// 界面回退页(无 ui_dir)可访问
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -571,5 +620,104 @@ let resp = app
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(body_text(resp).await.contains("dcr-signal 管理后台"));
+    }
+
+    #[tokio::test]
+    async fn register_flow() {
+        let (state, _pw) = test_state();
+        let app = router(state.clone(), None);
+
+        // 自助注册新账号 → 返回令牌,用户名归一化小写
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/register")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({"username":"Alice","password":"alice123456"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let reg: Value = serde_json::from_str(&body_text(resp).await).unwrap();
+        assert_eq!(reg["username"], "alice");
+        assert!(!reg["token"].as_str().unwrap().is_empty());
+
+        // 注册的账号可直接登录
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/login")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({"username":"alice","password":"alice123456"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 重复注册 → 400
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/register")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({"username":"alice","password":"alice123456"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // 密码过短 → 400
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/register")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({"username":"bob","password":"123"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // 关闭自助注册 → 403
+        let closed = AdminState {
+            auth: state.auth,
+            core: state.core,
+            open_register: false,
+        };
+        let app2 = router(closed, None);
+        let resp = app2
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/register")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({"username":"carol","password":"carol123456"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }

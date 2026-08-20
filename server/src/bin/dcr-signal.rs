@@ -3,10 +3,12 @@
 //! 用法:
 //!   dcr-signal [--bind 0.0.0.0] [--port 21116] [--udp-port 21115] [--relay-hint host:port]
 //!             [--admin-port 21120] [--admin-ui DIR] [--data-dir DIR] [--admin-pass PASS]
+//!             [--no-register]
 //!
 //! - TCP 21116:设备注册/心跳/查找/列表;UDP 21115:RFC 5389 STUN Binding + NAT 探测;
-//! - Web 管理后台(默认 http://0.0.0.0:21120):账号登录 + 用户管理 + 在线设备 + React 后台界面。
+//! - Web 管理后台(默认 http://0.0.0.0:21120):账号登录 + 自助注册 + 用户管理 + 在线设备 + React 后台界面。
 //! - 账号数据与 JWT 密钥持久化于 `--data-dir`(默认 ./data);首次启动自动创建 admin 账号。
+//! - 自助注册默认开放;生产环境可用 `--no-register` 关闭。
 
 use std::env;
 use std::net::SocketAddr;
@@ -32,6 +34,8 @@ struct Args {
     admin_ui: Option<PathBuf>,
     data_dir: PathBuf,
     admin_pass: Option<String>,
+    /// 是否开放自助注册(默认 true)。
+    open_register: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -43,6 +47,7 @@ fn parse_args() -> Result<Args, String> {
     let mut admin_ui: Option<PathBuf> = None;
     let mut data_dir = PathBuf::from("./data");
     let mut admin_pass: Option<String> = None;
+    let mut open_register = true;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -51,8 +56,10 @@ fn parse_args() -> Result<Args, String> {
                     "dcr-signal: 信令 + STUN + Web 管理后台服务\n\
                      用法: dcr-signal [--bind IP] [--port TCP] [--udp-port UDP] [--relay-hint host:port]\n\
                            [--admin-port PORT] [--admin-ui DIR] [--data-dir DIR] [--admin-pass PASS]\n\
+                           [--no-register]\n\
                      默认: --bind 0.0.0.0 --port 21116 --udp-port 21115 --admin-port 21120 --data-dir ./data\n\
-                     首次启动自动创建 admin 账号(--admin-pass 指定密码,缺省随机生成并打印到日志)"
+                     首次启动自动创建 admin 账号(--admin-pass 指定密码,缺省随机生成并打印到日志)\n\
+                     自助注册默认开放,--no-register 关闭(生产环境建议关闭)"
                 );
                 std::process::exit(0);
             }
@@ -82,6 +89,7 @@ fn parse_args() -> Result<Args, String> {
             "--admin-ui" => admin_ui = Some(PathBuf::from(args.next().ok_or("--admin-ui 缺少参数")?)),
             "--data-dir" => data_dir = PathBuf::from(args.next().ok_or("--data-dir 缺少参数")?),
             "--admin-pass" => admin_pass = Some(args.next().ok_or("--admin-pass 缺少参数")?),
+            "--no-register" => open_register = false,
             other => return Err(format!("未知参数: {other}")),
         }
     }
@@ -94,6 +102,7 @@ fn parse_args() -> Result<Args, String> {
         admin_ui,
         data_dir,
         admin_pass,
+        open_register,
     })
 }
 
@@ -152,6 +161,7 @@ async fn main() {
     let admin_state = AdminState {
         auth,
         core: (*core).clone(),
+        open_register: bind.open_register,
     };
     let admin_port = bind.admin_port;
     let admin_ui = bind.admin_ui.clone();
@@ -172,6 +182,9 @@ async fn main() {
             &bind.relay_hint
         }
     );
+    if bind.open_register {
+        log::warn!("[main] 自助注册已开放;生产环境建议使用 --no-register 关闭");
+    }
 
     if let Err(e) = dcr_server::signal::serve(listener, udp_socket, core).await {
         log::error!("dcr-signal 退出: {e}");
