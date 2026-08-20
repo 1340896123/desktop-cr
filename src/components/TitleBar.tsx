@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { makeStyles } from '@fluentui/react-components';
 import {
-  ArrowLeftRegular,
   ArrowSyncRegular,
   NavigationRegular,
   PersonRegular,
@@ -10,6 +9,7 @@ import {
 } from '@fluentui/react-icons';
 import { IconButton } from './shared/IconButton';
 import { WindowControls } from './shared/WindowControls';
+import { UnsupportedTag } from './shared/UnsupportedTag';
 import { fontFamily, titleBarHeight, zIndex } from '../theme/tokens';
 
 const UU_BLUE = '#0066ff';
@@ -171,7 +171,6 @@ const useStyles = makeStyles({
 });
 
 interface TitleBarProps {
-  onBack?: () => void;
   onRefresh?: () => void;
   onShowToast?: (msg: string) => void;
 }
@@ -181,7 +180,7 @@ interface TitleBarProps {
  * 右侧刷新 / 独立窗口 / 通知铃铛（红底徽标 + 消息通知弹层）/ 用户 / 汉堡 /
  * 细分隔线 / 窗口控制组（最小化 / 最大化还原 / 关闭，hover 变红）。
  */
-export const TitleBar: React.FC<TitleBarProps> = ({ onBack, onRefresh, onShowToast }) => {
+export const TitleBar: React.FC<TitleBarProps> = ({ onRefresh, onShowToast }) => {
   const styles = useStyles();
   const [refreshing, setRefreshing] = useState(false);
   const [noticeOpen, setNoticeOpen] = useState(false);
@@ -200,11 +199,6 @@ export const TitleBar: React.FC<TitleBarProps> = ({ onBack, onRefresh, onShowToa
   return (
     <div className={styles.bar} data-tauri-drag-region="deep">
       <div className={styles.left}>
-        {onBack && (
-          <IconButton label="返回" onClick={onBack} dragExclude>
-            <ArrowLeftRegular fontSize={18} />
-          </IconButton>
-        )}
         <div className={styles.appGroup}>
           <span className={styles.appIcon}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
@@ -225,7 +219,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({ onBack, onRefresh, onShowToa
           </IconButton>
           <IconButton
             label="独立窗口"
-            onClick={() => onShowToast?.('弹出独立窗口')}
+            onClick={() => onShowToast?.('「独立窗口」功能暂未开放')}
             dragExclude
           >
             <WindowAppsRegular fontSize={16} />
@@ -239,7 +233,10 @@ export const TitleBar: React.FC<TitleBarProps> = ({ onBack, onRefresh, onShowToa
             {noticeOpen && (
               <div className={styles.noticePopover}>
                 <div className={styles.noticeHeader}>
-                  <span className={styles.noticeTitle}>消息通知</span>
+                  <span className={styles.noticeTitle}>
+                    消息通知
+                    <UnsupportedTag label="演示" variant="demo" />
+                  </span>
                   <button
                     type="button"
                     className={styles.noticeReadAll}
@@ -253,20 +250,23 @@ export const TitleBar: React.FC<TitleBarProps> = ({ onBack, onRefresh, onShowToa
                 </div>
                 <div className={styles.noticeItemBlue}>
                   <div className={styles.noticeItemTitle}>设备在线通知</div>
-                  <div className={styles.noticeItemDesc}>AAAAA 设备已上线</div>
+                  <div className={styles.noticeItemDesc}>AAAAA 设备已上线（演示数据）</div>
                 </div>
                 <div className={styles.noticeItemGray}>
                   <div className={styles.noticeItemTitle}>安全提示</div>
-                  <div className={styles.noticeItemDesc}>已开启临时验证码防护</div>
+                  <div className={styles.noticeItemDesc}>已开启临时验证码防护（演示数据）</div>
+                </div>
+                <div className={styles.noticeItemGray} style={{ fontSize: '11px', color: '#9CA3AF' }}>
+                  以上为界面演示通知，非真实消息
                 </div>
               </div>
             )}
           </span>
 
-          <IconButton label="用户" onClick={() => onShowToast?.('用户个人中心')} dragExclude>
+          <IconButton label="用户" onClick={() => onShowToast?.('用户中心功能暂未开放')} dragExclude>
             <PersonRegular fontSize={16} />
           </IconButton>
-          <IconButton label="菜单" onClick={() => onShowToast?.('菜单功能开发中')} dragExclude>
+          <IconButton label="菜单" onClick={() => onShowToast?.('菜单功能暂未开放')} dragExclude>
             <NavigationRegular fontSize={16} />
           </IconButton>
           <span className={styles.divider} />

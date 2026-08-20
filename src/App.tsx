@@ -10,6 +10,7 @@ import SettingsPage from './components/SettingsPage';
 import RemoteAssistPage from './components/RemoteAssistPage';
 import LoginPage from './components/LoginPage';
 import { Toast } from './components/shared/Toast';
+import { UnsupportedTag } from './components/shared/UnsupportedTag';
 import {
   connectToDevice,
   disconnectFromDevice,
@@ -253,13 +254,6 @@ export const App: React.FC = () => {
       }}
     >
       <TitleBar
-        onBack={
-          view === 'session'
-            ? handleExitSession
-            : view === 'vdisplay' || view === 'transfer' || view === 'assist'
-              ? () => setView('home')
-              : undefined
-        }
         onRefresh={() => void load()}
         onShowToast={showToast}
       />
@@ -327,7 +321,10 @@ export const App: React.FC = () => {
 
           {view === 'cloud' && (
             <div className={styles.placeholderPage}>
-              <div className={styles.placeholderTitle}>云设备市场</div>
+              <div className={styles.placeholderTitle}>
+                云设备市场
+                <UnsupportedTag label="暂未开放" />
+              </div>
               <div>通过市场发现云端设备，或在设置中配置信令 / 中继服务器（后续阶段）</div>
               <div style={{ color: palette.textMuted }}>
                 在线设备 {onlineCount} / {devices.length}

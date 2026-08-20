@@ -10,6 +10,7 @@ import { fontFamily, spacing, radius, shadow } from '../theme/tokens';
 import { getAppConfig, saveAppConfig, type AppConfig } from '../services/config';
 import { startHost, stopHost, onHostStateChange, type HostState } from '../services/connection';
 import { ToggleSwitch } from './SettingsPage';
+import { UnsupportedTag } from './shared/UnsupportedTag';
 
 const UU_BLUE = '#0066ff';
 
@@ -360,7 +361,10 @@ export const RemoteAssistPage: React.FC<RemoteAssistPageProps> = ({ onConnectDev
 
             <div>
               <div className={styles.verifyRow}>
-                <span>验证方式:</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <span>验证方式:</span>
+                  <UnsupportedTag label="本地演示·不支持校验" variant="demo" />
+                </span>
                 <select className={styles.select} defaultValue="仅使用临时验证码">
                   <option>仅使用临时验证码</option>
                   <option>使用固定验证码</option>

@@ -114,23 +114,26 @@ const useStyles = makeStyles({
     },
   },
   heroActions: {
-    display: 'grid',
-    gridTemplateColumns: '1fr 1fr',
+    display: 'flex',
+    alignItems: 'stretch',
     padding: '12px 0',
     backgroundColor: '#ffffff',
   },
   actionBtn: {
+    flex: 1,
+    minWidth: 0,
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
     gap: '8px',
-    padding: '6px 0',
+    padding: '6px 8px',
     background: 'transparent',
     border: 'none',
     color: '#374151',
     fontFamily,
     fontSize: '14px',
     fontWeight: 500,
+    whiteSpace: 'nowrap',
     cursor: 'pointer',
     transition: 'color 150ms ease',
 
@@ -140,6 +143,7 @@ const useStyles = makeStyles({
   },
   actionDivider: {
     width: '1px',
+    flexShrink: 0,
     backgroundColor: '#F3F4F6',
   },
   quickSection: {
@@ -326,7 +330,7 @@ export const DevicePage: React.FC<DevicePageProps> = ({
             <span className={styles.actionDivider} />
             <button type="button" className={styles.actionBtn} onClick={onMore}>
               <MoreHorizontalRegular fontSize={16} style={{ color: '#4B5563' }} />
-              ... 更多
+              更多
             </button>
           </div>
         </div>

@@ -10,8 +10,18 @@ WinUI-style remote desktop client: **Tauri v2 + React 18 + Fluent UI React v9**.
 - `cargo check` / `cargo build` in `src-tauri/` — Rust side. Windows 专属依赖只在 `[target.'cfg(windows)'.dependencies]`(windows crate + 相关 features)
 - `cargo test` in `src-tauri/` — Rust 单元测试(Rust 无独立测试框架,用 `#[cfg(test)]` 内嵌于各模块;18 条 + 8 ignored:capture 缩放/BGRA + DXGI 吞吐基准(ignored)、network 协议标签与 TCP framing 往返 + 文件传输状态机/全双工/速率基准、hbb_client 配置与流参数、input_injector code→VK 映射、virtual_display 注册表值、operation_log 读写、media_pipeline 音视频合成链路、ffmpeg_hw 编码往返/基准(ignored)、bench 实时链路基准(ignored))
 - `server/` — 独立 crate(信令/STUN/TURN 服务):`cargo build --release` 产出 `server/target/release/dcr-signal.exe`、`dcr-relay.exe`;`cargo test` 20 条(14 单元 + 6 集成 loopback)
+- `server/admin-ui/` — 管理后台 React UI:根 `package.json` 无该依赖,需在 `server/admin-ui` 下独立 `npm install` + `npm run build`,产出 `admin-ui/dist`(vite `base: './'`、port 5174、`/api` 代理 21120)
 - `npm test` — vitest(vitest run),前端纯函数测试(src/utils/coords.ts、src/services/config.ts)
 - 验收标准 = `cargo check` 零警告(两处)+ `cargo test` 全过(两处)+ `npm run build` 零错误 + `npm test` 全过
+
+## Deploy(部署约定)
+
+**所有服务端交付物统一产出到 `server/deploy/`**(含 UI 与可执行文件),任何改代码后重新部署必须刷新该目录,禁止绕过。
+
+- 构成:`dcr-signal.exe` / `dcr-relay.exe`(来自 `server/target/release/`)、`web/`(管理后台 UI,来自 `server/admin-ui/dist`)、运行时 DLL(`msvcp140.dll`/`vcruntime140.dll`/`vcruntime140_1.dll`,VC++ 运行库)、启动脚本 `start-signal.bat`(指向 `--admin-ui web`)/`start-relay.bat`、`dcr-server-win64.zip`(以上全部打包)。
+- 刷新流程:先 `cargo build --release`(server)+ `npm run build`(admin-ui),再将新 exe 与 `admin-ui/dist` 内容复制进 deploy(覆盖 exe、清空重写 `web/`),最后重新压缩 `dcr-server-win64.zip`。
+- 注意:打包/复制前需先停止正在运行的 `dcr-signal.exe`/`dcr-relay.exe`(Windows 文件锁定会报 os error 5 拒绝访问)。
+- 客户端安装包(`npm run tauri build`)不放入 deploy,产出在 `src-tauri/target/release/bundle/`。
 
 ## Architecture
 

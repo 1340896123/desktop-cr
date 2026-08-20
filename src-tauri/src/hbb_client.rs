@@ -993,15 +993,19 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // 非 Windows:仅编译占位(host 仅 Windows 可用)
-        log::info!("[hbb_client] start_host (非 Windows,模拟成功)");
-        let _ = app.emit("host-state", serde_json::json!({ "running": true, "port": port }));
+        // 被控端(host)依赖 Windows 专属能力(DXGI 抓屏 / Win32 输入注入 / IDD 虚拟屏),
+        // 非 Windows 平台不支持。直接返回错误,避免伪造"运行中"假象(与虚拟屏返回 Err 的
+        // 处理方式保持一致)。
+        let msg = format!("被控端(host)仅 Windows 平台支持,当前平台不可用(port={port})");
+        log::warn!("[hbb_client] start_host 失败: {msg}");
         crate::operation_log::op_log(
             "hbb_client",
             "start_host",
-            &format!("port={port} (非 Windows 模拟)"),
+            &format!("失败: 非 Windows 平台不支持 (port={port})"),
         );
-        Ok(())
+        // 广播"未运行"以保持状态一致(host 实际并未启动,避免使用伪造的 running:true)
+        let _ = app.emit("host-state", serde_json::json!({ "running": false, "port": 0 }));
+        Err(msg)
     }
 }
 
