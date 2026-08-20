@@ -3,19 +3,14 @@ import { makeStyles } from '@fluentui/react-components';
 import {
   ArrowLeftRegular,
   ArrowSyncRegular,
-  CopyRegular,
-  DismissRegular,
   NavigationRegular,
   PersonRegular,
   ServiceBellRegular,
-  SquareRegular,
-  SubtractRegular,
   WindowAppsRegular,
 } from '@fluentui/react-icons';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { IconButton } from './shared/IconButton';
+import { WindowControls } from './shared/WindowControls';
 import { fontFamily, titleBarHeight, zIndex } from '../theme/tokens';
-import { minimizeWindow, closeWindow } from '../services/window';
 
 const UU_BLUE = '#0066ff';
 
@@ -163,35 +158,6 @@ const useStyles = makeStyles({
     backgroundColor: '#E5E7EB',
     margin: '0 2px',
   },
-  winControls: {
-    display: 'flex',
-    alignItems: 'center',
-    height: '100%',
-  },
-  winBtn: {
-    width: '44px',
-    height: '100%',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    border: 'none',
-    background: 'transparent',
-    color: '#6B7280',
-    cursor: 'pointer',
-    fontSize: '13px',
-    transition: 'background-color 150ms ease, color 150ms ease',
-
-    '&:hover': {
-      backgroundColor: '#F3F4F6',
-      color: '#1F2937',
-    },
-  },
-  winBtnClose: {
-    '&:hover': {
-      backgroundColor: '#E81123',
-      color: '#ffffff',
-    },
-  },
   spin: {
     animationName: {
       from: { transform: 'rotate(0deg)' },
@@ -208,16 +174,14 @@ interface TitleBarProps {
   onBack?: () => void;
   onRefresh?: () => void;
   onShowToast?: (msg: string) => void;
-  /** 当前窗口是否最大化（由 App 经 onWindowMaximizedChange 维护） */
-  maximized?: boolean;
 }
 
 /**
  * 顶部栏：左侧返回 + 蓝色旋转方块图标 + 应用名「网易UU远程」；
  * 右侧刷新 / 独立窗口 / 通知铃铛（红底徽标 + 消息通知弹层）/ 用户 / 汉堡 /
- * 细分隔线 / 最小化 / 最大化还原 / 关闭（hover 变红）。
+ * 细分隔线 / 窗口控制组（最小化 / 最大化还原 / 关闭，hover 变红）。
  */
-export const TitleBar: React.FC<TitleBarProps> = ({ onBack, onRefresh, onShowToast, maximized = false }) => {
+export const TitleBar: React.FC<TitleBarProps> = ({ onBack, onRefresh, onShowToast }) => {
   const styles = useStyles();
   const [refreshing, setRefreshing] = useState(false);
   const [noticeOpen, setNoticeOpen] = useState(false);
@@ -232,16 +196,6 @@ export const TitleBar: React.FC<TitleBarProps> = ({ onBack, onRefresh, onShowToa
       onShowToast?.('设备及列表已刷新');
     }, 800);
   };
-
-  const handleToggleMaximize = () => {
-    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) {
-      onShowToast?.(maximized ? '退出全屏' : '切换全屏模式');
-      return;
-    }
-    void getCurrentWindow().toggleMaximize();
-  };
-
-  const handleClose = () => void closeWindow();
 
   return (
     <div className={styles.bar} data-tauri-drag-region="deep">
@@ -318,35 +272,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({ onBack, onRefresh, onShowToa
           <span className={styles.divider} />
         </div>
 
-        <div className={styles.winControls}>
-          <button
-            type="button"
-            className={styles.winBtn}
-            onClick={() => void minimizeWindow()}
-            aria-label="最小化"
-            data-tauri-drag-region="false"
-          >
-            <SubtractRegular fontSize={14} />
-          </button>
-          <button
-            type="button"
-            className={styles.winBtn}
-            onClick={handleToggleMaximize}
-            aria-label={maximized ? '还原窗口' : '最大化'}
-            data-tauri-drag-region="false"
-          >
-            {maximized ? <CopyRegular fontSize={14} /> : <SquareRegular fontSize={13} />}
-          </button>
-          <button
-            type="button"
-            className={`${styles.winBtn} ${styles.winBtnClose}`}
-            onClick={handleClose}
-            aria-label="关闭"
-            data-tauri-drag-region="false"
-          >
-            <DismissRegular fontSize={14} />
-          </button>
-        </div>
+        <WindowControls onToggleMaximize={() => onShowToast?.('切换全屏模式')} />
       </div>
     </div>
   );

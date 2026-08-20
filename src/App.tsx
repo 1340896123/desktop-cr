@@ -262,7 +262,6 @@ export const App: React.FC = () => {
         }
         onRefresh={() => void load()}
         onShowToast={showToast}
-        maximized={maximized}
       />
 
       <div className={styles.body}>
