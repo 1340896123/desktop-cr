@@ -9,8 +9,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "kebab-case")]
 pub enum SignalMsg {
-    /// 注册:`id` 为对端唯一标识,`lan` 为局域网地址("ip:port")。
-    Register { id: String, lan: String },
+    /// 注册:`id` 为对端唯一标识,`lan` 为局域网地址("ip:port");
+    /// `name`/`os`/`version`/`user` 为设备信息与归属用户(旧客户端缺省为空)。
+    Register {
+        id: String,
+        lan: String,
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        os: String,
+        #[serde(default)]
+        version: String,
+        #[serde(default)]
+        user: String,
+    },
     /// 注册应答:`ok` 是否成功,`msg` 为错误信息(成功时可为空)。
     RegisterAck { ok: bool, msg: String },
     /// 心跳保活。
@@ -66,6 +78,10 @@ mod tests {
                 SignalMsg::Register {
                     id: "a".into(),
                     lan: "10.0.0.2:9000".into(),
+                    name: "PC".into(),
+                    os: "Windows 11".into(),
+                    version: "0.1.0".into(),
+                    user: "alice".into(),
                 },
                 "register",
             ),

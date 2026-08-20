@@ -9,8 +9,11 @@
 
 pub mod admin;
 pub mod auth;
+pub mod config;
+pub mod devices;
 pub mod framing;
 pub mod message;
 pub mod relay;
+pub mod sessions;
 pub mod signal;
 pub mod stun;
