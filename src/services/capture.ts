@@ -27,6 +27,10 @@ export interface RemoteFrame {
   width: number;
   height: number;
   jpeg: number[];
+  /** 帧序号（用于丢包/乱序统计） */
+  seq: number;
+  /** 编码耗时（毫秒） */
+  dur: number;
 }
 
 export interface StartCaptureOptions {
