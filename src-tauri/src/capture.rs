@@ -7,7 +7,8 @@
 //!   → Map/Unmap 读出 BGRA → 转 RGB → 按目标尺寸等比缩放(双线性,不放大)
 //!   → jpeg-encoder 编码为 JPEG → 经 `capture-frame` 事件推送,并缓存最新帧供 `get_frame`/`latest_frame` 拉取。
 //! 目标尺寸/帧率/画质实时读取 `crate::hbb_client::stream_cfg()`(set_stream_* 命令即时生效)。
-//! 非 Windows 平台保留程序化动画帧(仅编译占位,保证跨平台可编译)。
+//! 非 Windows 平台保留程序化动画帧(仅编译占位,保证跨平台可编译),并以
+//! `simulated: true` 标记,前端据此与真实抓帧区分。
 
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -45,6 +46,8 @@ pub struct CapturedFrameEvent {
     pub height: u32,
     /// JPEG 编码数据
     pub jpeg: Vec<u8>,
+    /// 是否为模拟画面(非 Windows 平台动画帧;真实 DXGI 抓帧为 false)
+    pub simulated: bool,
 }
 
 /// 最新帧快照:未开始抓帧时为 None。
@@ -584,6 +587,7 @@ async fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String
             width: jw,
             height: jh,
             jpeg: jpeg.clone(),
+            simulated: false,
         };
         let _ = app.emit("capture-frame", &payload);
 
@@ -685,6 +689,7 @@ async fn mock_capture_loop(app: AppHandle, monitor_id: u32, width: u32, height: 
             width: w,
             height: h,
             jpeg: jpeg.clone(),
+            simulated: true,
         };
         let _ = app.emit("capture-frame", &payload);
 

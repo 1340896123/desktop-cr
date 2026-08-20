@@ -3,7 +3,7 @@
 //! 帧格式:每消息 = 4 字节小端长度 + JSON 字节(serde_json)。
 //! 消息统一以 `t` 字段区分类型(内部协议,字段 snake_case,不暴露给前端)。
 //!
-//! - `run_host`:被控端监听,单连接(新连接踢掉旧连接),握手后两路任务:
+//! - `serve_host`:被控端监听,单连接(新连接踢掉旧连接),握手后两路任务:
 //!   收消息循环(鼠标/键盘注入、剪贴板写入、ping→pong)+ 发帧循环(复用
 //!   `capture::latest_frame()` 的最新 JPEG,base64 后推送 frame)。
 //! - `connect_peer`:控制端连接对端,握手后收帧/剪贴板,断线自动清理并广播。
@@ -481,21 +481,8 @@ pub(crate) async fn read_msg<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Msg
     serde_json::from_slice(&buf).map_err(|e| format!("反序列化失败: {e}"))
 }
 
-/// 被控端:监听 0.0.0.0:port,接受单个连接(新连接踢掉旧连接)。
-///
-/// 公开契约入口(内部实现复用 `serve_host`);start_host 因需要同步报告
-/// 端口占用等监听失败,会先预绑定 std 监听器再调用 `serve_host`。
-#[allow(dead_code)]
-pub async fn run_host(app: AppHandle, port: u16) -> Result<(), String> {
-    let listener = TcpListener::bind(("0.0.0.0", port))
-        .await
-        .map_err(|e| format!("监听 0.0.0.0:{port} 失败(端口被占用?): {e}"))?;
-    log::info!("[network] host 监听 0.0.0.0:{port}");
-    let _ = app.emit("host-state", serde_json::json!({ "running": true, "port": port }));
-    serve_host(app, listener).await
-}
-
-/// 在已绑定的监听器上接受连接并服务(供 start_host 预绑定后调用)。
+/// 被控端:在已绑定的监听器上接受连接并服务(供 start_host 预绑定后调用,
+/// 需同步报告端口占用等监听失败时先预绑定 std 监听器再调用本函数)。
 pub(crate) async fn serve_host(app: AppHandle, listener: TcpListener) -> Result<(), String> {
     loop {
         let (stream, addr) = listener

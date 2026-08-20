@@ -52,6 +52,12 @@ pub struct AppConfig {
     pub host_enabled: bool,
     pub host_port: u16,
     pub peers: Vec<PeerConfig>,
+    /// 退出后保持被控端运行(仅持久化到配置,系统级自启暂未实现)
+    #[serde(default)]
+    pub keep_running_on_exit: bool,
+    /// 直连失败时允许经中继服务器兜底转发
+    #[serde(default = "default_relay_fallback_enabled")]
+    pub relay_fallback_enabled: bool,
     /// 信令服务器地址("ip:port",可选;配置后被控端注册/心跳,控制端查找/发现)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal_server: Option<String>,
@@ -72,6 +78,8 @@ impl Default for AppConfig {
             host_enabled: false,
             host_port: 21118,
             peers: Vec::new(),
+            keep_running_on_exit: false,
+            relay_fallback_enabled: true,
             // 默认信令/中继服务器(公网 VPS),被控端注册与跨网段连接兜底
             signal_server: Some("120.78.77.248:21116".into()),
             relay_server: Some("120.78.77.248:21117".into()),
@@ -79,6 +87,11 @@ impl Default for AppConfig {
             account: None,
         }
     }
+}
+
+/// 中继兜底默认开启(直连失败时经中继转发为当前默认行为)。
+fn default_relay_fallback_enabled() -> bool {
+    true
 }
 
 /// 默认本机 ID:"dcr-<COMPUTERNAME>"。
@@ -1160,6 +1173,8 @@ mod tests {
                 addr: "192.168.1.5:21118".into(),
                 platform: Some("windows".into()),
             }],
+            keep_running_on_exit: true,
+            relay_fallback_enabled: false,
             signal_server: Some("signal.example.com:21116".into()),
             relay_server: Some("relay.example.com:21117".into()),
             host_id: "dcr-test-pc".into(),
@@ -1174,6 +1189,8 @@ mod tests {
         assert!(json.contains("\"hostEnabled\""));
         assert!(json.contains("\"hostPort\""));
         assert!(json.contains("\"peers\""));
+        assert!(json.contains("\"keepRunningOnExit\""));
+        assert!(json.contains("\"relayFallbackEnabled\""));
         assert!(json.contains("\"addr\""));
         assert!(json.contains("\"signalServer\""));
         assert!(json.contains("\"relayServer\""));
@@ -1187,6 +1204,8 @@ mod tests {
         assert_eq!(back.host_enabled, cfg.host_enabled);
         assert_eq!(back.host_port, cfg.host_port);
         assert_eq!(back.peers.len(), 1);
+        assert_eq!(back.keep_running_on_exit, cfg.keep_running_on_exit);
+        assert_eq!(back.relay_fallback_enabled, cfg.relay_fallback_enabled);
         assert_eq!(back.peers[0].addr, "192.168.1.5:21118");
         assert_eq!(back.peers[0].platform.as_deref(), Some("windows"));
         assert_eq!(back.signal_server.as_deref(), Some("signal.example.com:21116"));
@@ -1202,6 +1221,8 @@ mod tests {
         assert!(back.relay_server.is_none());
         assert!(back.account.is_none(), "旧配置无 account 字段,应回退为 None");
         assert!(!back.host_id.is_empty(), "host_id 应有默认值");
+        assert!(!back.keep_running_on_exit, "旧配置无 keepRunningOnExit,应回退 false");
+        assert!(back.relay_fallback_enabled, "旧配置无 relayFallbackEnabled,应回退 true");
     }
 }
 

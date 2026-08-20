@@ -9,15 +9,15 @@
 //!   is_device_created/plug_in_monitor/plug_out_monitor,仅当 is_device_created() 为 true
 //!   时使用,失败一律回退 usbmmidd 且不报错。
 //! 全部真实操作需要管理员权限;输出含"拒绝访问/错误码 5"时返回明确提示。
-//! 非 Windows 平台:仅编译占位(模拟成功/返回空列表)。
+//! 非 Windows 平台:安装/添加等操作返回明确错误(不做假成功),枚举返回空列表。
 
 use serde::Serialize;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 #[cfg(target_os = "windows")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "windows")]
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VirtualMonitor {
@@ -56,8 +56,13 @@ pub fn install_virtual_display_driver(app: AppHandle) -> Result<String, String> 
     #[cfg(not(target_os = "windows"))]
     {
         let _ = &app;
-        log::info!("[virtual_display] 非 Windows 平台:模拟驱动安装成功");
-        Ok("Virtual display driver installed (simulated on non-Windows platform)".into())
+        log::info!("[virtual_display] 非 Windows 平台不支持虚拟显示器驱动安装");
+        crate::operation_log::op_log(
+            "virtual_display",
+            "install_driver",
+            "失败: 非 Windows 平台不支持虚拟显示器驱动安装",
+        );
+        Err("非 Windows 平台不支持虚拟显示器驱动安装".into())
     }
 }
 
@@ -116,17 +121,14 @@ pub fn add_virtual_monitor(
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // 非 Windows:仅编译占位,返回模拟 id
         let _ = &app;
-        log::info!(
-            "[virtual_display] (非 Windows) 模拟新增虚拟屏 {width}x{height} @ {fps}fps"
-        );
+        log::info!("[virtual_display] (非 Windows) 不支持添加虚拟显示器");
         crate::operation_log::op_log(
             "virtual_display",
             "add_monitor",
-            &format!("{width}x{height} @ {fps}fps -> id=1 (非 Windows 模拟)"),
+            &format!("{width}x{height} @ {fps}fps 失败: 非 Windows 平台不支持添加虚拟显示器"),
         );
-        Ok(1)
+        Err("非 Windows 平台不支持添加虚拟显示器".into())
     }
 }
 
@@ -150,7 +152,7 @@ pub fn list_virtual_monitors() -> Result<Vec<VirtualMonitor>, String> {
         crate::operation_log::op_log(
             "virtual_display",
             "list_monitors",
-            "count=0 (非 Windows 模拟)",
+            "count=0 (非 Windows)",
         );
         Ok(Vec::new())
     }
@@ -188,22 +190,27 @@ pub fn remove_virtual_monitor(monitor_id: u32, app: AppHandle) -> Result<(), Str
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // 非 Windows:仅编译占位
         let _ = &app;
-        log::info!("[virtual_display] (非 Windows) 模拟移除虚拟屏 id={monitor_id}");
+        log::info!("[virtual_display] (非 Windows) 无虚拟屏可移除,跳过");
         crate::operation_log::op_log(
             "virtual_display",
             "remove_monitor",
-            &format!("id={monitor_id} (非 Windows 模拟)"),
+            &format!("id={monitor_id} 跳过(非 Windows 平台无虚拟屏)"),
         );
+        // 广播空列表,保证前端事件驱动刷新链路在所有平台可用
+        emit_monitors_changed(&app)?;
         Ok(())
     }
 }
 
 /// 广播虚拟屏列表变更事件(payload 为 VirtualMonitor[] 列表)。
-#[cfg(target_os = "windows")]
+///
+/// 所有平台均可调用:Windows 枚举真实虚拟屏后广播;非 Windows 广播空列表。
 fn emit_monitors_changed(app: &AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
     let monitors = enumerate_virtual_monitors();
+    #[cfg(not(target_os = "windows"))]
+    let monitors: Vec<VirtualMonitor> = Vec::new();
     app.emit("virtual-monitors-changed", monitors)
         .map_err(|e| format!("failed to emit virtual-monitors-changed: {e}"))
 }
