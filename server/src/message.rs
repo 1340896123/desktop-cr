@@ -50,6 +50,12 @@ pub enum SignalMsg {
 pub struct PeerEntry {
     /// 对端唯一标识。
     pub id: String,
+    /// 设备名(客户端上报,取自设备档案)。
+    #[serde(default)]
+    pub name: String,
+    /// 归属用户名(客户端上报,未登录为空串)。
+    #[serde(default)]
+    pub owner: String,
     /// 局域网地址("ip:port")。
     pub lan: String,
     /// 外部地址("ip:port")。

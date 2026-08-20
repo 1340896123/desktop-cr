@@ -184,10 +184,20 @@ impl SignalCore {
         let mut map = self.peers.lock().unwrap_or_else(|e| e.into_inner());
         map.retain(|_, rec| rec.last_seen.elapsed() <= ONLINE_TIMEOUT);
         map.iter()
-            .map(|(id, rec)| PeerEntry {
-                id: id.clone(),
-                lan: rec.lan.clone(),
-                external: rec.external.clone(),
+            .map(|(id, rec)| {
+                // 名称/归属取自设备档案(注册时上报);档案缺失时以 id 兜底
+                let dev = self.devices.get(id);
+                PeerEntry {
+                    id: id.clone(),
+                    name: dev
+                        .as_ref()
+                        .map(|d| d.name.clone())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| id.clone()),
+                    owner: dev.map(|d| d.owner).unwrap_or_default(),
+                    lan: rec.lan.clone(),
+                    external: rec.external.clone(),
+                }
             })
             .collect()
     }

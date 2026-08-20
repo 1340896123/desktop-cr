@@ -195,6 +195,15 @@ impl DeviceStore {
         Ok(())
     }
 
+    /// 查询单个设备档案(不存在返回 None)。
+    pub fn get(&self, id: &str) -> Option<DeviceRecord> {
+        self.devices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+    }
+
     /// 全部设备档案(含离线,按 id 排序)。
     pub fn list(&self) -> Vec<DeviceRecord> {
         let mut devices: Vec<DeviceRecord> = self

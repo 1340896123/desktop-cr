@@ -60,6 +60,9 @@ fn main() {
             hbb_client::get_incoming_dir,
             hbb_client::request_remote_dir,
             hbb_client::request_file_pull,
+            // 独立文件传输窗口
+            hbb_client::open_file_transfer_window,
+            hbb_client::get_transfer_device_name,
             // 被控端管理
             hbb_client::start_host,
             hbb_client::stop_host,

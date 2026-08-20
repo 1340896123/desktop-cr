@@ -1,4 +1,5 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api/core';
 
 const isTauri = (): boolean =>
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -40,4 +41,17 @@ export async function onWindowMaximizedChange(
   await refresh();
   const unlisten = await win.onResized(refresh);
   return unlisten;
+}
+
+/**
+ * 打开独立文件传输窗口(单例:已存在时聚焦)。返回是否成功;
+ * 浏览器模式返回 false,由调用方回退到页内视图。
+ */
+export async function openFileTransferWindow(deviceName?: string): Promise<boolean> {
+  if (!isTauri()) {
+    console.warn('[window] 浏览器模式,无法打开独立窗口');
+    return false;
+  }
+  await invoke('open_file_transfer_window', { deviceName: deviceName ?? null });
+  return true;
 }

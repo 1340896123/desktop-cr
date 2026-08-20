@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "transfer-capability",
+  "description": "文件传输窗口能力:访问 IPC 命令与事件(文件浏览/传输/连接状态/对端设备名)",
+  "windows": ["file-transfer"],
+  "permissions": [
+    "core:default"
+  ]
+}

@@ -27,7 +27,7 @@ import {
   type AccountSession,
 } from './services/auth';
 import { palette, fontFamily, spacing } from './theme/tokens';
-import { onWindowMaximizedChange } from './services/window';
+import { onWindowMaximizedChange, openFileTransferWindow } from './services/window';
 
 const useStyles = makeStyles({
   root: {
@@ -179,6 +179,12 @@ export const App: React.FC = () => {
     }
   };
 
+  // 打开独立文件传输窗口(Tauri 模式);浏览器模式回退到页内视图
+  const handleOpenTransfer = async () => {
+    const opened = await openFileTransferWindow(selected?.name);
+    if (!opened) setView('transfer');
+  };
+
   // 远程协助页：匹配到对端设备后连接；若不在设备列表则补充进列表以便进入会话视图
   const handleConnectPeer = async (peerId: string, name: string) => {
     setDevices((prev) =>
@@ -305,8 +311,8 @@ export const App: React.FC = () => {
               connecting={connecting}
               quickDevices={quickDevices}
               onEnterDesktop={() => void handleEnterDesktop()}
-              onFileTransfer={() => setView('transfer')}
-              onMore={() => setView('transfer')}
+              onFileTransfer={() => void handleOpenTransfer()}
+              onMore={() => void handleOpenTransfer()}
               onAddDevice={() => setView('cloud')}
               onSelectQuick={(id) => selectDevice(id)}
             />

@@ -42,12 +42,22 @@ const useStyles = makeStyles({
     display: 'flex',
     flexDirection: 'column',
     gap: `${spacing.sm}px`,
+
+    '@media (max-width: 560px)': {
+      padding: `${spacing.sm}px ${spacing.md}px`,
+    },
   },
   header: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
     flexShrink: 0,
+
+    '@media (max-width: 560px)': {
+      flexDirection: 'column',
+      alignItems: 'flex-start',
+      gap: '6px',
+    },
   },
   title: {
     fontFamily,
@@ -75,6 +85,13 @@ const useStyles = makeStyles({
     gap: '12px',
     flex: 1,
     minHeight: 0,
+
+    // 窄窗口:上下堆叠两个面板,容器整体滚动
+    '@media (max-width: 920px)': {
+      gridTemplateColumns: '1fr',
+      overflowY: 'auto',
+      alignContent: 'start',
+    },
   },
   pane: {
     display: 'flex',
@@ -85,6 +102,11 @@ const useStyles = makeStyles({
     overflow: 'hidden',
     minWidth: 0,
     boxShadow: '0 1px 2px rgba(16,24,40,0.04), 0 1px 3px rgba(16,24,40,0.06)',
+
+    '@media (max-width: 920px)': {
+      height: '48vh',
+      minHeight: '320px',
+    },
   },
   paneHeader: {
     display: 'flex',
@@ -271,6 +293,11 @@ const useStyles = makeStyles({
   typeCol: {
     color: '#4B5563',
   },
+  hideSm: {
+    '@media (max-width: 760px)': {
+      display: 'none',
+    },
+  },
   sizeCol: {
     color: '#4B5563',
     textAlign: 'right',
@@ -353,6 +380,12 @@ const useStyles = makeStyles({
     fontFamily,
     fontSize: '12px',
     color: '#4B5563',
+
+    // 窄窗口:允许换行,避免固定宽度列横向溢出
+    '@media (max-width: 920px)': {
+      flexWrap: 'wrap',
+      rowGap: '4px',
+    },
   },
   taskNameCol: {
     display: 'flex',
@@ -397,6 +430,10 @@ const useStyles = makeStyles({
     textAlign: 'right',
     flexShrink: 0,
     whiteSpace: 'nowrap',
+
+    '@media (max-width: 920px)': {
+      display: 'none',
+    },
   },
   pathChip: {
     display: 'flex',
@@ -432,6 +469,10 @@ const useStyles = makeStyles({
     fontFamily: 'Consolas, monospace',
     flexShrink: 0,
     whiteSpace: 'nowrap',
+
+    '@media (max-width: 920px)': {
+      display: 'none',
+    },
   },
   taskDel: {
     display: 'inline-flex',
@@ -836,8 +877,8 @@ export const FileTransferPage: React.FC<FileTransferPageProps> = ({ deviceName }
                     />
                   </th>
                   <th className={styles.th}>名称</th>
-                  <th className={styles.th}>修改日期</th>
-                  <th className={styles.th}>类型</th>
+                  <th className={`${styles.th} ${styles.hideSm}`}>修改日期</th>
+                  <th className={`${styles.th} ${styles.hideSm}`}>类型</th>
                   <th className={styles.th}>大小</th>
                 </tr>
               </thead>
@@ -867,8 +908,8 @@ export const FileTransferPage: React.FC<FileTransferPageProps> = ({ deviceName }
                         {file.name}
                       </span>
                     </td>
-                    <td className={`${styles.td} ${styles.dateCol}`}>{formatDate(file.modifiedMs)}</td>
-                    <td className={`${styles.td} ${styles.typeCol}`}>{file.isDir ? '文件夹' : file.ext || '文件'}</td>
+                    <td className={`${styles.td} ${styles.dateCol} ${styles.hideSm}`}>{formatDate(file.modifiedMs)}</td>
+                    <td className={`${styles.td} ${styles.typeCol} ${styles.hideSm}`}>{file.isDir ? '文件夹' : file.ext || '文件'}</td>
                     <td className={`${styles.td} ${styles.sizeCol}`}>{formatSize(file.size, file.isDir)}</td>
                   </tr>
                 ))}
@@ -922,8 +963,8 @@ export const FileTransferPage: React.FC<FileTransferPageProps> = ({ deviceName }
                 <tr>
                   <th className={`${styles.th} ${styles.thCheck}`} />
                   <th className={styles.th}>名称</th>
-                  <th className={styles.th}>修改日期</th>
-                  <th className={styles.th}>类型</th>
+                  <th className={`${styles.th} ${styles.hideSm}`}>修改日期</th>
+                  <th className={`${styles.th} ${styles.hideSm}`}>类型</th>
                   <th className={styles.th}>大小</th>
                 </tr>
               </thead>

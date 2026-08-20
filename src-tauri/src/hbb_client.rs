@@ -362,7 +362,7 @@ pub async fn list_devices() -> Vec<DeviceInfo> {
             let status = if is_host_running() { "online" } else { "idle" };
             devices.push(DeviceInfo {
                 id: "local-host".into(),
-                name: "本机(被控端)".into(),
+                name: crate::network::local_id(),
                 status: status.into(),
                 platform: "windows".into(),
             });
@@ -372,11 +372,31 @@ pub async fn list_devices() -> Vec<DeviceInfo> {
         if let Some(sig) = cfg.signal_server.clone() {
             match crate::network::signal_list(&sig).await {
                 Ok(peers) => {
+                    // 本机自身已在 local-host 条目展示,需从信令列表剔除(避免重复出现两台设备码)
+                    let local_id = if cfg.host_id.trim().is_empty() {
+                        default_host_id()
+                    } else {
+                        cfg.host_id.clone()
+                    };
+                    // 已登录账号时仅展示本账号设备,避免混入其他账号的在线设备
+                    let my_user = cfg.account.as_ref().map(|a| a.username.clone());
                     for p in peers {
+                        if p.id == local_id {
+                            continue;
+                        }
+                        if let Some(u) = &my_user {
+                            if p.owner != *u {
+                                continue;
+                            }
+                        }
                         if !devices.iter().any(|d| d.id == p.id) {
                             devices.push(DeviceInfo {
                                 id: p.id.clone(),
-                                name: p.id.clone(),
+                                name: if p.name.is_empty() {
+                                    p.id.clone()
+                                } else {
+                                    p.name.clone()
+                                },
                                 status: "online".into(),
                                 platform: "signal".into(),
                             });
@@ -630,6 +650,51 @@ pub fn set_fullscreen(fullscreen: bool, app: AppHandle) -> Result<(), String> {
         &format!("fullscreen={fullscreen}"),
     );
     result
+}
+
+/// 独立文件传输窗口的对端设备名(主窗口打开窗口时写入,窗口页面读取)。
+static TRANSFER_DEVICE_NAME: Mutex<Option<String>> = Mutex::new(None);
+
+/// 打开独立文件传输窗口(单例:已存在时聚焦到前台)。
+///
+/// 对端设备名写入静态变量,由窗口页面经 `get_transfer_device_name` 读取,
+/// 用于远端面板标题展示(避免跨窗口 URL 传参的转义问题)。
+///
+/// 注意:必须为 async 命令 —— Windows 上 `WebviewWindowBuilder::build()`
+/// 在同步 command 中会死锁(Webview2 已知问题,见 tauri WebviewWindowBuilder 文档)。
+#[tauri::command]
+pub async fn open_file_transfer_window(
+    app: AppHandle,
+    device_name: Option<String>,
+) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("file-transfer") {
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    *TRANSFER_DEVICE_NAME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = device_name;
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        "file-transfer",
+        tauri::WebviewUrl::App("transfer.html".into()),
+    )
+    .title("文件传输")
+    .inner_size(1100.0, 720.0)
+    .min_inner_size(640.0, 480.0)
+    .resizable(true)
+    .build()
+    .map(|_| ())
+    .map_err(|e| format!("打开文件传输窗口失败: {e}"))
+}
+
+/// 读取独立文件传输窗口的对端设备名(未设置时返回 None)。
+#[tauri::command]
+pub fn get_transfer_device_name() -> Option<String> {
+    TRANSFER_DEVICE_NAME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 /// 读取系统剪贴板文本。

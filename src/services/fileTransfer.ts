@@ -104,3 +104,13 @@ export async function onRemoteDirectory(
   }
   return listen<RemoteDirectory>('remote-directory', (event) => handler(event.payload));
 }
+
+/** 读取独立文件传输窗口的对端设备名(主窗口打开窗口时写入;浏览器模式返回 null)。 */
+export async function getTransferDeviceName(): Promise<string | null> {
+  if (!isTauri()) {
+    console.warn('[fileTransfer] 非 Tauri 环境，无对端设备名');
+    return null;
+  }
+  const name = await invoke<string | null>('get_transfer_device_name');
+  return name || null;
+}
