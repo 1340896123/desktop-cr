@@ -32,6 +32,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             // 账号登录
             auth::login_account,
+            auth::register_account,
             auth::check_account_token,
             auth::logout_account,
             auth::get_account,

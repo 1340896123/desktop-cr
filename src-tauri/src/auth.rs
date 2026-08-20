@@ -2,6 +2,7 @@
 //!
 //! - 登录:调用 `POST {server}/api/auth/login` 换取 JWT,持久化到本地配置
 //!   (AppConfig.account),应用启动时校验令牌后解锁主界面;
+//! - 注册:调用 `POST {server}/api/auth/register` 自助注册,成功后自动签发令牌(注册即登录);
 //! - 退出:清除本地会话;
 //! - 所有命令均基于 reqwest 异步 HTTP(不占用 Tauri 主线程)。
 
@@ -53,18 +54,56 @@ pub async fn login_account(
             .unwrap_or("登录失败,请检查用户名或密码");
         return Err(msg.to_string());
     }
+    finish_auth(server, body, username)
+}
+
+/// 注册 dcr-signal 账号服务;成功后自动签发令牌并持久化会话(注册即登录)。
+#[tauri::command]
+pub async fn register_account(
+    server: String,
+    username: String,
+    password: String,
+) -> Result<AccountSession, String> {
+    let server = normalize_server(&server);
+    let resp = http()
+        .post(format!("{server}/api/auth/register"))
+        .json(&serde_json::json!({ "username": username, "password": password }))
+        .send()
+        .await
+        .map_err(|e| format!("无法连接服务器 {server}: {e}"))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("服务器响应解析失败: {e}"))?;
+    if !status.is_success() {
+        let msg = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("注册失败,请稍后重试");
+        return Err(msg.to_string());
+    }
+    finish_auth(server, body, username)
+}
+
+/// 解析登录/注册成功响应:提取令牌与用户名,持久化会话并写操作日志。
+fn finish_auth(
+    server: String,
+    body: serde_json::Value,
+    fallback_username: String,
+) -> Result<AccountSession, String> {
     let token = body
         .get("token")
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
     if token.is_empty() {
-        return Err("登录响应缺少令牌".into());
+        return Err("服务器响应缺少令牌".into());
     }
     let login_name = body
         .get("username")
         .and_then(|v| v.as_str())
-        .unwrap_or(&username)
+        .unwrap_or(&fallback_username)
         .to_string();
     let session = AccountSession {
         server,
