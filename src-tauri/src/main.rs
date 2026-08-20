@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod auth;
 mod bench;
 mod capture;
 #[cfg(target_os = "windows")]
@@ -29,6 +30,11 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // 账号登录
+            auth::login_account,
+            auth::check_account_token,
+            auth::logout_account,
+            auth::get_account,
             // 应用配置
             hbb_client::get_app_config,
             hbb_client::save_app_config,

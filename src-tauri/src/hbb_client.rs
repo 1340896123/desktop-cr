@@ -58,6 +58,9 @@ pub struct AppConfig {
     /// 本机唯一 ID(信令注册用,默认 "dcr-<主机名>")
     #[serde(default = "default_host_id")]
     pub host_id: String,
+    /// 账号登录会话(可选;登录后解锁应用,未登录为 None)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<AccountSession>,
 }
 
 impl Default for AppConfig {
@@ -70,6 +73,7 @@ impl Default for AppConfig {
             signal_server: Some("120.78.77.248:21116".into()),
             relay_server: Some("120.78.77.248:21117".into()),
             host_id: default_host_id(),
+            account: None,
         }
     }
 }
@@ -92,6 +96,18 @@ pub struct PeerConfig {
     pub addr: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+}
+
+/// 账号登录会话(登录 dcr-signal 管理服务后持久化,用于解锁应用)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSession {
+    /// 服务地址(如 "http://120.78.77.248:21120")。
+    pub server: String,
+    /// 登录用户名。
+    pub username: String,
+    /// JWT 令牌。
+    pub token: String,
 }
 
 /// 流参数配置(被控端抓帧循环实时读取)。
@@ -226,7 +242,7 @@ fn default_config_dir() -> PathBuf {
     base.join(APP_IDENTIFIER)
 }
 
-fn load_app_config() -> AppConfig {
+pub(crate) fn load_app_config() -> AppConfig {
     let path = config_file();
     match std::fs::read_to_string(&path) {
         Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
@@ -237,7 +253,7 @@ fn load_app_config() -> AppConfig {
     }
 }
 
-fn save_app_config_inner(config: &AppConfig) -> Result<(), String> {
+pub(crate) fn save_app_config_inner(config: &AppConfig) -> Result<(), String> {
     let path = config_file();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {e}"))?;
@@ -1103,6 +1119,11 @@ mod tests {
             signal_server: Some("signal.example.com:21116".into()),
             relay_server: Some("relay.example.com:21117".into()),
             host_id: "dcr-test-pc".into(),
+            account: Some(AccountSession {
+                server: "http://signal.example.com:21120".into(),
+                username: "alice".into(),
+                token: "jwt-token".into(),
+            }),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         // camelCase 字段名
@@ -1113,6 +1134,9 @@ mod tests {
         assert!(json.contains("\"signalServer\""));
         assert!(json.contains("\"relayServer\""));
         assert!(json.contains("\"hostId\""));
+        assert!(json.contains("\"account\""));
+        assert!(json.contains("\"username\""));
+        assert!(json.contains("\"jwt-token\""));
 
         // serde roundtrip 后内容一致
         let back: AppConfig = serde_json::from_str(&json).unwrap();
@@ -1124,12 +1148,15 @@ mod tests {
         assert_eq!(back.signal_server.as_deref(), Some("signal.example.com:21116"));
         assert_eq!(back.relay_server.as_deref(), Some("relay.example.com:21117"));
         assert_eq!(back.host_id, "dcr-test-pc");
+        assert_eq!(back.account.as_ref().unwrap().username, "alice");
+        assert_eq!(back.account.as_ref().unwrap().token, "jwt-token");
 
         // 旧配置(缺新字段)反序列化应回退到默认值
         let old = r#"{"hostEnabled":true,"hostPort":21118,"peers":[]}"#;
         let back: AppConfig = serde_json::from_str(old).unwrap();
         assert!(back.signal_server.is_none());
         assert!(back.relay_server.is_none());
+        assert!(back.account.is_none(), "旧配置无 account 字段,应回退为 None");
         assert!(!back.host_id.is_empty(), "host_id 应有默认值");
     }
 }

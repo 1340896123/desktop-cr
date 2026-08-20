@@ -30,6 +30,8 @@ cpal = "0.16"
 libloading = "0.8"
 # 信令/中继服务器协议库(dcr-server 的 lib,与 server/dcr-signal、dcr-relay 共享消息类型)
 dcr-server = { path = "../server" }
+# 账号登录:调用 dcr-signal 管理 API(HTTP + JSON,rustls 免 OpenSSL)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # ----------------------------------------------------------------------
 # RustDesk 生态复用说明：
