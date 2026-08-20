@@ -28,3 +28,4 @@ server/deploy/
 
 # CodeBuddy project data
 .codebuddy/
+.codegraph/
