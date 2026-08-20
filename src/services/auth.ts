@@ -21,6 +21,19 @@ export async function loginAccount(
   return invoke<AccountSession>('login_account', { server, username, password });
 }
 
+/** 注册 dcr-signal 账号;成功后自动签发令牌并返回会话(注册即登录) */
+export async function registerAccount(
+  server: string,
+  username: string,
+  password: string,
+): Promise<AccountSession> {
+  if (!isTauri()) {
+    console.warn('[auth] 非 Tauri 环境,模拟注册成功');
+    return { server, username, token: 'mock-token' };
+  }
+  return invoke<AccountSession>('register_account', { server, username, password });
+}
+
 /** 校验令牌是否仍有效(应用启动时调用);令牌失效时抛错 */
 export async function checkAccountToken(session: AccountSession): Promise<string> {
   if (!isTauri()) {

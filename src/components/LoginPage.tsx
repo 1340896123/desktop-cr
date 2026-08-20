@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { makeStyles } from '@fluentui/react-components';
 import { palette, fontFamily, radius, spacing, shadow, titleBarHeight, zIndex } from '../theme/tokens';
-import { loginAccount, type AccountSession } from '../services/auth';
+import { loginAccount, registerAccount, type AccountSession } from '../services/auth';
 import { onWindowMaximizedChange } from '../services/window';
 import { WindowControls } from './shared/WindowControls';
 
@@ -38,6 +38,33 @@ const useStyles = makeStyles({
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'stretch',
+  },
+  tabBar: {
+    display: 'flex',
+    borderBottom: `1px solid ${palette.borderLight}`,
+    marginBottom: `${spacing.lg}px`,
+  },
+  tab: {
+    flex: 1,
+    height: '36px',
+    background: 'transparent',
+    border: 'none',
+    borderBottom: '2px solid transparent',
+    fontFamily,
+    fontSize: '14px',
+    fontWeight: 600,
+    color: palette.textMuted,
+    cursor: 'pointer',
+    transition: 'color 150ms ease, border-color 150ms ease',
+    marginBottom: '-1px',
+
+    '&:hover': {
+      color: palette.textPrimary,
+    },
+  },
+  tabActive: {
+    color: palette.primary,
+    borderBottomColor: palette.primary,
   },
   brand: {
     display: 'flex',
@@ -144,18 +171,35 @@ const useStyles = makeStyles({
     textAlign: 'center',
     marginTop: `${spacing.sm}px`,
   },
+  linkBtn: {
+    fontFamily,
+    fontSize: '12px',
+    fontWeight: 600,
+    color: palette.primary,
+    background: 'none',
+    border: 'none',
+    padding: '0 2px',
+    cursor: 'pointer',
+
+    '&:hover': {
+      color: palette.primaryHover,
+      textDecoration: 'underline',
+    },
+  },
 });
 
 interface LoginPageProps {
   onLogin: (account: AccountSession) => void;
 }
 
-/** 账号登录页:登录 dcr-signal 服务通过验证后解锁应用 */
+/** 账号登录/注册页:登录或自助注册 dcr-signal 服务通过验证后解锁应用 */
 export const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
   const styles = useStyles();
+  const [mode, setMode] = useState<'login' | 'register'>('login');
   const [server, setServer] = useState('120.78.77.248:21120');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [maximized, setMaximized] = useState(false);
@@ -172,19 +216,47 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    if (!username.trim() || !password) {
-      setError('请输入用户名和密码');
+    if (!server.trim()) {
+      setError('请输入服务器地址');
+      return;
+    }
+    if (!username.trim()) {
+      setError('请输入用户名');
+      return;
+    }
+    if (mode === 'register') {
+      if (password.length < 6) {
+        setError('密码长度至少 6 位');
+        return;
+      }
+      if (password !== confirmPassword) {
+        setError('两次输入的密码不一致');
+        return;
+      }
+    } else if (!password) {
+      setError('请输入密码');
       return;
     }
     setBusy(true);
     try {
-      const account = await loginAccount(server.trim(), username.trim(), password);
+      const account =
+        mode === 'register'
+          ? await registerAccount(server.trim(), username.trim(), password)
+          : await loginAccount(server.trim(), username.trim(), password);
       onLogin(account);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
+  };
+
+  const switchMode = (next: 'login' | 'register') => {
+    if (next === mode) return;
+    setMode(next);
+    setError(null);
+    setPassword('');
+    setConfirmPassword('');
   };
 
   return (
@@ -199,6 +271,23 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
         <WindowControls />
       </div>
       <div className={styles.card}>
+        <div className={styles.tabBar}>
+          <button
+            type="button"
+            className={`${styles.tab} ${mode === 'login' ? styles.tabActive : ''}`}
+            onClick={() => switchMode('login')}
+          >
+            登 录
+          </button>
+          <button
+            type="button"
+            className={`${styles.tab} ${mode === 'register' ? styles.tabActive : ''}`}
+            onClick={() => switchMode('register')}
+          >
+            注 册
+          </button>
+        </div>
+
         <div className={styles.brand}>
           <div className={styles.logo}>UU</div>
           <div className={styles.brandText}>
@@ -239,17 +328,55 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="请输入密码"
-              autoComplete="current-password"
+              placeholder={mode === 'register' ? '至少 6 位' : '请输入密码'}
+              autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
             />
           </div>
+          {mode === 'register' && (
+            <div className={styles.field}>
+              <label className={styles.label} htmlFor="login-confirm">确认密码</label>
+              <input
+                id="login-confirm"
+                className={styles.input}
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="请再次输入密码"
+                autoComplete="new-password"
+              />
+            </div>
+          )}
           {error && <div className={styles.error}>{error}</div>}
           <button className={styles.submit} type="submit" disabled={busy}>
-            {busy ? '登录中…' : '登 录'}
+            {busy ? (mode === 'register' ? '注册中…' : '登录中…') : mode === 'register' ? '注 册' : '登 录'}
           </button>
         </form>
 
-        <div className={styles.hint}>登录后解锁远程控制功能</div>
+        <div className={styles.hint}>
+          {mode === 'login' ? (
+            <>
+              还没有账号?
+              <button
+                type="button"
+                className={styles.linkBtn}
+                onClick={() => switchMode('register')}
+              >
+                去注册
+              </button>
+            </>
+          ) : (
+            <>
+              已有账号?
+              <button
+                type="button"
+                className={styles.linkBtn}
+                onClick={() => switchMode('login')}
+              >
+                去登录
+              </button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
