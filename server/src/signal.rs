@@ -217,10 +217,36 @@ impl SignalCore {
         }
     }
 
+    /// 仅当记录仍持有指定代次时原子续期。
+    pub fn heartbeat_if_owner(&self, id: &str, generation: u64) -> Result<(), String> {
+        let mut map = self.peers.lock().map_err(|e| e.to_string())?;
+        match map.get_mut(id) {
+            Some(rec) if rec.generation == generation => {
+                rec.last_seen = Instant::now();
+                Ok(())
+            }
+            Some(_) => Err(format!("id 已被其他连接接管: {id}")),
+            None => Err(format!("未注册的 id: {id}")),
+        }
+    }
+
     /// 注销对端。
     pub fn unregister(&self, id: &str) {
         if let Ok(mut map) = self.peers.lock() {
             map.remove(id);
+        }
+    }
+
+    /// 仅当记录仍持有指定代次时原子注销,返回是否实际移除。
+    pub fn unregister_if_owner(&self, id: &str, generation: u64) -> bool {
+        let Ok(mut map) = self.peers.lock() else {
+            return false;
+        };
+        if matches!(map.get(id), Some(rec) if rec.generation == generation) {
+            map.remove(id);
+            true
+        } else {
+            false
         }
     }
 
@@ -442,29 +468,31 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
             SignalMsg::Heartbeat { id } => {
                 // 所有权校验:仅允许本连接注册(且仍持有代次)的记录续期,
                 // 防止任意连接刷新其他设备的在线时间造成虚假在线。
-                let owned = matches!(conn.as_ref(), Some((cid, gen)) if cid == &id && core.owns_generation(&id, *gen));
-                let ack = if owned {
-                    match core.heartbeat(&id) {
-                        Ok(()) => {
-                            core.devices.set_online(&id, true);
-                            SignalMsg::RegisterAck {
-                                ok: true,
-                                msg: "ok".into(),
-                                auth_error: false,
+                let ack = match conn.as_ref() {
+                    Some((cid, generation)) if cid == &id => {
+                        match core.heartbeat_if_owner(&id, *generation) {
+                            Ok(()) => {
+                                core.devices.set_online(&id, true);
+                                SignalMsg::RegisterAck {
+                                    ok: true,
+                                    msg: "ok".into(),
+                                    auth_error: false,
+                                }
                             }
+                            Err(e) => SignalMsg::RegisterAck {
+                                ok: false,
+                                msg: e,
+                                auth_error: false,
+                            },
                         }
-                        Err(e) => SignalMsg::RegisterAck {
-                            ok: false,
-                            msg: e,
-                            auth_error: false,
-                        },
                     }
-                } else {
-                    log::warn!("[signal] 心跳被拒(非本连接注册): id={id}");
-                    SignalMsg::RegisterAck {
-                        ok: false,
-                        msg: "未注册或已被其他连接接管".into(),
-                        auth_error: false,
+                    _ => {
+                        log::warn!("[signal] 心跳被拒(非本连接注册): id={id}");
+                        SignalMsg::RegisterAck {
+                            ok: false,
+                            msg: "未注册或已被其他连接接管".into(),
+                            auth_error: false,
+                        }
                     }
                 };
                 let _ = write_msg(&mut stream, &ack).await;
@@ -518,14 +546,18 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
             }
             SignalMsg::Unregister { id } => {
                 // 仅注销本连接登记且仍持有代次(所有权)的记录
-                let owned = matches!(conn.as_ref(), Some((cid, gen)) if cid == &id && core.owns_generation(&id, *gen));
-                if owned {
-                    core.unregister(&id);
+                let removed = match conn.as_ref() {
+                    Some((cid, generation)) if cid == &id => {
+                        core.unregister_if_owner(&id, *generation)
+                    }
+                    _ => false,
+                };
+                if removed {
                     conn = None;
                 }
                 log::info!(
                     "[signal] 注销: id={id},{}",
-                    if owned { "已注销" } else { "非本连接持有,忽略" }
+                    if removed { "已注销" } else { "非本连接持有,忽略" }
                 );
                 let _ = write_msg(
                     &mut stream,
@@ -543,8 +575,7 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
     // 连接断开:仅当记录仍由本连接持有(代次一致)时才注销,
     // 避免旧连接断开误删已被新连接接管的同 id 记录(重连竞态)。
     if let Some((id, generation)) = conn.take() {
-        if core.owns_generation(&id, generation) {
-            core.unregister(&id);
+        if core.unregister_if_owner(&id, generation) {
             core.devices.set_online(&id, false);
             log::info!("[signal] 连接断开({addr}),注销 id={id}");
         } else {
@@ -767,6 +798,21 @@ mod tests {
         assert_ne!(g1, g2, "每次注册代次应递增");
         assert!(core.owns_generation("x", g2));
         assert!(!core.owns_generation("x", g1), "旧代次应失去所有权");
+    }
+
+    #[test]
+    fn generation_owned_mutations_are_atomic() {
+        let core = SignalCore::new("");
+        let old_generation = core.register("x", "10.0.0.1:1", "1.1.1.1:1");
+        let new_generation = core.register("x", "10.0.0.2:2", "1.1.1.1:2");
+
+        assert!(core.heartbeat_if_owner("x", old_generation).is_err());
+        assert_eq!(core.lookup("x").unwrap().0, "10.0.0.2:2");
+        assert!(!core.unregister_if_owner("x", old_generation));
+        assert!(core.lookup("x").is_some());
+        assert!(core.heartbeat_if_owner("x", new_generation).is_ok());
+        assert!(core.unregister_if_owner("x", new_generation));
+        assert!(core.lookup("x").is_none());
     }
 
     #[test]

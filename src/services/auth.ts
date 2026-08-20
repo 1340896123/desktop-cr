@@ -67,12 +67,14 @@ export async function getAccount(): Promise<AccountSession | null> {
  * 订阅令牌失效事件:信令注册/设备列表被服务端以「令牌无效」拒绝时触发,
  * 前端应清除会话并强制重新登录(否则令牌过期后「我的设备」会静默为空)。
  */
-export async function onAuthExpired(handler: () => void): Promise<UnlistenFn> {
+export async function onAuthExpired(handler: () => void | Promise<void>): Promise<UnlistenFn> {
   if (!isTauri()) {
     console.warn('[auth] 非 Tauri 环境,跳过令牌失效订阅');
     return () => {
       /* noop */
     };
   }
-  return listen('auth-expired', () => handler());
+  return listen('auth-expired', () => {
+    void handler();
+  });
 }

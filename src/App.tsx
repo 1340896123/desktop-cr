@@ -82,6 +82,7 @@ export const App: React.FC = () => {
   const [authChecked, setAuthChecked] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
+  const loadRequestRef = useRef(0);
 
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
@@ -95,54 +96,82 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // 启动时读取本地会话并校验令牌;未登录或令牌失效则进入登录页
+  const load = useCallback(async () => {
+    const requestId = ++loadRequestRef.current;
+    const nextDevices = await getDevices();
+    if (requestId !== loadRequestRef.current) return;
+    setDevices(nextDevices);
+    const nextState = await getConnectionState();
+    if (requestId !== loadRequestRef.current) return;
+    setState(nextState);
+  }, []);
+
   useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let authExpired = false;
+
+    const handleAuthExpired = async () => {
+      authExpired = true;
+      loadRequestRef.current += 1;
+      setAuthChecked(true);
+      await logoutAccount().catch(() => undefined);
+      if (disposed) return;
+      setState({ connected: false });
+      setDevices([]);
+      setView('home');
+      setAccount(null);
+      showToast('登录已过期,请重新登录');
+    };
+
     void (async () => {
+      try {
+        const remove = await onAuthExpired(handleAuthExpired);
+        if (disposed) {
+          remove();
+          return;
+        }
+        unlisten = remove;
+      } catch (error) {
+        console.error('[app] 注册登录过期监听失败', error);
+      }
+
       const existing = await getAccount();
+      if (disposed || authExpired) return;
       if (existing) {
         try {
           await checkAccountToken(existing);
+          if (disposed || authExpired) return;
           setAccount(existing);
         } catch {
           await logoutAccount().catch(() => undefined);
+          if (disposed || authExpired) return;
           setAccount(null);
         }
       } else {
         setAccount(null);
       }
-      setAuthChecked(true);
+      if (!disposed && !authExpired) setAuthChecked(true);
     })();
-  }, []);
 
-  // 运行期间令牌失效(信令注册/设备列表被服务端以「令牌无效」拒绝)时强制重新登录,
-  // 否则令牌过期后设备列表静默为空,用户无从知晓需重新登录
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    void onAuthExpired(async () => {
-      await logoutAccount().catch(() => undefined);
-      setState({ connected: false });
-      setView('home');
-      setAccount(null);
-      showToast('登录已过期,请重新登录');
-    }).then((fn) => {
-      unlisten = fn;
-    });
-    return () => unlisten?.();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [showToast]);
 
-  const load = useCallback(async () => {
-    setDevices(await getDevices());
-    setState(await getConnectionState());
-  }, []);
+  useEffect(() => {
+    if (!authChecked || !account) return;
+    void load();
+  }, [account, authChecked, load]);
 
   useEffect(() => {
-    void load();
     let unlisten: (() => void) | undefined;
     void onConnectionStateChange((next) => setState(next)).then((fn) => {
       unlisten = fn;
     });
     return () => unlisten?.();
-  }, [load]);
+  }, []);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -234,6 +263,8 @@ export const App: React.FC = () => {
     try {
       await logoutAccount();
     } finally {
+      loadRequestRef.current += 1;
+      setDevices([]);
       setState({ connected: false });
       setView('home');
       setAccount(null);
@@ -251,7 +282,6 @@ export const App: React.FC = () => {
         <LoginPage
           onLogin={(s) => {
             setAccount(s);
-            void load();
           }}
         />
         <Toast message={toastMsg} />

@@ -299,43 +299,14 @@ pub(crate) fn load_app_config() -> AppConfig {
     cfg
 }
 
-/// 从账号服务地址解析主机名:"http://host:21120" → "host"(去协议与端口)。
-pub(crate) fn account_server_host(server: &str) -> Option<String> {
-    let s = server.trim().trim_end_matches('/');
-    let rest = s
-        .strip_prefix("http://")
-        .or_else(|| s.strip_prefix("https://"))
-        .unwrap_or(s);
-    let host = match rest.rsplit_once(':') {
-        Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => h,
-        _ => rest,
-    };
-    let host = host.trim();
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.to_string())
-    }
-}
-
-/// 生效的信令服务器地址:已登录账号时以账号服务主机的默认信令端口为准
-/// (令牌只在该部署有效,注册/列表必须访问与登录一致的服务器,否则同账号
-/// 设备完全发现不到),未登录时回退配置值。
+/// 生效的信令服务器地址。账号服务与信令服务可以分离,登录不参与地址推导。
 pub(crate) fn effective_signal_server(cfg: &AppConfig) -> Option<String> {
-    cfg.account
-        .as_ref()
-        .and_then(|a| account_server_host(&a.server))
-        .map(|h| format!("{h}:21116"))
-        .or_else(|| cfg.signal_server.clone())
+    cfg.signal_server.clone()
 }
 
-/// 生效的中继服务器地址(同 `effective_signal_server` 的同步规则)。
+/// 生效的中继服务器地址。账号服务与中继服务可以分离,登录不参与地址推导。
 pub(crate) fn effective_relay_server(cfg: &AppConfig) -> Option<String> {
-    cfg.account
-        .as_ref()
-        .and_then(|a| account_server_host(&a.server))
-        .map(|h| format!("{h}:21117"))
-        .or_else(|| cfg.relay_server.clone())
+    cfg.relay_server.clone()
 }
 
 /// 登录令牌失效处理:通知前端重新登录(广播 `auth-expired`)并清除本地会话。
@@ -1337,23 +1308,8 @@ mod tests {
     }
 
     #[test]
-    fn account_server_host_parses() {
-        assert_eq!(
-            account_server_host("http://120.78.77.248:21120").as_deref(),
-            Some("120.78.77.248")
-        );
-        assert_eq!(
-            account_server_host("https://svc.example.com").as_deref(),
-            Some("svc.example.com")
-        );
-        assert_eq!(account_server_host("myhost:1234").as_deref(), Some("myhost"));
-        assert_eq!(account_server_host("http://127.0.0.1:21120/").as_deref(), Some("127.0.0.1"));
-        assert_eq!(account_server_host("").as_deref(), None);
-    }
-
-    #[test]
-    fn effective_servers_follow_account() {
-        // 未登录:回退配置值
+    fn effective_servers_preserve_configuration() {
+        // 未登录:使用配置值
         let cfg = AppConfig {
             signal_server: Some("sig.example.com:21116".into()),
             relay_server: Some("relay.example.com:21117".into()),
@@ -1363,7 +1319,7 @@ mod tests {
         assert_eq!(effective_signal_server(&cfg).as_deref(), Some("sig.example.com:21116"));
         assert_eq!(effective_relay_server(&cfg).as_deref(), Some("relay.example.com:21117"));
 
-        // 已登录:以账号服务主机为准(令牌只在该部署有效)
+        // 已登录:仍使用配置值,允许信令/中继独立部署或使用自定义端口
         let cfg = AppConfig {
             signal_server: Some("sig.example.com:21116".into()),
             relay_server: Some("relay.example.com:21117".into()),
@@ -1374,8 +1330,22 @@ mod tests {
             }),
             ..AppConfig::default()
         };
-        assert_eq!(effective_signal_server(&cfg).as_deref(), Some("120.78.77.248:21116"));
-        assert_eq!(effective_relay_server(&cfg).as_deref(), Some("120.78.77.248:21117"));
+        assert_eq!(effective_signal_server(&cfg).as_deref(), Some("sig.example.com:21116"));
+        assert_eq!(effective_relay_server(&cfg).as_deref(), Some("relay.example.com:21117"));
+
+        // 配置缺失时不从账号服务地址推导,避免误连分离部署的服务
+        let cfg = AppConfig {
+            signal_server: None,
+            relay_server: None,
+            account: Some(AccountSession {
+                server: "http://account.example.com:21120".into(),
+                username: "alice".into(),
+                token: "jwt".into(),
+            }),
+            ..AppConfig::default()
+        };
+        assert!(effective_signal_server(&cfg).is_none());
+        assert!(effective_relay_server(&cfg).is_none());
     }
 
     #[test]
@@ -1441,4 +1411,3 @@ mod tests {
         assert!(back.relay_fallback_enabled, "旧配置无 relayFallbackEnabled,应回退 true");
     }
 }
-
