@@ -41,6 +41,10 @@ const useStyles = makeStyles({
     color: '#34C759',
     fontWeight: 600,
   },
+  simulatedBadge: {
+    color: '#FF9500',
+    fontWeight: 600,
+  },
 });
 
 interface RemoteCanvasProps {
@@ -72,6 +76,7 @@ export const RemoteCanvas: React.FC<RemoteCanvasProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [frameSize, setFrameSize] = useState({ width: remoteWidth, height: remoteHeight });
   const [live, setLive] = useState(false);
+  const [simulated, setSimulated] = useState(false);
   const latestBitmapRef = useRef<ImageBitmap | null>(null);
 
   const normalize = useCallback(
@@ -186,11 +191,18 @@ export const RemoteCanvas: React.FC<RemoteCanvasProps> = ({
     let disposed = false;
     let unlisten: (() => void) | undefined;
 
-    const handleFrame = (frame: { width: number; height: number; jpeg: number[] }) => {
+    const handleFrame = (frame: {
+      width: number;
+      height: number;
+      jpeg: number[];
+      simulated?: boolean;
+    }) => {
       if (disposed) return;
       const canvas = canvasRef.current;
       if (!canvas) return;
       setLive(true);
+      // 远程源帧（onRemoteFrame）无 simulated 字段时按 false 处理（真实画面）
+      setSimulated(Boolean(frame.simulated));
       setFrameSize((prev) =>
         prev.width === frame.width && prev.height === frame.height
           ? prev
@@ -313,13 +325,19 @@ export const RemoteCanvas: React.FC<RemoteCanvasProps> = ({
     );
   }
 
-  const overlayLabel = streamSource === 'remote' ? '远程画面 · Live' : '本机预览 · Live';
+  const overlayLabel =
+    streamSource === 'remote'
+      ? '远程画面 · Live'
+      : simulated
+        ? '本机预览 · 模拟画面（非真实抓屏）'
+        : '本机预览 · Live';
+  const overlayBadgeClass = simulated ? styles.simulatedBadge : styles.liveBadge;
 
   return (
     <div className={styles.container}>
       <div className={styles.overlay}>
         {frameSize.width}x{frameSize.height} · 已连接
-        {live && <span className={styles.liveBadge}> · {overlayLabel}</span>}
+        {live && <span className={overlayBadgeClass}> · {overlayLabel}</span>}
       </div>
       <canvas
         ref={canvasRef}

@@ -21,6 +21,10 @@ export interface AppConfig {
   hostEnabled: boolean;
   hostPort: number;
   peers: PeerConfig[];
+  /** 退出后保持被控端运行(仅持久化,系统级自启暂未实现) */
+  keepRunningOnExit: boolean;
+  /** 直连失败时允许经中继服务器兜底转发 */
+  relayFallbackEnabled: boolean;
   /** 信令服务器地址 "ip:port"，配置后被控端向其注册并心跳 */
   signalServer?: string;
   /** 中继服务器地址 "ip:port"，直连失败时经其中继转发 */
@@ -36,6 +40,8 @@ const DEFAULT_CONFIG: AppConfig = {
   hostEnabled: false,
   hostPort: 21118,
   peers: [],
+  keepRunningOnExit: false,
+  relayFallbackEnabled: true,
   signalServer: '120.78.77.248:21116',
   relayServer: '120.78.77.248:21117',
   hostId: 'dcr-browser',

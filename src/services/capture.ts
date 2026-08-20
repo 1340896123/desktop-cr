@@ -10,6 +10,8 @@ export interface CapturedFrame {
   width: number;
   height: number;
   jpeg: number[];
+  /** 是否为模拟画面（非 Windows 平台动画帧；真实抓帧缺省/为 false） */
+  simulated?: boolean;
 }
 
 /** 显示器信息（真实枚举，IDD 虚拟屏以 isVirtual 标记） */
@@ -31,6 +33,8 @@ export interface RemoteFrame {
   seq: number;
   /** 编码耗时（毫秒） */
   dur: number;
+  /** 是否为模拟画面（协议未携带该字段时保持 undefined，按 false 处理） */
+  simulated?: boolean;
 }
 
 export interface StartCaptureOptions {

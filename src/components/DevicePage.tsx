@@ -10,6 +10,7 @@ import {
 } from '@fluentui/react-icons';
 import { StatusBadge } from './shared/IconButton';
 import { fontFamily, spacing, radius, shadow } from '../theme/tokens';
+import { isTauri } from '../services/connection';
 
 const useStyles = makeStyles({
   page: {
@@ -43,6 +44,19 @@ const useStyles = makeStyles({
     letterSpacing: '-0.02em',
     lineHeight: '32px',
     margin: 0,
+  },
+  mockBadge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '2px 10px',
+    borderRadius: radius.pill,
+    backgroundColor: '#FFF7E6',
+    border: '1px solid rgba(245, 158, 11, 0.35)',
+    color: '#B45309',
+    fontFamily,
+    fontSize: '12px',
+    fontWeight: 600,
+    whiteSpace: 'nowrap',
   },
   heroCard: {
     backgroundColor: '#ffffff',
@@ -269,6 +283,7 @@ export const DevicePage: React.FC<DevicePageProps> = ({
   onSelectQuick,
 }) => {
   const styles = useStyles();
+  const isMock = !isTauri();
   const disabled = connecting || !online;
 
   return (
@@ -277,6 +292,9 @@ export const DevicePage: React.FC<DevicePageProps> = ({
         <div className={styles.header}>
           <StatusBadge online={online} />
           <h1 className={styles.title}>{deviceName}</h1>
+          {isMock && (
+            <span className={styles.mockBadge} title="浏览器环境,显示模拟数据">模拟模式</span>
+          )}
         </div>
 
         <div className={styles.heroCard}>

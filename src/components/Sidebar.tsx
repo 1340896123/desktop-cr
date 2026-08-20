@@ -11,6 +11,7 @@ import {
   StarRegular,
 } from '@fluentui/react-icons';
 import { fontFamily } from '../theme/tokens';
+import { isTauri } from '../services/connection';
 
 const UU_BLUE = '#0066ff';
 
@@ -143,6 +144,23 @@ const useStyles = makeStyles({
   footer: {
     padding: '8px',
     borderTop: '1px solid rgba(229, 231, 235, 0.7)',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+  },
+  mockBadge: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '2px 10px',
+    borderRadius: '999px',
+    backgroundColor: '#FFF7E6',
+    border: '1px solid rgba(245, 158, 11, 0.35)',
+    color: '#B45309',
+    fontFamily,
+    fontSize: '11px',
+    fontWeight: 600,
+    whiteSpace: 'nowrap',
   },
 });
 
@@ -180,6 +198,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   activeView,
 }) => {
   const styles = useStyles();
+  const isMock = !isTauri();
   const [expanded, setExpanded] = useState({ myDevices: true, cloudDevices: false, remoteAssist: true });
   const [assistSub, setAssistSub] = useState<'start' | 'favorites'>('start');
 
@@ -340,6 +359,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </span>
           <span className={styles.itemLabel}>设置</span>
         </div>
+        {isMock && (
+          <div className={styles.mockBadge} title="浏览器环境,显示模拟数据">模拟模式</div>
+        )}
       </div>
     </nav>
   );
