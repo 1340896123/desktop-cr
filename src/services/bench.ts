@@ -30,6 +30,8 @@ export interface RealtimeBenchReport {
   /** 渲染帧分辨率 */
   frameWidth: number;
   frameHeight: number;
+  /** 本次基准是否使用合成动画帧(输入 synthetic=true 或抓帧失败回退合成帧时为 true) */
+  synthetic: boolean;
 }
 
 /** 实时链路基准参数 */
@@ -72,5 +74,55 @@ export async function runRealtimeBench(
     targetW: params.targetW,
     targetH: params.targetH,
     codec: params.codec,
+  });
+}
+
+/** 音频公网回环基准报告(Rust AudioRelayBenchReport camelCase 序列化) */
+export interface AudioRelayBenchReport {
+  /** 中继服务器地址 */
+  relay: string;
+  /** 采集时长(秒) */
+  audioSeconds: number;
+  /** 采集采样率 */
+  sampleRate: number;
+  /** 采集声道数 */
+  channels: number;
+  /** 采集到的 PCM 数据量(字节) */
+  capturedBytes: number;
+  /** 经中继往返传输的 WAV 数据量(字节) */
+  wavBytes: number;
+  /** 平均往返延迟(毫秒,32KB 块逐块发到公网再等回传) */
+  avgRttMs: number;
+  /** 上行吞吐率(本机→公网,Mbps) */
+  sendRateMbps: number;
+  /** 下行吞吐率(公网→本机,Mbps) */
+  recvRateMbps: number;
+  /** 双向总吞吐率(上行+下行,Mbps) */
+  roundtripRateMbps: number;
+  /** 往返传输总字节数(上行+下行) */
+  totalTransferBytes: number;
+  /** 传输阶段耗时(毫秒) */
+  transferElapsedMs: number;
+  /** 回传落盘文件路径(供人工查验音频内容) */
+  outPath: string;
+}
+
+/**
+ * 运行音频公网回环基准(真实 WASAPI 系统回环采集 → WAV → 经公网中继回传 → 校验 → 落盘)。
+ * 需系统正在播放音频,否则采集无采样会返回错误。
+ */
+export async function runAudioRelayBench(params: {
+  relayAddr: string;
+  seconds: number;
+  outPath: string;
+}): Promise<AudioRelayBenchReport | null> {
+  if (!isTauri()) {
+    console.warn('[bench] 非 Tauri 环境，跳过音频公网回环基准', params);
+    return null;
+  }
+  return invoke<AudioRelayBenchReport>('run_audio_relay_bench', {
+    relayAddr: params.relayAddr,
+    seconds: params.seconds,
+    outPath: params.outPath,
   });
 }

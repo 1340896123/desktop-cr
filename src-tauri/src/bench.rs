@@ -51,6 +51,8 @@ pub struct RealtimeBenchReport {
     /// 渲染帧分辨率
     pub frame_width: u32,
     pub frame_height: u32,
+    /// 本次基准是否使用合成动画帧(输入 synthetic=true 或抓帧失败回退合成帧时置 true)
+    pub synthetic: bool,
 }
 
 /// 发送端(采集+编码+发送)统计。
@@ -61,6 +63,8 @@ struct SenderStats {
     send_total: std::time::Duration,
     width: u32,
     height: u32,
+    /// 是否使用了合成动画帧(输入 synthetic 或抓帧失败回退)
+    synthetic_used: bool,
 }
 
 /// 接收端(解码渲染)统计。
@@ -187,6 +191,7 @@ async fn sender_loop(
         send_total: std::time::Duration::ZERO,
         width: 0,
         height: 0,
+        synthetic_used: synthetic,
     };
     let mut last_frame: Option<(u32, u32, Vec<u8>)> = None;
     let mut warned_grab = false;
@@ -230,6 +235,7 @@ async fn sender_loop(
                     println!("[bench] 桌面无可用帧,回退合成动画帧(仅测编码/传输/渲染链路)");
                     synthetic_warned = true;
                 }
+                stats.synthetic_used = true;
                 let (w, h) = (target_w.max(320), target_h.max(180));
                 stats.width = w;
                 stats.height = h;
@@ -528,6 +534,7 @@ pub fn run_realtime_bench(
                 total_transfer_bytes: recv.transfer_bytes,
                 frame_width: recv.width,
                 frame_height: recv.height,
+                synthetic: sender_stats.synthetic_used,
             };
             Ok(report)
         })?;
@@ -610,7 +617,6 @@ pub struct AudioRelayBenchReport {
 ///
 /// 方向:本机 → 中继服务器 → 本机(host 写入的内容经中继转发回 host 自己的 client 流)。
 /// 上行与下行并发进行(全双工),`elapsed` 取发送端发完且接收端读完回传为止。
-#[allow(dead_code)]
 async fn audio_relay_chain_async(
     relay: &str,
     wav: Vec<u8>,
@@ -693,11 +699,11 @@ async fn audio_relay_chain_async(
 /// `relay_addr` 为中继 TCP 地址(如 `120.78.77.248:21117`),`seconds` 为采集时长(1..10 秒),
 /// `out_path` 为回传音频落盘路径。采集的是系统真实播放的声音(需系统正在播放音频,
 /// 无音频时不产生采样并返回 Err);不做任何合成填充、文件伪造或静音替换。
-#[allow(dead_code)]
+#[tauri::command]
 pub fn run_audio_relay_bench(
-    relay_addr: &str,
+    relay_addr: String,
     seconds: u32,
-    out_path: &str,
+    out_path: String,
 ) -> Result<AudioRelayBenchReport, String> {
     let seconds = seconds.clamp(1, 10);
     crate::operation_log::op_log(
@@ -716,13 +722,13 @@ pub fn run_audio_relay_bench(
     let (avg_rtt_ms, send_rate, recv_rate, roundtrip_rate, total_bytes, elapsed_ms, received) =
         tokio::runtime::Runtime::new()
             .map_err(|e| format!("创建 Tokio 运行时失败: {e}"))?
-            .block_on(audio_relay_chain_async(relay_addr, wav))?;
+            .block_on(audio_relay_chain_async(&relay_addr, wav))?;
 
     // 3) 回传音频落盘供人工查验
-    std::fs::write(out_path, &received).map_err(|e| format!("写入回传音频失败: {e}"))?;
+    std::fs::write(&out_path, &received).map_err(|e| format!("写入回传音频失败: {e}"))?;
     let nonzero = samples.iter().filter(|s| **s != 0).count();
     let report = AudioRelayBenchReport {
-        relay: relay_addr.to_string(),
+        relay: relay_addr.clone(),
         audio_seconds: seconds,
         sample_rate: rate,
         channels,
@@ -734,7 +740,7 @@ pub fn run_audio_relay_bench(
         roundtrip_rate_mbps: roundtrip_rate,
         total_transfer_bytes: total_bytes,
         transfer_elapsed_ms: elapsed_ms,
-        out_path: out_path.to_string(),
+        out_path: out_path.clone(),
     };
     println!(
         "[bench] 音频公网回环完成: 真实回环采集 {seconds}s {rate}Hz/{channels}ch {captured_bytes}B(非零采样 {nonzero}) | 平均RTT {avg_rtt_ms:.2}ms | 上行 {send_rate:.2}Mbps 下行 {recv_rate:.2}Mbps 双向 {roundtrip_rate:.2}Mbps | 回传 {wav_bytes}B 已落盘: {out_path}",
@@ -762,6 +768,7 @@ mod tests {
         let codec = std::env::var("DCR_BENCH_CODEC").unwrap_or_else(|_| "jpeg".to_string());
         let report = run_realtime_bench("loopback", None, 5, 30, true, 1280, 720, &codec).unwrap();
         assert!(report.frames_rendered > 0, "基准期间未渲染任何帧");
+        assert!(report.synthetic, "synthetic=true 时报告应标记合成帧模式");
         assert!(report.avg_capture_ms >= 0.0);
         println!("[bench] 最终报告: {report:?}");
     }
@@ -787,6 +794,7 @@ mod tests {
         let report =
             run_realtime_bench("relay", Some(&relay), 5, 30, true, w, h, &codec).unwrap();
         assert!(report.frames_rendered > 0, "经公网中继未渲染任何帧");
+        assert!(report.synthetic, "synthetic=true 时报告应标记合成帧模式");
         println!("[bench] 公网中继报告({relay}): {report:?}");
     }
 
@@ -812,7 +820,7 @@ mod tests {
                 .to_string_lossy()
                 .into_owned()
         });
-        let report = run_audio_relay_bench(&relay, seconds, &out).unwrap();
+        let report = run_audio_relay_bench(relay.clone(), seconds, out.clone()).unwrap();
         assert!(report.total_transfer_bytes > 0, "音频回环未传输任何数据");
         assert!(report.avg_rtt_ms > 0.0, "往返延迟异常");
         let meta = std::fs::metadata(&out).expect("回传音频文件不存在");

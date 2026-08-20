@@ -72,8 +72,9 @@ fn main() {
             // 鼠标 / 键盘事件注入
             input_injector::inject_mouse_event,
             input_injector::inject_key_event,
-            // 音频静音
+            // 音频静音 / 状态查询
             audio::set_audio_muted,
+            audio::get_audio_muted,
             // 屏幕抓取
             capture::list_monitors,
             capture::start_capture,
@@ -83,6 +84,7 @@ fn main() {
             media_pipeline::run_media_pipeline_test,
             // 实时链路性能基准
             bench::run_realtime_bench_command,
+            bench::run_audio_relay_bench,
             // 操作日志
             operation_log::get_operation_logs,
         ])
