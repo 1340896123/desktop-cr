@@ -8,8 +8,8 @@ WinUI-style remote desktop client: **Tauri v2 + React 18 + Fluent UI React v9**.
 - `npm run build` — `tsc && vite build`; this is the only typecheck/lint gate. **No eslint, no test framework, no CI.** tsconfig is strict with `noUnusedLocals`/`noUnusedParameters` — unused code fails the build
 - `npm run tauri dev` / `npm run tauri build` — run/build the desktop app
 - `cargo check` / `cargo build` in `src-tauri/` — Rust side. Windows 专属依赖只在 `[target.'cfg(windows)'.dependencies]`(windows crate + 相关 features)
-- `cargo test` in `src-tauri/` — Rust 单元测试(Rust 无独立测试框架,用 `#[cfg(test)]` 内嵌于各模块;18 条 + 8 ignored:capture 缩放/BGRA + DXGI 吞吐基准(ignored)、network 协议标签与 TCP framing 往返 + 文件传输状态机/全双工/速率基准、hbb_client 配置与流参数、input_injector code→VK 映射、virtual_display 注册表值、operation_log 读写、media_pipeline 音视频合成链路、ffmpeg_hw 编码往返/基准(ignored)、bench 实时链路基准(ignored))
-- `server/` — 独立 crate(信令/STUN/TURN 服务):`cargo build --release` 产出 `server/target/release/dcr-signal.exe`、`dcr-relay.exe`;`cargo test` 20 条(14 单元 + 6 集成 loopback)
+- `cargo test` in `src-tauri/` — Rust 单元测试(Rust 无独立测试框架,用 `#[cfg(test)]` 内嵌于各模块;22 条 + 11 ignored:capture 缩放/BGRA + DXGI 吞吐基准(ignored)、network 协议标签与 TCP framing 往返 + 文件传输状态机/全双工/速率基准 + 信令长连接保活回归、hbb_client 配置与流参数 + 账号服务器解析/生效服务器推导、input_injector code→VK 映射、virtual_display 注册表值、operation_log 读写、media_pipeline 音视频合成链路、ffmpeg_hw 编码往返/基准(ignored)、bench 实时链路基准(ignored))
+- `server/` — 独立 crate(信令/STUN/TURN 服务):`cargo build --release` 产出 `server/target/release/dcr-signal.exe`、`dcr-relay.exe`;`cargo test` 54 条(38 单元 + 16 集成 loopback)
 - `server/admin-ui/` — 管理后台 React UI:根 `package.json` 无该依赖,需在 `server/admin-ui` 下独立 `npm install` + `npm run build`,产出 `admin-ui/dist`(vite `base: './'`、port 5174、`/api` 代理 21120)
 - `npm test` — vitest(vitest run),前端纯函数测试(src/utils/coords.ts、src/services/config.ts)
 - 验收标准 = `cargo check` 零警告(两处)+ `cargo test` 全过(两处)+ `npm run build` 零错误 + `npm test` 全过

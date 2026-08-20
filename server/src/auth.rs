@@ -332,8 +332,8 @@ fn issue_token(secret: &[u8], username: &str) -> Result<String, String> {
     .map_err(|e| format!("令牌签发失败: {e}"))
 }
 
-/// 校验 JWT,返回用户名。
-fn verify_token(secret: &[u8], token: &str) -> Result<String, String> {
+/// 校验 JWT,返回用户名(供信令服务校验客户端令牌)。
+pub(crate) fn verify_token(secret: &[u8], token: &str) -> Result<String, String> {
     let mut validation = jsonwebtoken::Validation::default();
     // jsonwebtoken 9 默认不校验 exp(且默认 leeway 60s),收紧为严格校验
     validation.validate_exp = true;

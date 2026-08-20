@@ -24,6 +24,7 @@ import {
   getAccount,
   checkAccountToken,
   logoutAccount,
+  onAuthExpired,
   type AccountSession,
 } from './services/auth';
 import { palette, fontFamily, spacing } from './theme/tokens';
@@ -112,6 +113,22 @@ export const App: React.FC = () => {
       setAuthChecked(true);
     })();
   }, []);
+
+  // 运行期间令牌失效(信令注册/设备列表被服务端以「令牌无效」拒绝)时强制重新登录,
+  // 否则令牌过期后设备列表静默为空,用户无从知晓需重新登录
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void onAuthExpired(async () => {
+      await logoutAccount().catch(() => undefined);
+      setState({ connected: false });
+      setView('home');
+      setAccount(null);
+      showToast('登录已过期,请重新登录');
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, [showToast]);
 
   const load = useCallback(async () => {
     setDevices(await getDevices());
@@ -231,7 +248,12 @@ export const App: React.FC = () => {
   if (authChecked && !account) {
     return (
       <>
-        <LoginPage onLogin={(s) => setAccount(s)} />
+        <LoginPage
+          onLogin={(s) => {
+            setAccount(s);
+            void load();
+          }}
+        />
         <Toast message={toastMsg} />
       </>
     );

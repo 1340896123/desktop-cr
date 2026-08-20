@@ -1,0 +1,3 @@
+# Cargo 编译配置(sccache 缓存加速)
+[build]
+rustc-wrapper = "sccache"

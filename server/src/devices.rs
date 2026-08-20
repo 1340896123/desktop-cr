@@ -227,6 +227,16 @@ impl DeviceStore {
             .count()
     }
 
+    /// 某用户已登记设备数(排除指定 id,用于重连时的上限校验:已登记设备不占新名额)。
+    pub fn count_by_owner_excluding(&self, owner: &str, exclude_id: &str) -> usize {
+        self.devices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|d| d.owner == owner && d.id != exclude_id)
+            .count()
+    }
+
     /// 设备总数(含离线)。
     pub fn count(&self) -> usize {
         self.devices

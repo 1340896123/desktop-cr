@@ -223,9 +223,15 @@ pub async fn fetch_server_policy(session: AccountSession) -> ServerPolicy {
     }
 }
 
-/// 持久化会话到本地配置。
+/// 持久化会话到本地配置;同时把登录服务器地址同步到信令/中继服务器
+/// (同一部署主机的默认端口)。否则自定义服务器登录后,设备注册/列表仍访问
+/// 旧的信令服务器,令牌在该服务器上无效,同账号设备完全发现不到。
 fn save_session(session: &AccountSession) -> Result<(), String> {
     let mut cfg = load_app_config();
+    if let Some(host) = crate::hbb_client::account_server_host(&session.server) {
+        cfg.signal_server = Some(format!("{host}:21116"));
+        cfg.relay_server = Some(format!("{host}:21117"));
+    }
     cfg.account = Some(session.clone());
     save_app_config_inner(&cfg)
 }

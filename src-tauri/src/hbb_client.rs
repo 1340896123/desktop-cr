@@ -281,12 +281,74 @@ fn default_config_dir() -> PathBuf {
 
 pub(crate) fn load_app_config() -> AppConfig {
     let path = config_file();
-    match std::fs::read_to_string(&path) {
+    let mut cfg = match std::fs::read_to_string(&path) {
         Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
             log::warn!("[hbb_client] 配置文件解析失败,使用默认配置: {e}");
             AppConfig::default()
         }),
         Err(_) => AppConfig::default(),
+    };
+    // 信令/中继地址缺失时回填默认公网服务器:前端保存设置时若输入框为空会把
+    // signalServer 写成 undefined,导致信令设备发现静默失效(设备列表只剩本机)
+    if cfg.signal_server.is_none() {
+        cfg.signal_server = Some("120.78.77.248:21116".into());
+    }
+    if cfg.relay_server.is_none() {
+        cfg.relay_server = Some("120.78.77.248:21117".into());
+    }
+    cfg
+}
+
+/// 从账号服务地址解析主机名:"http://host:21120" → "host"(去协议与端口)。
+pub(crate) fn account_server_host(server: &str) -> Option<String> {
+    let s = server.trim().trim_end_matches('/');
+    let rest = s
+        .strip_prefix("http://")
+        .or_else(|| s.strip_prefix("https://"))
+        .unwrap_or(s);
+    let host = match rest.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => rest,
+    };
+    let host = host.trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+/// 生效的信令服务器地址:已登录账号时以账号服务主机的默认信令端口为准
+/// (令牌只在该部署有效,注册/列表必须访问与登录一致的服务器,否则同账号
+/// 设备完全发现不到),未登录时回退配置值。
+pub(crate) fn effective_signal_server(cfg: &AppConfig) -> Option<String> {
+    cfg.account
+        .as_ref()
+        .and_then(|a| account_server_host(&a.server))
+        .map(|h| format!("{h}:21116"))
+        .or_else(|| cfg.signal_server.clone())
+}
+
+/// 生效的中继服务器地址(同 `effective_signal_server` 的同步规则)。
+pub(crate) fn effective_relay_server(cfg: &AppConfig) -> Option<String> {
+    cfg.account
+        .as_ref()
+        .and_then(|a| account_server_host(&a.server))
+        .map(|h| format!("{h}:21117"))
+        .or_else(|| cfg.relay_server.clone())
+}
+
+/// 登录令牌失效处理:通知前端重新登录(广播 `auth-expired`)并清除本地会话。
+/// 幂等,可被列表查询/信令注册循环重复触发。
+pub(crate) fn handle_auth_expired(app: &AppHandle) {
+    let _ = app.emit("auth-expired", serde_json::json!({}));
+    let mut cfg = load_app_config();
+    if cfg.account.is_some() {
+        cfg.account = None;
+        if let Err(e) = save_app_config_inner(&cfg) {
+            log::warn!("[hbb_client] 清除过期会话失败: {e}");
+        }
+        crate::operation_log::op_log("hbb_client", "auth_expired", "登录令牌已过期,已清除本地会话");
     }
 }
 
@@ -325,7 +387,7 @@ pub fn save_app_config(config: AppConfig) -> Result<(), String> {
 /// 连通 = online,否则 offline;host_enabled 时追加本机被控端条目。
 /// 直连探测失败但对端已在信令服务器注册(可经外部地址/中继兜底连接)时同样视为在线。
 #[tauri::command]
-pub async fn list_devices() -> Vec<DeviceInfo> {
+pub async fn list_devices(app: AppHandle) -> Vec<DeviceInfo> {
     #[cfg(target_os = "windows")]
     {
         let cfg = load_app_config();
@@ -345,11 +407,27 @@ pub async fn list_devices() -> Vec<DeviceInfo> {
             online.push(h.await.unwrap_or(false));
         }
 
-        // 信令服务器在线列表(直连失败但已注册的对端视为在线)
+        // 信令服务器在线列表(直连失败但已注册的对端视为在线;服务端按令牌解析出的
+        // 账号过滤:登录账号只见自己设备,未登录/无令牌仅见未归属设备)。
+        // 已登录时信令服务器取账号服务主机(令牌只在该部署有效),避免登录到
+        // 自定义服务器后仍访问旧信令服务器导致同账号设备完全发现不到。
         let mut signal_peers = Vec::new();
-        if let Some(sig) = cfg.signal_server.clone() {
-            match crate::network::signal_list(&sig).await {
-                Ok(peers) => signal_peers = peers,
+        if let Some(sig) = effective_signal_server(&cfg) {
+            let (my_user, my_token) = cfg
+                .account
+                .as_ref()
+                .map(|a| (a.username.clone(), a.token.clone()))
+                .unwrap_or_default();
+            match crate::network::signal_list(&sig, &my_user, &my_token).await {
+                Ok((peers, auth_error)) => {
+                    if auth_error {
+                        // 令牌无效/已过期:服务端按未登录仅返回未归属设备,
+                        // 若不提示用户重新登录,"我的设备"将静默为空
+                        log::warn!("[hbb_client] 信令认证失败(登录令牌无效或已过期),通知重新登录");
+                        handle_auth_expired(&app);
+                    }
+                    signal_peers = peers;
+                }
                 Err(e) => log::warn!("[hbb_client] 信令设备列表获取失败: {e}"),
             }
         }
@@ -370,16 +448,15 @@ pub async fn list_devices() -> Vec<DeviceInfo> {
             });
         }
 
-        // 被控端运行中时追加本机条目
-        if cfg.host_enabled {
-            let status = if is_host_running() { "online" } else { "idle" };
-            devices.push(DeviceInfo {
-                id: "local-host".into(),
-                name: crate::network::local_id(),
-                status: status.into(),
-                platform: "windows".into(),
-            });
-        }
+        // 本机条目:始终展示(登录账号后本机即属于「我的设备」,不再依赖被控端模式开关);
+        // 被控端运行中为 online,否则 idle
+        let status = if is_host_running() { "online" } else { "idle" };
+        devices.push(DeviceInfo {
+            id: "local-host".into(),
+            name: crate::network::local_id(),
+            status: status.into(),
+            platform: "windows".into(),
+        });
 
         // 信令服务器发现的在线设备(不在本地配置的按 ID 展示,可经信令/中继连接)
         if !signal_peers.is_empty() {
@@ -459,12 +536,19 @@ pub async fn connect_to_device(peer_id: String, app: AppHandle) -> Result<Connec
     let cfg = load_app_config();
     let peer = cfg.peers.iter().find(|p| p.id == peer_id).cloned();
 
-    // 信令服务器查询(可选):拿外部地址与中继提示;信令发现的设备借此获取地址
+    // 信令服务器查询(可选):拿外部地址与中继提示;信令发现的设备借此获取地址。
+    // 已登录时取账号服务主机的信令端口(令牌只在该部署有效)。
     let mut direct = peer.as_ref().map(|p| p.addr.clone());
     let mut external: Option<String> = None;
-    let mut relay = cfg.relay_server.clone();
-    if let Some(sig) = cfg.signal_server.clone() {
-        match crate::network::signal_lookup(&sig, &peer_id).await {
+    let mut relay = effective_relay_server(&cfg);
+    if let Some(sig) = effective_signal_server(&cfg) {
+        // 携带登录令牌查询:服务端按令牌校验归属,跨账号查询拿不到地址
+        let my_token = cfg
+            .account
+            .as_ref()
+            .map(|a| a.token.clone())
+            .unwrap_or_default();
+        match crate::network::signal_lookup(&sig, &peer_id, &my_token).await {
             Ok(Some((lan, ext, hint))) => {
                 log::info!("[hbb_client] 信令查到 {peer_id}: lan={lan}, external={ext}");
                 if direct.is_none() && !lan.is_empty() {
@@ -477,7 +561,7 @@ pub async fn connect_to_device(peer_id: String, app: AppHandle) -> Result<Connec
                     relay = Some(hint);
                 }
             }
-            Ok(None) => log::info!("[hbb_client] 信令显示 {peer_id} 离线"),
+            Ok(None) => log::info!("[hbb_client] 信令显示 {peer_id} 离线(或无权查询)"),
             Err(e) => log::warn!("[hbb_client] 信令查询失败: {e}"),
         }
     }
@@ -981,9 +1065,10 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
             .map_err(|e| format!("监听 0.0.0.0:{port} 失败(端口被占用?): {e}"))?;
         let cfg = stream_cfg();
 
-        // 信令注册信息:服务器地址 / 本机 ID / 局域网地址(供广域网被发现)
+        // 信令注册信息:服务器地址 / 本机 ID / 局域网地址(供广域网被发现)。
+        // 已登录时取账号服务主机的信令端口,保证注册与登录同一部署(令牌才能被校验)
         let app_cfg = load_app_config();
-        let signal_addr = app_cfg.signal_server.clone();
+        let signal_addr = effective_signal_server(&app_cfg);
         let host_id = if app_cfg.host_id.trim().is_empty() {
             default_host_id()
         } else {
@@ -1034,9 +1119,20 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
             if let Err(e) = crate::audio::start_audio_capture() {
                 log::warn!("[hbb_client] host 音频采集启动失败(继续无音频): {e}");
             }
-            // 配置了信令服务器则后台注册本机并心跳(随 host 停止而取消)
-            let reg_task = if signal_addr.is_some() {
-                Some(tokio::spawn(crate::network::signal_register_loop(
+            // 信令注册/心跳与被控端服务并发运行。用 select! 而非 join!:
+            // 任一方先退出(如 serve_host 因 accept 失败异常返回)立即取消另一方,
+            // 避免监听已失效却仍持续注册/心跳造成设备虚假在线。
+            // 停止 host(abort HOST_TASK)时整段 future 被取消,两者一并终止,
+            // 保活连接随之关闭,服务端立即注销,设备不再显示在线。
+            let has_signal = signal_addr.is_some();
+            let serve = async {
+                if let Err(e) = crate::network::serve_host(app.clone(), listener).await {
+                    log::error!("[hbb_client] host 服务退出: {e}");
+                }
+            };
+            let reg = async {
+                crate::network::signal_register_loop(
+                    app.clone(),
                     signal_addr,
                     host_id,
                     lan,
@@ -1044,15 +1140,16 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
                     device_name,
                     device_os,
                     device_version,
-                )))
-            } else {
-                None
+                )
+                .await;
             };
-            if let Err(e) = crate::network::serve_host(app.clone(), listener).await {
-                log::error!("[hbb_client] host 服务退出: {e}");
-            }
-            if let Some(t) = reg_task {
-                t.abort();
+            if has_signal {
+                tokio::select! {
+                    _ = serve => {}
+                    _ = reg => {}
+                }
+            } else {
+                serve.await;
             }
             // host 退出(含异常返回)后广播停止
             let _ = app.emit("host-state", serde_json::json!({ "running": false, "port": 0 }));
@@ -1237,6 +1334,48 @@ mod tests {
         assert_eq!(stream_cfg().codec, "h264");
         apply_stream_cfg(0, 0, 0, 0, "vp8".into());
         assert_eq!(stream_cfg().codec, "jpeg");
+    }
+
+    #[test]
+    fn account_server_host_parses() {
+        assert_eq!(
+            account_server_host("http://120.78.77.248:21120").as_deref(),
+            Some("120.78.77.248")
+        );
+        assert_eq!(
+            account_server_host("https://svc.example.com").as_deref(),
+            Some("svc.example.com")
+        );
+        assert_eq!(account_server_host("myhost:1234").as_deref(), Some("myhost"));
+        assert_eq!(account_server_host("http://127.0.0.1:21120/").as_deref(), Some("127.0.0.1"));
+        assert_eq!(account_server_host("").as_deref(), None);
+    }
+
+    #[test]
+    fn effective_servers_follow_account() {
+        // 未登录:回退配置值
+        let cfg = AppConfig {
+            signal_server: Some("sig.example.com:21116".into()),
+            relay_server: Some("relay.example.com:21117".into()),
+            account: None,
+            ..AppConfig::default()
+        };
+        assert_eq!(effective_signal_server(&cfg).as_deref(), Some("sig.example.com:21116"));
+        assert_eq!(effective_relay_server(&cfg).as_deref(), Some("relay.example.com:21117"));
+
+        // 已登录:以账号服务主机为准(令牌只在该部署有效)
+        let cfg = AppConfig {
+            signal_server: Some("sig.example.com:21116".into()),
+            relay_server: Some("relay.example.com:21117".into()),
+            account: Some(AccountSession {
+                server: "http://120.78.77.248:21120".into(),
+                username: "alice".into(),
+                token: "jwt".into(),
+            }),
+            ..AppConfig::default()
+        };
+        assert_eq!(effective_signal_server(&cfg).as_deref(), Some("120.78.77.248:21116"));
+        assert_eq!(effective_relay_server(&cfg).as_deref(), Some("120.78.77.248:21117"));
     }
 
     #[test]

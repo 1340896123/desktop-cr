@@ -10,9 +10,6 @@ edition = "2021"
 name = "winui-remote-desktop"
 path = "src/main.rs"
 
-[build]
-
-rustc-wrapper = "sccache"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

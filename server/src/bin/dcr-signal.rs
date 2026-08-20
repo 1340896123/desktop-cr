@@ -168,7 +168,7 @@ async fn main() {
         }
     }
     let secret = dcr_server::auth::load_or_create_secret(&bind.data_dir);
-    let auth = AuthState::new(store, secret);
+    let auth = AuthState::new(store, secret.clone());
 
     // 服务策略配置(持久化 config.json;CLI 值仅作首次默认)
     let cli_cfg = ServerConfig {
@@ -184,8 +184,14 @@ async fn main() {
     let devices = Arc::new(DeviceStore::new(&bind.data_dir));
     let sessions = Arc::new(SessionCore::new());
 
-    // 共享信令核心:同时供信令服务与 Web 管理后台
-    let core = Arc::new(SignalCore::with_stores(&bind.relay_hint, devices.clone(), sessions.clone(), cfg.clone()));
+    // 共享信令核心:同时供信令服务与 Web 管理后台(JWT 密钥用于信令链路账号认证)
+    let core = Arc::new(SignalCore::with_stores(
+        &bind.relay_hint,
+        devices.clone(),
+        sessions.clone(),
+        cfg.clone(),
+        secret,
+    ));
 
     // Web 管理后台(独立任务,不阻塞信令)
     let admin_state = AdminState {

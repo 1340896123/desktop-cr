@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isTauri } from './connection';
 
 /** 账号登录会话(与 Rust 侧 AccountSession 对应) */
@@ -60,4 +61,18 @@ export async function getAccount(): Promise<AccountSession | null> {
   }
   const account = await invoke<AccountSession | null>('get_account');
   return account ?? null;
+}
+
+/**
+ * 订阅令牌失效事件:信令注册/设备列表被服务端以「令牌无效」拒绝时触发,
+ * 前端应清除会话并强制重新登录(否则令牌过期后「我的设备」会静默为空)。
+ */
+export async function onAuthExpired(handler: () => void): Promise<UnlistenFn> {
+  if (!isTauri()) {
+    console.warn('[auth] 非 Tauri 环境,跳过令牌失效订阅');
+    return () => {
+      /* noop */
+    };
+  }
+  return listen('auth-expired', () => handler());
 }

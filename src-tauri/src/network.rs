@@ -917,15 +917,19 @@ where
 }
 
 /// 查询对端在信令服务器上的信息,返回 (lan, external, relay_hint);离线返回 None。
+/// `token` 为请求方登录 JWT(未登录为空):服务端启用认证时仅返回本账号设备
+/// (或未归属设备)的地址,防止跨账号地址泄露。
 pub async fn signal_lookup(
     signal_addr: &str,
     id: &str,
+    token: &str,
 ) -> Result<Option<(String, String, String)>, String> {
     use dcr_server::message::SignalMsg;
     let ack: SignalMsg = signal_query(
         signal_addr,
         SignalMsg::Lookup {
             id: id.to_string(),
+            token: token.to_string(),
         },
     )
     .await?;
@@ -946,12 +950,28 @@ pub async fn signal_lookup(
     }
 }
 
-/// 查询信令服务器在线设备列表。
-pub async fn signal_list(signal_addr: &str) -> Result<Vec<dcr_server::message::PeerEntry>, String> {
+/// 查询信令服务器在线设备列表,返回 (peers, auth_error)。
+///
+/// `user`/`token` 为请求方账号与登录 JWT(未登录为空):服务端以令牌解析出的
+/// 账号过滤(无令牌/令牌无效仅返回未归属设备),客户端无需再自行过滤跨账号条目。
+/// `auth_error` 为 true 表示令牌无效或已过期(服务端仍按未登录返回未归属设备),
+/// 客户端应据此提示重新登录,避免令牌过期后「我的设备」静默为空。
+pub async fn signal_list(
+    signal_addr: &str,
+    user: &str,
+    token: &str,
+) -> Result<(Vec<dcr_server::message::PeerEntry>, bool), String> {
     use dcr_server::message::SignalMsg;
-    let ack: SignalMsg = signal_query(signal_addr, SignalMsg::List).await?;
+    let ack: SignalMsg = signal_query(
+        signal_addr,
+        SignalMsg::List {
+            user: user.to_string(),
+            token: token.to_string(),
+        },
+    )
+    .await?;
     match ack {
-        SignalMsg::ListAck { peers } => Ok(peers),
+        SignalMsg::ListAck { peers, auth_error } => Ok((peers, auth_error)),
         _ => Err("信令服务器应答异常".into()),
     }
 }
@@ -1034,10 +1054,17 @@ pub(crate) async fn open_transport(
     Err("所有连接路径均失败(直连/外部/中继)".into())
 }
 
-/// 向信令服务器注册本机并持续心跳(host 侧,连接断开自动重连)。
+/// 向信令服务器注册本机并持续心跳(host 侧,长连接保活,断开自动重连)。
+///
+/// 注册/心跳/归属变更全部在**同一长连接**上进行:服务端以「连接断开」视为离线,
+/// 短连接注册应答后立即断开会被服务端注销(signal.rs 连接断开注销逻辑),
+/// 因此必须保持连接不关闭。该任务随 host 任务一起被取消(见 hbb_client::start_host)。
 /// `user` 为登录用户名(未登录为空串),`name`/`os`/`version` 为设备信息,
 /// 供管理后台设备档案与注册策略(维护/版本下限/设备数上限)判断。
+/// 注册被服务端以「令牌无效」拒绝时经 `app` 通知前端重新登录(见 hbb_client::handle_auth_expired),
+/// 否则令牌过期后设备既不注册也无人知晓,「我的设备」会静默消失。
 pub(crate) async fn signal_register_loop(
+    app: AppHandle,
     signal_addr: Option<String>,
     host_id: String,
     lan: String,
@@ -1052,59 +1079,232 @@ pub(crate) async fn signal_register_loop(
     log::info!(
         "[network] 信令注册循环启动: id={host_id}, lan={lan}, user={user}, name={name}, os={os}, v={version}, server={signal_addr}"
     );
+    // 读取当前登录账号与令牌(登录/登出后随心跳自动更新归属,同账号设备才能互见;
+    // 令牌用于服务端校验身份,服务端以令牌解析出的用户名为准)
+    let current_auth = || {
+        crate::hbb_client::load_app_config()
+            .account
+            .map(|a| (a.username, a.token))
+            .unwrap_or_default()
+    };
+    signal_keepalive_loop(
+        Some(app),
+        signal_addr,
+        host_id,
+        lan,
+        name,
+        os,
+        version,
+        current_auth,
+        std::time::Duration::from_secs(20),
+        std::time::Duration::from_secs(3),
+    )
+    .await;
+}
+
+/// 信令长连接保活循环:连接 → 注册 → 同连接心跳,断线后重连重新注册。
+///
+/// 心跳/重连间隔可调,便于测试注入小间隔。`current_auth` 返回 (用户名, JWT 令牌),
+/// 每次心跳读取以感知登录/登出变化。`app` 用于令牌失效时通知前端重新登录
+/// (测试传入 None)。
+async fn signal_keepalive_loop(
+    app: Option<AppHandle>,
+    signal_addr: String,
+    host_id: String,
+    lan: String,
+    name: String,
+    os: String,
+    version: String,
+    current_auth: impl Fn() -> (String, String),
+    heartbeat_interval: std::time::Duration,
+    reconnect_delay: std::time::Duration,
+) {
+    use dcr_server::message::SignalMsg;
+    // 认证失败(令牌无效/过期)状态:首次检测到时通知前端重新登录,此后
+    // 放慢重试节奏(避免无效重试刷日志),重新登录后令牌更新自动恢复注册
+    let mut auth_failed = false;
     loop {
-        // 注册
-        match signal_query(
-            &signal_addr,
-            dcr_server::message::SignalMsg::Register {
+        // 1) 连接信令服务器
+        let mut stream = match tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            TcpStream::connect(&signal_addr),
+        )
+        .await
+        {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                log::warn!("[network] 信令连接失败: {e},{reconnect_delay:?} 后重试");
+                tokio::time::sleep(reconnect_delay).await;
+                continue;
+            }
+            Err(_) => {
+                log::warn!("[network] 信令连接超时,{reconnect_delay:?} 后重试");
+                tokio::time::sleep(reconnect_delay).await;
+                continue;
+            }
+        };
+
+        // 2) 注册(首次与每次重连后均全量注册,上报最新归属/地址/令牌)
+        let (user_now, token_now) = current_auth();
+        let mut last_user = user_now.clone();
+        let mut last_token = token_now.clone();
+        if let Err(e) = dcr_server::framing::write_msg(
+            &mut stream,
+            &SignalMsg::Register {
                 id: host_id.clone(),
                 lan: lan.clone(),
                 name: name.clone(),
                 os: os.clone(),
                 version: version.clone(),
-                user: user.clone(),
+                user: user_now.clone(),
+                token: token_now.clone(),
             },
         )
         .await
         {
-            Ok(dcr_server::message::SignalMsg::RegisterAck { ok, msg }) => {
-                log::info!("[network] 信令注册完成: ok={ok}, {msg}");
+            log::warn!("[network] 信令注册发送失败: {e}");
+            drop(stream);
+            tokio::time::sleep(reconnect_delay).await;
+            continue;
+        }
+        match read_signal_ack(&mut stream).await {
+            Ok(SignalMsg::RegisterAck {
+                ok: true,
+                msg,
+                auth_error: false,
+            }) => {
+                auth_failed = false;
+                log::info!("[network] 信令注册完成(长连接保持): {msg}");
             }
-            Ok(_) => log::warn!("[network] 信令注册应答异常"),
+            Ok(SignalMsg::RegisterAck {
+                ok: false,
+                msg,
+                auth_error,
+            }) => {
+                // 注册被拒(令牌无效/维护/版本过低/设备禁用/超上限/归属冲突):
+                // 本连接无意义,断开后重试
+                if auth_error {
+                    if !auth_failed {
+                        auth_failed = true;
+                        log::warn!("[network] 信令注册被拒(登录令牌无效或已过期): {msg}");
+                        if let Some(app) = &app {
+                            crate::hbb_client::handle_auth_expired(app);
+                        }
+                    }
+                } else {
+                    log::warn!("[network] 信令注册被拒: {msg}");
+                }
+                drop(stream);
+                tokio::time::sleep(if auth_failed {
+                    reconnect_delay * 10
+                } else {
+                    reconnect_delay
+                })
+                .await;
+                continue;
+            }
+            Ok(other) => {
+                log::warn!("[network] 信令注册应答异常: {other:?}");
+                drop(stream);
+                tokio::time::sleep(reconnect_delay).await;
+                continue;
+            }
             Err(e) => {
-                log::warn!("[network] 信令注册失败: {e}");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                log::warn!("[network] 信令注册应答读取失败: {e}");
+                drop(stream);
+                tokio::time::sleep(reconnect_delay).await;
                 continue;
             }
         }
-        // 心跳(20 秒间隔;失败则重连注册)
-        let mut heartbeat_ok = true;
-        while heartbeat_ok {
-            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
-            match signal_query(
-                &signal_addr,
-                dcr_server::message::SignalMsg::Heartbeat {
+
+        // 3) 长连接心跳:同一连接上周期续期;归属账号或令牌变化时改发完整注册
+        let mut connected = true;
+        while connected {
+            tokio::time::sleep(heartbeat_interval).await;
+            let (user_tick, token_tick) = current_auth();
+            let auth_changed = user_tick != last_user || token_tick != last_token;
+            let msg = if auth_changed {
+                SignalMsg::Register {
                     id: host_id.clone(),
-                },
-            )
-            .await
-            {
-                Ok(dcr_server::message::SignalMsg::RegisterAck { ok, .. }) => {
-                    if !ok {
-                        log::warn!("[network] 信令心跳被拒,重新注册");
-                        heartbeat_ok = false;
-                    }
+                    lan: lan.clone(),
+                    name: name.clone(),
+                    os: os.clone(),
+                    version: version.clone(),
+                    user: user_tick.clone(),
+                    token: token_tick.clone(),
                 }
-                Ok(_) => log::warn!("[network] 信令心跳应答异常"),
+            } else {
+                SignalMsg::Heartbeat {
+                    id: host_id.clone(),
+                }
+            };
+            if let Err(e) = dcr_server::framing::write_msg(&mut stream, &msg).await {
+                log::warn!("[network] 信令心跳发送失败: {e},重新连接");
+                break;
+            }
+            match read_signal_ack(&mut stream).await {
+                Ok(SignalMsg::RegisterAck {
+                    ok: true,
+                    auth_error: false,
+                    ..
+                }) => {
+                    if auth_changed {
+                        log::info!("[network] 归属账号/令牌已更新为 {user_tick}");
+                        last_user = user_tick;
+                        last_token = token_tick;
+                    }
+                    auth_failed = false;
+                }
+                Ok(SignalMsg::RegisterAck {
+                    ok: false,
+                    msg,
+                    auth_error,
+                }) => {
+                    // 心跳被拒(令牌过期后重新注册被拒):通知前端重新登录一次
+                    if auth_error {
+                        if !auth_failed {
+                            auth_failed = true;
+                            log::warn!("[network] 信令认证失败(登录令牌无效或已过期): {msg}");
+                            if let Some(app) = &app {
+                                crate::hbb_client::handle_auth_expired(app);
+                            }
+                        }
+                    } else {
+                        log::warn!("[network] 信令心跳被拒: {msg},重新注册");
+                    }
+                    connected = false;
+                }
+                Ok(other) => {
+                    log::warn!("[network] 信令心跳应答异常: {other:?},重新连接");
+                    connected = false;
+                }
                 Err(e) => {
-                    log::warn!("[network] 信令心跳失败: {e},重新注册");
-                    heartbeat_ok = false;
+                    log::warn!("[network] 信令心跳应答读取失败: {e},重新连接");
+                    connected = false;
                 }
             }
         }
-        // 等待后重新注册
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        drop(stream);
+        // 等待后重新连接注册(认证失败时放慢节奏,登录恢复后自动回到正常节奏)
+        tokio::time::sleep(if auth_failed {
+            reconnect_delay * 10
+        } else {
+            reconnect_delay
+        })
+        .await;
     }
+}
+
+/// 读取信令服务器应答(8 秒超时)。
+async fn read_signal_ack(
+    stream: &mut TcpStream,
+) -> Result<dcr_server::message::SignalMsg, String> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        dcr_server::framing::read_msg(stream),
+    )
+    .await
+    .map_err(|_| "读取应答超时".to_string())?
 }
 
 /// 控制端收消息循环:远程帧推送、剪贴板同步、心跳记录;断线清理会话并广播。
@@ -1777,6 +1977,108 @@ mod tests {
         }
         std::fs::remove_dir_all(&src_dir).ok();
         close_session();
+    }
+
+    // ------------------------------------------------------------------
+    // 信令:长连接注册/心跳保活(根因 bug 回归测试)
+    // ------------------------------------------------------------------
+
+    /// 长连接保活回归:注册应答后连接必须保持,设备持续在线(不因应答后断开而消失);
+    /// 归属账号变化 → 重新注册更新 owner;断线 → 服务端注销;重连注册 → 恢复在线。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn signal_keepalive_loop_holds_registration() {
+        use std::sync::Arc;
+
+        // 起一个真实信令服务(loopback 随机端口)
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let core = Arc::new(dcr_server::signal::SignalCore::new(""));
+        let serve = tokio::spawn(async move {
+            let _ = dcr_server::signal::serve(listener, udp, core).await;
+        });
+
+        // 归属账号可中途切换(模拟登录/登出);测试信令服务未启用认证,令牌留空
+        let user: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new("alice".into()));
+        let current_auth = {
+            let user = user.clone();
+            move || (user.lock().unwrap().clone(), String::new())
+        };
+        let heartbeat = std::time::Duration::from_millis(100);
+        let reconnect = std::time::Duration::from_millis(50);
+
+        // 启动长连接保活循环(host 侧)
+        let loop_task = tokio::spawn(signal_keepalive_loop(
+            None,
+            addr.clone(),
+            "dcr-test-host".into(),
+            "192.168.1.5:21118".into(),
+            "办公室PC".into(),
+            "Windows 11".into(),
+            "0.1.0".into(),
+            current_auth,
+            heartbeat,
+            reconnect,
+        ));
+
+        // 长连接保活期间:多次查询都应在线
+        for i in 0..3 {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let (peers, _auth_error) = signal_list(&addr, "alice", "").await.unwrap();
+            assert!(
+                peers.iter().any(|p| p.id == "dcr-test-host"),
+                "第 {i} 次查询:长连接保活期间设备应持续在线,当前: {peers:?}"
+            );
+        }
+
+        // 归属账号变化(alice → bob):下一心跳改为完整注册,服务端更新 owner
+        *user.lock().unwrap() = "bob".into();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let (bob_peers, _) = signal_list(&addr, "bob", "").await.unwrap();
+        assert!(
+            bob_peers.iter().any(|p| p.id == "dcr-test-host"),
+            "账号切换后应归属 bob,当前: {bob_peers:?}"
+        );
+        let (alice_peers, _) = signal_list(&addr, "alice", "").await.unwrap();
+        assert!(
+            !alice_peers.iter().any(|p| p.id == "dcr-test-host"),
+            "账号切换后 alice 不应再看到该设备,当前: {alice_peers:?}"
+        );
+
+        // 连接断开(模拟 host 停止/网络中断):服务端注销
+        loop_task.abort();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let (peers, _) = signal_list(&addr, "bob", "").await.unwrap();
+        assert!(
+            !peers.iter().any(|p| p.id == "dcr-test-host"),
+            "连接断开后应被服务端注销,当前: {peers:?}"
+        );
+
+        // 重连注册(host 断线重连路径):恢复在线
+        let current_auth2 = {
+            let user = user.clone();
+            move || (user.lock().unwrap().clone(), String::new())
+        };
+        let loop2 = tokio::spawn(signal_keepalive_loop(
+            None,
+            addr.clone(),
+            "dcr-test-host".into(),
+            "192.168.1.5:21118".into(),
+            "办公室PC".into(),
+            "Windows 11".into(),
+            "0.1.0".into(),
+            current_auth2,
+            heartbeat,
+            reconnect,
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let (peers, _) = signal_list(&addr, "bob", "").await.unwrap();
+        assert!(
+            peers.iter().any(|p| p.id == "dcr-test-host"),
+            "重连注册后应恢复在线,当前: {peers:?}"
+        );
+        loop2.abort();
+        serve.abort();
     }
 }
 

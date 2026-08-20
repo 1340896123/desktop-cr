@@ -8,11 +8,13 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
+use crate::auth;
 use crate::config::ConfigStore;
 use crate::devices::DeviceStore;
 use crate::framing::{read_msg, write_msg};
@@ -33,6 +35,9 @@ pub struct PeerRecord {
     pub external: String,
     /// 最近心跳时间。
     pub last_seen: Instant,
+    /// 注册代次:每次注册递增。连接断开时仅当记录仍持有该代次才注销,
+    /// 避免旧连接误删已被新连接接管的同 id 记录。
+    pub generation: u64,
 }
 
 /// 信令服务核心状态(跨连接共享)。
@@ -46,10 +51,15 @@ pub struct SignalCore {
     sessions: Arc<SessionCore>,
     /// 服务策略配置(共享)。
     cfg: Arc<RwLock<ConfigStore>>,
+    /// 注册代次分配器(每次注册递增)。
+    next_gen: Arc<AtomicU64>,
+    /// JWT 签名密钥;空 Vec 表示未启用账号认证(直接信任客户端上报的 user)。
+    auth_secret: Arc<Vec<u8>>,
 }
 
 impl SignalCore {
     /// 创建核心,`relay_hint` 为可选中继服务器地址("host:port",空串表示无)。
+    /// 不启用账号认证(测试/自托管开放模式用)。
     pub fn new(relay_hint: &str) -> Self {
         let cfg = Arc::new(RwLock::new(ConfigStore::new(
             &std::env::temp_dir().join("dcr-signal-config-default"),
@@ -64,15 +74,19 @@ impl SignalCore {
             devices: Arc::new(DeviceStore::new(&std::env::temp_dir().join("dcr-signal-devices-default"))),
             sessions: Arc::new(SessionCore::new()),
             cfg,
+            next_gen: Arc::new(AtomicU64::new(1)),
+            auth_secret: Arc::new(Vec::new()),
         }
     }
 
     /// 创建核心并注入共享存储(由入口程序装配;`cfg` 已持久化到数据目录)。
+    /// `auth_secret` 为 JWT 签名密钥(为空表示不启用账号认证)。
     pub fn with_stores(
         relay_hint: &str,
         devices: Arc<DeviceStore>,
         sessions: Arc<SessionCore>,
         cfg: Arc<RwLock<ConfigStore>>,
+        auth_secret: Vec<u8>,
     ) -> Self {
         Self {
             peers: Arc::new(Mutex::new(HashMap::new())),
@@ -80,6 +94,8 @@ impl SignalCore {
             devices,
             sessions,
             cfg,
+            next_gen: Arc::new(AtomicU64::new(1)),
+            auth_secret: Arc::new(auth_secret),
         }
     }
 
@@ -101,7 +117,7 @@ impl SignalCore {
     /// 服务端注册策略校验:返回 Ok 表示允许,Err 携带拒绝原因。
     /// - 维护模式拒绝新注册;
     /// - 客户端版本低于下限拒绝;
-    /// - 单用户设备数超上限拒绝(该设备尚未登记时);
+    /// - 单用户设备数超上限拒绝(该设备尚未登记时,已登记设备重连不占新名额);
     /// - 设备被管理员禁用拒绝。
     pub fn check_register_policy(&self, user: &str, version: &str, id: &str) -> Result<(), String> {
         let cfg = self.cfg.read().unwrap_or_else(|e| e.into_inner()).get();
@@ -120,7 +136,8 @@ impl SignalCore {
             return Err("设备已被管理员禁用".into());
         }
         if !user.is_empty() && cfg.max_devices_per_user > 0 {
-            let owned = self.devices.count_by_owner(user);
+            // 已归属当前用户的设备重连不占用新名额(避免达到上限后重连被误拒)
+            let owned = self.devices.count_by_owner_excluding(user, id);
             if owned >= cfg.max_devices_per_user {
                 return Err(format!(
                     "设备数已达上限({}台),请先在后台删除不再使用的设备",
@@ -131,18 +148,61 @@ impl SignalCore {
         Ok(())
     }
 
-    /// 注册对端(同 id 重复注册视为更新地址,last one wins)。
-    pub fn register(&self, id: &str, lan: &str, external: &str) {
-        if let Ok(mut map) = self.peers.lock() {
-            map.insert(
-                id.to_string(),
-                PeerRecord {
-                    lan: lan.to_string(),
-                    external: external.to_string(),
-                    last_seen: Instant::now(),
-                },
-            );
+    /// 是否启用账号认证(持有 JWT 密钥)。
+    pub fn auth_enabled(&self) -> bool {
+        !self.auth_secret.is_empty()
+    }
+
+    /// 校验登录令牌:有效返回令牌中的用户名,否则返回 None。
+    /// 未启用认证或令牌为空时也返回 None(交由调用方按开放模式处理)。
+    pub fn authenticate(&self, token: &str) -> Option<String> {
+        if self.auth_secret.is_empty() || token.is_empty() {
+            return None;
         }
+        auth::verify_token(&self.auth_secret, token).ok()
+    }
+
+    /// 查询对端地址是否被允许:`token` 为请求方登录令牌。启用认证时仅允许
+    /// 查询本账号设备与未归属设备(防止知道设备 ID 即查他账号地址);
+    /// 未启用认证(开放模式)一律允许。
+    pub fn lookup_allowed(&self, id: &str, token: &str) -> bool {
+        if !self.auth_enabled() {
+            return true;
+        }
+        let me = if token.is_empty() {
+            None
+        } else {
+            self.authenticate(token)
+        };
+        match self.devices.get(id) {
+            Some(dev) => dev.owner.is_empty() || me.as_deref() == Some(dev.owner.as_str()),
+            // 未建档设备:仅登录用户可查(从未注册过的 id 本就查不到地址,不泄露)
+            None => me.is_some(),
+        }
+    }
+
+    /// 注册对端(同 id 重复注册视为更新地址,last one wins),返回本次注册代次。
+    pub fn register(&self, id: &str, lan: &str, external: &str) -> u64 {
+        let mut map = self.peers.lock().unwrap_or_else(|e| e.into_inner());
+        let generation = self.next_gen.fetch_add(1, Ordering::Relaxed);
+        map.insert(
+            id.to_string(),
+            PeerRecord {
+                lan: lan.to_string(),
+                external: external.to_string(),
+                last_seen: Instant::now(),
+                generation,
+            },
+        );
+        generation
+    }
+
+    /// 该 id 的在线记录是否仍持有指定代次(本连接是否仍持有该记录所有权)。
+    pub fn owns_generation(&self, id: &str, generation: u64) -> bool {
+        self.peers
+            .lock()
+            .map(|m| m.get(id).map(|r| r.generation == generation).unwrap_or(false))
+            .unwrap_or(false)
     }
 
     /// 心跳续期;未注册的 id 返回 Err。
@@ -181,23 +241,38 @@ impl SignalCore {
 
     /// 在线对端列表(自动剔除超时条目)。
     pub fn list_online(&self) -> Vec<PeerEntry> {
+        self.list_online_filtered(|_| true)
+    }
+
+    /// 在线对端列表(按归属账号过滤):`user` 非空时仅返回该账号设备,
+    /// 空串(未登录)时仅返回未归属设备,避免跨账号地址泄露。
+    pub fn list_online_for(&self, user: &str) -> Vec<PeerEntry> {
+        self.list_online_filtered(|owner| owner == user)
+    }
+
+    /// 在线对端列表(通用过滤):先剔除超时条目,再按 `keep` 过滤归属账号。
+    fn list_online_filtered(&self, keep: impl Fn(&str) -> bool) -> Vec<PeerEntry> {
         let mut map = self.peers.lock().unwrap_or_else(|e| e.into_inner());
         map.retain(|_, rec| rec.last_seen.elapsed() <= ONLINE_TIMEOUT);
         map.iter()
-            .map(|(id, rec)| {
+            .filter_map(|(id, rec)| {
                 // 名称/归属取自设备档案(注册时上报);档案缺失时以 id 兜底
                 let dev = self.devices.get(id);
-                PeerEntry {
+                let owner = dev.as_ref().map(|d| d.owner.clone()).unwrap_or_default();
+                if !keep(&owner) {
+                    return None;
+                }
+                Some(PeerEntry {
                     id: id.clone(),
                     name: dev
                         .as_ref()
                         .map(|d| d.name.clone())
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| id.clone()),
-                    owner: dev.map(|d| d.owner).unwrap_or_default(),
+                    owner,
                     lan: rec.lan.clone(),
                     external: rec.external.clone(),
-                }
+                })
             })
             .collect()
     }
@@ -243,7 +318,8 @@ fn version_cmp(a: &str, b: &str) -> i32 {
 /// 处理单个信令 TCP 连接:循环读消息、按类型处理,断开时注销该连接登记的 id。
 pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
     let addr = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-    let mut conn_id: Option<String> = None;
+    // 本连接登记的对端(id, 注册代次);代次用于断开时判定记录所有权
+    let mut conn: Option<(String, u64)> = None;
     loop {
         let msg: SignalMsg = match tokio::time::timeout(IDLE_TIMEOUT, read_msg(&mut stream)).await {
             Ok(Ok(m)) => m,
@@ -264,13 +340,67 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                 os,
                 version,
                 user,
+                token,
             } => {
+                // 认证:令牌非空时以其解析出的用户名为准(忽略客户端自报的 user);
+                // 令牌无效直接拒绝。未启用认证(无密钥)时信任客户端上报的 user。
+                let mut effective_user = user.clone();
+                if !token.is_empty() {
+                    match core.authenticate(&token) {
+                        Some(u) => effective_user = u,
+                        None => {
+                            let msg = "登录令牌无效或已过期,请重新登录".to_string();
+                            log::warn!("[signal] 注册被拒(令牌无效): id={id}");
+                            let _ = write_msg(
+                                &mut stream,
+                                &SignalMsg::RegisterAck {
+                                    ok: false,
+                                    msg,
+                                    auth_error: true,
+                                },
+                            )
+                            .await;
+                            break;
+                        }
+                    }
+                } else if core.auth_enabled() {
+                    // 服务端启用了账号认证:无令牌一律视为未登录,不得冒用他人账号
+                    effective_user = String::new();
+                }
+                // 归属冲突检查仅在启用认证时执行:此时 effective_user 来自受
+                // 校验的令牌,可防止他账号强占设备。开放模式(无认证)信任客户端
+                // 上报的 user,允许同设备归属随登录账号切换(否则换号后设备被锁死)。
+                if core.auth_enabled() {
+                    if let Some(dev) = core.devices.get(&id) {
+                        if !dev.owner.is_empty() && dev.owner != effective_user {
+                            let msg = format!(
+                                "设备已归属账号 {}(请使用该账号登录后注册)",
+                                dev.owner
+                            );
+                            log::warn!("[signal] 注册被拒(归属冲突): id={id}, 归属={}, 请求={effective_user}", dev.owner);
+                            let _ = write_msg(
+                                &mut stream,
+                                &SignalMsg::RegisterAck {
+                                    ok: false,
+                                    msg,
+                                    auth_error: false,
+                                },
+                            )
+                            .await;
+                            break;
+                        }
+                    }
+                }
                 // 策略校验:维护模式 / 版本下限 / 设备禁用 / 设备数上限
-                if let Err(e) = core.check_register_policy(&user, &version, &id) {
+                if let Err(e) = core.check_register_policy(&effective_user, &version, &id) {
                     log::warn!("[signal] 注册被拒: id={id}, 原因={e}");
                     let _ = write_msg(
                         &mut stream,
-                        &SignalMsg::RegisterAck { ok: false, msg: e },
+                        &SignalMsg::RegisterAck {
+                            ok: false,
+                            msg: e,
+                            auth_error: false,
+                        },
                     )
                     .await;
                     break;
@@ -280,11 +410,21 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                     .lock()
                     .map(|m| m.contains_key(&id))
                     .unwrap_or(false);
-                core.register(&id, &lan, &addr);
-                core.devices
-                    .touch(&id, &user, &name, &os, &version, &lan, &addr, true);
-                conn_id = Some(id.clone());
-                log::info!("[signal] 注册: id={id}, lan={lan}, external={addr}, user={user}, os={os}, v={version}");
+                let generation = core.register(&id, &lan, &addr);
+                core.devices.touch(
+                    &id,
+                    &effective_user,
+                    &name,
+                    &os,
+                    &version,
+                    &lan,
+                    &addr,
+                    true,
+                );
+                conn = Some((id.clone(), generation));
+                log::info!(
+                    "[signal] 注册: id={id}, lan={lan}, external={addr}, user={effective_user}, os={os}, v={version}"
+                );
                 let _ = write_msg(
                     &mut stream,
                     &SignalMsg::RegisterAck {
@@ -294,37 +434,49 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                         } else {
                             "ok".into()
                         },
+                        auth_error: false,
                     },
                 )
                 .await;
             }
             SignalMsg::Heartbeat { id } => {
-                match core.heartbeat(&id) {
-                    Ok(()) => {
-                        core.devices.set_online(&id, true);
-                        let _ = write_msg(
-                            &mut stream,
-                            &SignalMsg::RegisterAck {
+                // 所有权校验:仅允许本连接注册(且仍持有代次)的记录续期,
+                // 防止任意连接刷新其他设备的在线时间造成虚假在线。
+                let owned = matches!(conn.as_ref(), Some((cid, gen)) if cid == &id && core.owns_generation(&id, *gen));
+                let ack = if owned {
+                    match core.heartbeat(&id) {
+                        Ok(()) => {
+                            core.devices.set_online(&id, true);
+                            SignalMsg::RegisterAck {
                                 ok: true,
                                 msg: "ok".into(),
-                            },
-                        )
-                        .await;
+                                auth_error: false,
+                            }
+                        }
+                        Err(e) => SignalMsg::RegisterAck {
+                            ok: false,
+                            msg: e,
+                            auth_error: false,
+                        },
                     }
-                    Err(e) => {
-                        let _ = write_msg(
-                            &mut stream,
-                            &SignalMsg::RegisterAck {
-                                ok: false,
-                                msg: e,
-                            },
-                        )
-                        .await;
+                } else {
+                    log::warn!("[signal] 心跳被拒(非本连接注册): id={id}");
+                    SignalMsg::RegisterAck {
+                        ok: false,
+                        msg: "未注册或已被其他连接接管".into(),
+                        auth_error: false,
                     }
-                }
+                };
+                let _ = write_msg(&mut stream, &ack).await;
             }
-            SignalMsg::Lookup { id } => {
-                let found = core.lookup(&id);
+            SignalMsg::Lookup { id, token } => {
+                // 鉴权(启用认证时):仅返回本账号设备或未归属设备的地址;
+                // 令牌无效/未登录按匿名处理,杜绝跨账号地址泄露。
+                let found = if core.lookup_allowed(&id, &token) {
+                    core.lookup(&id)
+                } else {
+                    None
+                };
                 let (online, lan, external, relay_hint) = match found {
                     Some((lan, external, relay_hint)) => (true, lan, external, relay_hint),
                     None => (false, String::new(), String::new(), String::new()),
@@ -340,22 +492,47 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                 )
                 .await;
             }
-            SignalMsg::List => {
-                let peers = core.list_online();
-                log::info!("[signal] list: 在线 {} 个", peers.len());
-                let _ = write_msg(&mut stream, &SignalMsg::ListAck { peers }).await;
+            SignalMsg::List { user, token } => {
+                // 认证:令牌有效时以令牌用户名为准;令牌缺失/无效一律按未登录处理
+                // (仅返回未归属设备),杜绝伪造账号名查询他人设备。
+                // 令牌无效且服务端启用了认证时置 auth_error,客户端据此提示重新登录
+                // (否则令牌过期后设备列表静默为空,用户无从知晓需重新登录)。
+                let mut auth_error = false;
+                let effective_user = if !token.is_empty() {
+                    match core.authenticate(&token) {
+                        Some(u) => u,
+                        None => {
+                            log::warn!("[signal] list 令牌无效,按未登录处理: {addr}");
+                            auth_error = core.auth_enabled();
+                            String::new()
+                        }
+                    }
+                } else if core.auth_enabled() {
+                    String::new()
+                } else {
+                    user
+                };
+                let peers = core.list_online_for(&effective_user);
+                log::info!("[signal] list(user={effective_user}): 在线 {} 个", peers.len());
+                let _ = write_msg(&mut stream, &SignalMsg::ListAck { peers, auth_error }).await;
             }
             SignalMsg::Unregister { id } => {
-                core.unregister(&id);
-                if conn_id.as_deref() == Some(id.as_str()) {
-                    conn_id = None;
+                // 仅注销本连接登记且仍持有代次(所有权)的记录
+                let owned = matches!(conn.as_ref(), Some((cid, gen)) if cid == &id && core.owns_generation(&id, *gen));
+                if owned {
+                    core.unregister(&id);
+                    conn = None;
                 }
-                log::info!("[signal] 注销: id={id}");
+                log::info!(
+                    "[signal] 注销: id={id},{}",
+                    if owned { "已注销" } else { "非本连接持有,忽略" }
+                );
                 let _ = write_msg(
                     &mut stream,
                     &SignalMsg::RegisterAck {
                         ok: true,
                         msg: "ok".into(),
+                        auth_error: false,
                     },
                 )
                 .await;
@@ -363,11 +540,16 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
             _ => {}
         }
     }
-    // 连接断开,注销该连接登记的对端
-    if let Some(id) = conn_id.take() {
-        core.unregister(&id);
-        core.devices.set_online(&id, false);
-        log::info!("[signal] 连接断开({addr}),注销 id={id}");
+    // 连接断开:仅当记录仍由本连接持有(代次一致)时才注销,
+    // 避免旧连接断开误删已被新连接接管的同 id 记录(重连竞态)。
+    if let Some((id, generation)) = conn.take() {
+        if core.owns_generation(&id, generation) {
+            core.unregister(&id);
+            core.devices.set_online(&id, false);
+            log::info!("[signal] 连接断开({addr}),注销 id={id}");
+        } else {
+            log::info!("[signal] 连接断开({addr}),id={id} 已被新连接接管,跳过注销");
+        }
     }
 }
 
@@ -545,5 +727,146 @@ mod tests {
         let (lan, external, _) = core.lookup("x").unwrap();
         assert_eq!(lan, "10.0.0.2:2");
         assert_eq!(external, "1.1.1.1:2");
+    }
+
+    #[test]
+    fn list_online_filters_by_owner() {
+        let core = SignalCore::new("");
+        core.register("a", "10.0.0.1:1", "1.1.1.1:1");
+        core.register("b", "10.0.0.2:1", "2.2.2.2:1");
+        core.register("c", "10.0.0.3:1", "3.3.3.3:1");
+        core.devices
+            .touch("a", "alice", "A", "Windows", "0.1.0", "10.0.0.1:1", "1.1.1.1:1", true);
+        core.devices
+            .touch("b", "bob", "B", "Windows", "0.1.0", "10.0.0.2:1", "2.2.2.2:1", true);
+        // c 未建档 → owner 为空(未归属设备)
+
+        // 登录用户只见自己账号设备
+        let alice = core.list_online_for("alice");
+        assert_eq!(alice.len(), 1);
+        assert_eq!(alice[0].id, "a");
+        let bob = core.list_online_for("bob");
+        assert_eq!(bob.len(), 1);
+        assert_eq!(bob[0].id, "b");
+        // 未登录只可见未归属设备
+        let anon = core.list_online_for("");
+        assert_eq!(anon.len(), 1);
+        assert_eq!(anon[0].id, "c");
+        // 管理后台视角:全部设备
+        assert_eq!(core.list_online().len(), 3);
+    }
+
+    #[test]
+    fn register_generation_ownership() {
+        let core = SignalCore::new("");
+        let g1 = core.register("x", "10.0.0.1:1", "1.1.1.1:1");
+        assert!(core.owns_generation("x", g1));
+        assert!(!core.owns_generation("x", g1 + 999), "未知代次不持有");
+        // 同 id 再次注册:代次递增,旧代次失去所有权(旧连接断开不再误删)
+        let g2 = core.register("x", "10.0.0.2:2", "1.1.1.1:2");
+        assert_ne!(g1, g2, "每次注册代次应递增");
+        assert!(core.owns_generation("x", g2));
+        assert!(!core.owns_generation("x", g1), "旧代次应失去所有权");
+    }
+
+    #[test]
+    fn device_limit_excludes_current_device() {
+        // 隔离存储,避免与其它测试共享默认目录造成数据串扰
+        let dir = std::env::temp_dir().join(format!("dcr-signal-limit-test-{}", std::process::id()));
+        let cfg = Arc::new(RwLock::new(ConfigStore::new(
+            &dir,
+            crate::config::ServerConfig {
+                max_devices_per_user: 1,
+                ..Default::default()
+            },
+        )));
+        let core = SignalCore::with_stores(
+            "",
+            Arc::new(DeviceStore::new(&dir)),
+            Arc::new(crate::sessions::SessionCore::new()),
+            cfg,
+            Vec::new(),
+        );
+
+        // 首个设备:允许
+        assert!(core.check_register_policy("alice", "0.1.0", "pc-a").is_ok());
+        core.devices
+            .touch("pc-a", "alice", "A", "Windows", "0.1.0", "l", "e", true);
+
+        // 新设备 pc-b:已达上限,拒绝
+        assert!(core.check_register_policy("alice", "0.1.0", "pc-b").is_err());
+        // 已登记设备 pc-a 重连:不占新名额,允许
+        assert!(core.check_register_policy("alice", "0.1.0", "pc-a").is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn auth_token_resolves_username() {
+        use crate::auth::AuthState;
+        let secret = b"test-secret-0123456789abcdef012345".to_vec();
+        let dir = std::env::temp_dir().join(format!("dcr-signal-auth-test-{}", std::process::id()));
+        let store = std::sync::Arc::new(crate::auth::UserStore::new(&dir));
+        let auth = AuthState::new(store, secret.clone());
+        auth.store.create_user("alice", "pass123").unwrap();
+        let token = auth.login("alice", "pass123").unwrap();
+
+        let core = SignalCore::new("");
+        // 未启用认证(空密钥):无法校验,返回 None
+        assert!(core.authenticate(&token).is_none());
+        let core2 = SignalCore::with_stores(
+            "",
+            std::sync::Arc::new(DeviceStore::new(&std::env::temp_dir())),
+            std::sync::Arc::new(crate::sessions::SessionCore::new()),
+            std::sync::Arc::new(RwLock::new(ConfigStore::new(
+                &std::env::temp_dir(),
+                crate::config::ServerConfig::default(),
+            ))),
+            secret,
+        );
+        assert_eq!(core2.authenticate(&token).as_deref(), Some("alice"));
+        assert!(core2.authenticate("forged").is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn lookup_allowed_respects_account_ownership() {
+        use crate::auth::AuthState;
+        use crate::auth::UserStore;
+        let secret = b"test-secret-lookup-0123456789abc".to_vec();
+        let dir = std::env::temp_dir().join(format!("dcr-signal-lookup-test-{}", std::process::id()));
+        let auth = AuthState::new(
+            std::sync::Arc::new(UserStore::new(&dir)),
+            secret.clone(),
+        );
+        auth.store.create_user("alice", "pass123").unwrap();
+        auth.store.create_user("bob", "pass123").unwrap();
+        let alice_token = auth.login("alice", "pass123").unwrap();
+        let bob_token = auth.login("bob", "pass123").unwrap();
+
+        let core = SignalCore::with_stores(
+            "",
+            std::sync::Arc::new(DeviceStore::new(&dir)),
+            std::sync::Arc::new(crate::sessions::SessionCore::new()),
+            std::sync::Arc::new(RwLock::new(ConfigStore::new(
+                &dir,
+                crate::config::ServerConfig::default(),
+            ))),
+            secret,
+        );
+        // pc-a 归属 alice;pc-free 未归属
+        core.devices
+            .touch("pc-a", "alice", "A", "Windows", "0.1.0", "l", "e", true);
+        core.devices
+            .touch("pc-free", "", "F", "Windows", "0.1.0", "l", "e", true);
+
+        // 归属账号本人可查;其他账号/匿名不可查他人设备
+        assert!(core.lookup_allowed("pc-a", &alice_token));
+        assert!(!core.lookup_allowed("pc-a", &bob_token), "他账号不可查 alice 的设备");
+        assert!(!core.lookup_allowed("pc-a", ""), "匿名不可查已归属设备");
+        assert!(!core.lookup_allowed("pc-a", "forged"), "无效令牌按匿名处理");
+        // 未归属设备:登录用户与匿名均可查(与列表语义一致)
+        assert!(core.lookup_allowed("pc-free", &bob_token));
+        assert!(core.lookup_allowed("pc-free", ""));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
