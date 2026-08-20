@@ -34,10 +34,11 @@ pub struct HostParts {
     pub write: tokio::net::tcp::OwnedWriteHalf,
 }
 
-/// 一个中继槽位:存放某 id 的宿主连接,并用 watch 通知等待中的 client。
+/// 一个中继槽位:存放某 id 的宿主连接与宿主地址,并用 watch 通知等待中的 client。
 #[derive(Clone)]
 struct Slot {
     inner: Arc<Mutex<Option<HostParts>>>,
+    host_addr: Arc<Mutex<String>>,
     ready: watch::Sender<bool>,
 }
 
@@ -45,9 +46,50 @@ struct Slot {
 #[derive(Clone, Default)]
 pub struct RelayManager {
     slots: Arc<Mutex<HashMap<String, Slot>>>,
+    /// 会话上报目标(dcr-signal 的 UDP 地址);None 表示不上报。
+    report_to: Arc<Option<SocketAddr>>,
 }
 
 impl RelayManager {
+    /// 创建管理器并指定会话上报目标地址(dcr-signal 的 UDP/STUN 端口)。
+    pub fn with_report(report_to: Option<SocketAddr>) -> Self {
+        Self {
+            slots: Arc::new(Mutex::new(HashMap::new())),
+            report_to: Arc::new(report_to),
+        }
+    }
+
+    /// 经 UDP 上报会话事件到 dcr-signal(尽力而为,失败仅记日志)。
+    async fn report(&self, payload: String) {
+        let Some(target) = self.report_to.as_ref() else {
+            return;
+        };
+        let Ok(sock) = UdpSocket::bind("0.0.0.0:0").await else {
+            return;
+        };
+        if let Err(e) = sock.send_to(payload.as_bytes(), *target).await {
+            log::warn!("[relay] 会话上报失败: {e}");
+        }
+    }
+
+    /// 上报会话开始。
+    pub async fn report_session_start(&self, id: &str, host: &str, client: &str) {
+        let payload = serde_json::json!({
+            "t": "session-start",
+            "id": id,
+            "host": host,
+            "client": client,
+        })
+        .to_string();
+        self.report(payload).await;
+    }
+
+    /// 上报会话结束。
+    pub async fn report_session_end(&self, id: &str) {
+        let payload = serde_json::json!({ "t": "session-end", "id": id }).to_string();
+        self.report(payload).await;
+    }
+
     fn slot(&self, id: &str) -> Slot {
         let mut map = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(id.to_string())
@@ -55,37 +97,54 @@ impl RelayManager {
                 let (tx, _rx) = watch::channel(false);
                 Slot {
                     inner: Arc::new(Mutex::new(None)),
+                    host_addr: Arc::new(Mutex::new(String::new())),
                     ready: tx,
                 }
             })
             .clone()
     }
 
-    /// host 注册:把读写半段放入槽位并通知等待者;替换旧 host(旧连接随之失效)。
-    fn host_register(&self, id: &str, parts: HostParts) {
+    /// host 注册:把读写半段与宿主地址放入槽位并通知等待者;替换旧 host(旧连接随之失效)。
+    fn host_register(&self, id: &str, addr: &str, parts: HostParts) {
         let slot = self.slot(id);
         {
             let mut inner = slot.inner.lock().unwrap_or_else(|e| e.into_inner());
             *inner = Some(parts);
         }
+        *slot
+            .host_addr
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = addr.to_string();
         let _ = slot.ready.send(true);
     }
 
-    /// client 取走宿主连接;未就绪返回 None。
-    fn take_host(&self, id: &str) -> Option<HostParts> {
+    /// client 取走宿主连接;未就绪返回 None。返回宿主连接与其地址。
+    fn take_host(&self, id: &str) -> Option<(HostParts, String)> {
         let slot = self.slot(id);
-        let mut inner = slot.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.take()
+        let parts = slot.inner.lock().unwrap_or_else(|e| e.into_inner()).take();
+        parts.map(|p| {
+            let addr = slot
+                .host_addr
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            (p, addr)
+        })
     }
 
-    /// client 侧等待宿主接入(最多 `HOST_WAIT_TIMEOUT`),返回取到的宿主连接。
-    async fn wait_host(&self, id: &str) -> Option<HostParts> {
+    /// client 侧等待宿主接入(最多 `HOST_WAIT_TIMEOUT`),返回取到的宿主连接与宿主地址。
+    async fn wait_host(&self, id: &str) -> Option<(HostParts, String)> {
         let slot = self.slot(id);
         let mut rx = slot.ready.subscribe();
         let deadline = tokio::time::Instant::now() + HOST_WAIT_TIMEOUT;
         loop {
             if let Some(parts) = slot.inner.lock().ok().and_then(|mut g| g.take()) {
-                return Some(parts);
+                let addr = slot
+                    .host_addr
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                return Some((parts, addr));
             }
             if *rx.borrow() {
                 continue;
@@ -153,14 +212,15 @@ pub async fn handle_relay_conn(manager: RelayManager, mut stream: TcpStream, add
             },
         )
         .await;
+        let host_addr = addr.to_string();
         let (read, write) = stream.into_split();
-        manager.host_register(&id, HostParts { read, write });
+        manager.host_register(&id, &host_addr, HostParts { read, write });
         log::info!("[relay] host {id} 已登记,等待 client 接入");
         return;
     }
 
     // client:取宿主连接或等待
-    let host_parts = match manager.take_host(&id) {
+    let (host_parts, host_addr) = match manager.take_host(&id) {
         Some(p) => p,
         None => match manager.wait_host(&id).await {
             Some(p) => p,
@@ -187,8 +247,14 @@ pub async fn handle_relay_conn(manager: RelayManager, mut stream: TcpStream, add
     )
     .await;
     let (cr, cw) = stream.into_split();
+    let client_addr = addr.to_string();
     log::info!("[relay] 配对成功: id={id}");
+    // 上报会话开始给信令(监控用)
+    manager.report_session_start(&id, &host_addr, &client_addr).await;
     pipe(host_parts, cw, cr).await;
+    // 会话结束
+    manager.report_session_end(&id).await;
+    log::info!("[relay] 会话结束: id={id}");
 }
 
 /// UDP 中继消息(JSON 字符串,`t` 字段区分)。
@@ -241,8 +307,9 @@ pub async fn handle_udp_packet(
 }
 
 /// 启动完整中继服务(TCP 字节转发 + UDP 数据报转发)。
-pub async fn serve_tcp(listener: TcpListener) -> Result<(), String> {
-    let manager = RelayManager::default();
+/// `report_to` 为 dcr-signal 的 UDP 地址(会话监控上报目标),None 表示不上报。
+pub async fn serve_tcp(listener: TcpListener, report_to: Option<SocketAddr>) -> Result<(), String> {
+    let manager = RelayManager::with_report(report_to);
     loop {
         let (stream, addr) = listener
             .accept()
@@ -292,9 +359,11 @@ mod tests {
             let a = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
             let (s, _) = listener.accept().await.unwrap();
             let (read, write) = s.into_split();
-            m.host_register("x", HostParts { read, write });
-            // 确认 take 可取回
-            assert!(m.take_host("x").is_some());
+            m.host_register("x", "10.0.0.1:21118", HostParts { read, write });
+            // 确认 take 可取回(含宿主地址)
+            let (parts, addr) = m.take_host("x").unwrap();
+            assert_eq!(addr, "10.0.0.1:21118");
+            drop(parts);
             assert!(m.take_host("x").is_none(), "第二次应取不到");
             drop(a);
         });

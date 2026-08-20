@@ -883,6 +883,22 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
             .map(|i| i.to_string())
             .unwrap_or_else(|| "127.0.0.1".into());
         let lan = format!("{lan_ip}:{port}");
+        // 设备信息(供管理后台设备档案与注册策略):归属用户取登录账号,未登录为空;
+        // 设备名取主机名,系统取 OS 环境变量,版本取编译期 Cargo 版本
+        let device_user = app_cfg
+            .account
+            .as_ref()
+            .map(|a| a.username.clone())
+            .unwrap_or_default();
+        let device_name = std::env::var("COMPUTERNAME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| default_host_id());
+        let device_os = std::env::var("OS")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unknown".into());
+        let device_version = env!("CARGO_PKG_VERSION").to_string();
 
         let handle = tokio::spawn(async move {
             let listener = match tokio::net::TcpListener::from_std(std_listener) {
@@ -914,6 +930,10 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
                     signal_addr,
                     host_id,
                     lan,
+                    device_user,
+                    device_name,
+                    device_os,
+                    device_version,
                 )))
             } else {
                 None

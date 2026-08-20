@@ -8,13 +8,16 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
+use crate::config::ConfigStore;
+use crate::devices::DeviceStore;
 use crate::framing::{read_msg, write_msg};
 use crate::message::{PeerEntry, SignalMsg};
+use crate::sessions::SessionCore;
 
 /// 在线判定超时(超过该时长未心跳视为离线)。
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -33,19 +36,99 @@ pub struct PeerRecord {
 }
 
 /// 信令服务核心状态(跨连接共享)。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SignalCore {
     peers: Arc<Mutex<HashMap<String, PeerRecord>>>,
     relay_hint: Arc<String>,
+    /// 设备档案(持久化)。
+    devices: Arc<DeviceStore>,
+    /// 实时会话(中继上报)。
+    sessions: Arc<SessionCore>,
+    /// 服务策略配置(共享)。
+    cfg: Arc<RwLock<ConfigStore>>,
 }
 
 impl SignalCore {
     /// 创建核心,`relay_hint` 为可选中继服务器地址("host:port",空串表示无)。
     pub fn new(relay_hint: &str) -> Self {
+        let cfg = Arc::new(RwLock::new(ConfigStore::new(
+            &std::env::temp_dir().join("dcr-signal-config-default"),
+            crate::config::ServerConfig {
+                relay_hint: relay_hint.to_string(),
+                ..Default::default()
+            },
+        )));
         Self {
             peers: Arc::new(Mutex::new(HashMap::new())),
             relay_hint: Arc::new(relay_hint.to_string()),
+            devices: Arc::new(DeviceStore::new(&std::env::temp_dir().join("dcr-signal-devices-default"))),
+            sessions: Arc::new(SessionCore::new()),
+            cfg,
         }
+    }
+
+    /// 创建核心并注入共享存储(由入口程序装配;`cfg` 已持久化到数据目录)。
+    pub fn with_stores(
+        relay_hint: &str,
+        devices: Arc<DeviceStore>,
+        sessions: Arc<SessionCore>,
+        cfg: Arc<RwLock<ConfigStore>>,
+    ) -> Self {
+        Self {
+            peers: Arc::new(Mutex::new(HashMap::new())),
+            relay_hint: Arc::new(relay_hint.to_string()),
+            devices,
+            sessions,
+            cfg,
+        }
+    }
+
+    /// 共享配置存储。
+    pub fn config(&self) -> Arc<RwLock<ConfigStore>> {
+        self.cfg.clone()
+    }
+
+    /// 共享设备档案。
+    pub fn device_store(&self) -> Arc<DeviceStore> {
+        self.devices.clone()
+    }
+
+    /// 共享会话核心。
+    pub fn session_core(&self) -> Arc<SessionCore> {
+        self.sessions.clone()
+    }
+
+    /// 服务端注册策略校验:返回 Ok 表示允许,Err 携带拒绝原因。
+    /// - 维护模式拒绝新注册;
+    /// - 客户端版本低于下限拒绝;
+    /// - 单用户设备数超上限拒绝(该设备尚未登记时);
+    /// - 设备被管理员禁用拒绝。
+    pub fn check_register_policy(&self, user: &str, version: &str, id: &str) -> Result<(), String> {
+        let cfg = self.cfg.read().unwrap_or_else(|e| e.into_inner()).get();
+        if cfg.maintenance_mode {
+            return Err("服务器维护中,请稍后再试".into());
+        }
+        if !version.is_empty() && !cfg.min_client_version.is_empty()
+            && version_cmp(version, &cfg.min_client_version) < 0
+        {
+            return Err(format!(
+                "客户端版本过低(当前 {version},最低 {})，请升级客户端",
+                cfg.min_client_version
+            ));
+        }
+        if !self.devices.is_enabled(id) {
+            return Err("设备已被管理员禁用".into());
+        }
+        if !user.is_empty() && cfg.max_devices_per_user > 0 {
+            let owned = self.devices.count_by_owner(user);
+            if owned >= cfg.max_devices_per_user {
+                return Err(format!(
+                    "设备数已达上限({}台),请先在后台删除不再使用的设备",
+                    cfg.max_devices_per_user
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// 注册对端(同 id 重复注册视为更新地址,last one wins)。
@@ -117,6 +200,36 @@ impl SignalCore {
     }
 }
 
+/// 语义化版本比较:a < b 返回负,相等返回 0,a > b 返回正。
+/// 按点号分段比较数字段;非数字段按字符串比较;段数不足视为 0。
+fn version_cmp(a: &str, b: &str) -> i32 {
+    let pa: Vec<&str> = a.split('.').collect();
+    let pb: Vec<&str> = b.split('.').collect();
+    let n = pa.len().max(pb.len());
+    for i in 0..n {
+        let sa = pa.get(i).copied().unwrap_or("0");
+        let sb = pb.get(i).copied().unwrap_or("0");
+        match (sa.parse::<i64>(), sb.parse::<i64>()) {
+            (Ok(na), Ok(nb)) => {
+                if na != nb {
+                    return (na - nb).signum() as i32;
+                }
+            }
+            _ => {
+                let ord = sa.cmp(sb);
+                if ord != std::cmp::Ordering::Equal {
+                    return match ord {
+                        std::cmp::Ordering::Less => -1,
+                        std::cmp::Ordering::Greater => 1,
+                        std::cmp::Ordering::Equal => 0,
+                    };
+                }
+            }
+        }
+    }
+    0
+}
+
 /// 处理单个信令 TCP 连接:循环读消息、按类型处理,断开时注销该连接登记的 id。
 pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
     let addr = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
@@ -134,15 +247,34 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
             }
         };
         match msg {
-            SignalMsg::Register { id, lan } => {
+            SignalMsg::Register {
+                id,
+                lan,
+                name,
+                os,
+                version,
+                user,
+            } => {
+                // 策略校验:维护模式 / 版本下限 / 设备禁用 / 设备数上限
+                if let Err(e) = core.check_register_policy(&user, &version, &id) {
+                    log::warn!("[signal] 注册被拒: id={id}, 原因={e}");
+                    let _ = write_msg(
+                        &mut stream,
+                        &SignalMsg::RegisterAck { ok: false, msg: e },
+                    )
+                    .await;
+                    break;
+                }
                 let duplicated = core
                     .peers
                     .lock()
                     .map(|m| m.contains_key(&id))
                     .unwrap_or(false);
                 core.register(&id, &lan, &addr);
+                core.devices
+                    .touch(&id, &user, &name, &os, &version, &lan, &addr, true);
                 conn_id = Some(id.clone());
-                log::info!("[signal] 注册: id={id}, lan={lan}, external={addr}");
+                log::info!("[signal] 注册: id={id}, lan={lan}, external={addr}, user={user}, os={os}, v={version}");
                 let _ = write_msg(
                     &mut stream,
                     &SignalMsg::RegisterAck {
@@ -159,6 +291,7 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
             SignalMsg::Heartbeat { id } => {
                 match core.heartbeat(&id) {
                     Ok(()) => {
+                        core.devices.set_online(&id, true);
                         let _ = write_msg(
                             &mut stream,
                             &SignalMsg::RegisterAck {
@@ -223,12 +356,20 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
     // 连接断开,注销该连接登记的对端
     if let Some(id) = conn_id.take() {
         core.unregister(&id);
+        core.devices.set_online(&id, false);
         log::info!("[signal] 连接断开({addr}),注销 id={id}");
     }
 }
 
-/// 处理一个 UDP 数据报(STUN Binding / JSON 调试请求)。
-pub async fn handle_stun_packet(sock: &UdpSocket, probe_sock: &UdpSocket, buf: Vec<u8>, src: SocketAddr) {
+/// 处理一个 UDP 数据报(STUN Binding / JSON 调试请求 / 中继会话事件)。
+pub async fn handle_stun_packet(
+    sock: &UdpSocket,
+    probe_sock: &UdpSocket,
+    sessions: Option<Arc<SessionCore>>,
+    max_concurrent: usize,
+    buf: Vec<u8>,
+    src: SocketAddr,
+) {
     // 标准 RFC 5389 Binding Request:头 20 字节,type=0x0001
     if buf.len() >= 20 && buf[0] == 0x00 && buf[1] == 0x01 {
         if let Ok(txn) = crate::stun::parse_binding_request(&buf) {
@@ -246,12 +387,32 @@ pub async fn handle_stun_packet(sock: &UdpSocket, probe_sock: &UdpSocket, buf: V
             return;
         }
     }
-    // 调试用的 JSON 请求 {"t":"stun"}
+    // 调试/会话事件用的 JSON 请求
     if buf.starts_with(b"{") {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf) {
-            if v.get("t").and_then(|t| t.as_str()) == Some("stun") {
-                let mapped = format!("{{\"t\":\"binding\",\"mapped\":\"{src}\"}}");
-                let _ = sock.send_to(mapped.as_bytes(), src).await;
+            let t = v.get("t").and_then(|t| t.as_str());
+            match t {
+                Some("stun") => {
+                    let mapped = format!("{{\"t\":\"binding\",\"mapped\":\"{src}\"}}");
+                    let _ = sock.send_to(mapped.as_bytes(), src).await;
+                }
+                // 中继上报会话开始/结束(仅本地回环信任来源;UDP 无法鉴权,
+                // 仅影响监控展示,不影响任何权限数据)
+                Some("session-start") => {
+                    let id = v.get("id").and_then(|x| x.as_str()).unwrap_or_default();
+                    let host = v.get("host").and_then(|x| x.as_str()).unwrap_or_default();
+                    let client = v.get("client").and_then(|x| x.as_str()).unwrap_or_default();
+                    if let Some(sc) = &sessions {
+                        let _ = sc.start(id, host, client, max_concurrent);
+                    }
+                }
+                Some("session-end") => {
+                    let id = v.get("id").and_then(|x| x.as_str()).unwrap_or_default();
+                    if let Some(sc) = &sessions {
+                        sc.end(id);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -273,6 +434,8 @@ pub async fn serve(
     let probe_sock = UdpSocket::bind("0.0.0.0:0")
         .await
         .map_err(|e| format!("绑定探测 socket 失败: {e}"))?;
+    let udp_sessions = core.sessions.clone();
+    let udp_cfg = core.cfg.clone();
     tokio::spawn(async move {
         let mut buf = vec![0u8; 4096];
         loop {
@@ -283,11 +446,24 @@ pub async fn serve(
                     continue;
                 }
             };
-            handle_stun_packet(&udp_socket, &probe_sock, buf[..n].to_vec(), src).await;
+            let max_concurrent = udp_cfg
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get()
+                .max_concurrent_sessions;
+            handle_stun_packet(
+                &udp_socket,
+                &probe_sock,
+                Some(udp_sessions.clone()),
+                max_concurrent,
+                buf[..n].to_vec(),
+                src,
+            )
+            .await;
         }
     });
 
-    // 定时清理超时条目
+    // 定时清理超时条目与空闲会话
     let prune_core = core.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(10));
@@ -295,6 +471,15 @@ pub async fn serve(
         loop {
             tick.tick().await;
             prune_core.prune();
+            let idle = prune_core
+                .cfg
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get()
+                .session_idle_timeout_secs;
+            prune_core
+                .sessions
+                .prune(Duration::from_secs(idle));
         }
     });
 

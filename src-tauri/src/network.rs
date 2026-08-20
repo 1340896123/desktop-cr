@@ -1025,15 +1025,23 @@ pub(crate) async fn open_transport(
 }
 
 /// 向信令服务器注册本机并持续心跳(host 侧,连接断开自动重连)。
+/// `user` 为登录用户名(未登录为空串),`name`/`os`/`version` 为设备信息,
+/// 供管理后台设备档案与注册策略(维护/版本下限/设备数上限)判断。
 pub(crate) async fn signal_register_loop(
     signal_addr: Option<String>,
     host_id: String,
     lan: String,
+    user: String,
+    name: String,
+    os: String,
+    version: String,
 ) {
     let Some(signal_addr) = signal_addr else {
         return;
     };
-    log::info!("[network] 信令注册循环启动: id={host_id}, lan={lan}, server={signal_addr}");
+    log::info!(
+        "[network] 信令注册循环启动: id={host_id}, lan={lan}, user={user}, name={name}, os={os}, v={version}, server={signal_addr}"
+    );
     loop {
         // 注册
         match signal_query(
@@ -1041,6 +1049,10 @@ pub(crate) async fn signal_register_loop(
             dcr_server::message::SignalMsg::Register {
                 id: host_id.clone(),
                 lan: lan.clone(),
+                name: name.clone(),
+                os: os.clone(),
+                version: version.clone(),
+                user: user.clone(),
             },
         )
         .await

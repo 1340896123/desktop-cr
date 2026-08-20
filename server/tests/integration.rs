@@ -29,6 +29,10 @@ async fn signal_register_lookup_flow() {
         &SignalMsg::Register {
             id: "pc-a".into(),
             lan: "192.168.1.5:21118".into(),
+            name: "办公室PC".into(),
+            os: "Windows 11".into(),
+            version: "0.1.0".into(),
+            user: "alice".into(),
         },
     )
     .await
@@ -133,7 +137,7 @@ async fn stun_binding_udp() {
         let mut buf = vec![0u8; 4096];
         loop {
             let (n, src) = server.recv_from(&mut buf).await.unwrap();
-            signal::handle_stun_packet(&server, &probe, buf[..n].to_vec(), src).await;
+            signal::handle_stun_packet(&server, &probe, None, 0, buf[..n].to_vec(), src).await;
         }
     });
 
@@ -168,7 +172,7 @@ async fn relay_pipe_host_first() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let relay_addr = listener.local_addr().unwrap();
     let serve = tokio::spawn(async move {
-        let _ = dcr_server::relay::serve_tcp(listener).await;
+        let _ = dcr_server::relay::serve_tcp(listener, None).await;
     });
 
     // host 接入
@@ -230,7 +234,7 @@ async fn relay_pipe_client_first_waits_host() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let relay_addr = listener.local_addr().unwrap();
     let serve = tokio::spawn(async move {
-        let _ = dcr_server::relay::serve_tcp(listener).await;
+        let _ = dcr_server::relay::serve_tcp(listener, None).await;
     });
 
     // client 先连
@@ -320,4 +324,89 @@ async fn relay_udp_forward() {
 fn base64_std(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// 中继会话上报 → 信令会话记录(真实 UDP 事件链路)。
+/// 中继配对成功后向信令的 UDP 端口上报 session-start,会话结束上报 session-end。
+#[tokio::test]
+async fn relay_reports_session_to_signal() {
+    // 信令侧:模拟 serve 中建立的 SessionCore + UDP STUN socket
+    let signal_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let signal_udp_addr = signal_udp.local_addr().unwrap();
+    let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let sessions = std::sync::Arc::new(dcr_server::sessions::SessionCore::new());
+    let udp_sessions = sessions.clone();
+    let udp_listener = signal_udp;
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 4096];
+        loop {
+            let (n, src) = udp_listener.recv_from(&mut buf).await.unwrap();
+            signal::handle_stun_packet(
+                &udp_listener,
+                &probe,
+                Some(udp_sessions.clone()),
+                0,
+                buf[..n].to_vec(),
+                src,
+            )
+            .await;
+        }
+    });
+
+    // 中继侧:开启会话上报到信令的 UDP 地址
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay_addr = listener.local_addr().unwrap();
+    let serve = tokio::spawn(async move {
+        let _ = dcr_server::relay::serve_tcp(listener, Some(signal_udp_addr)).await;
+    });
+
+    // host 接入
+    let mut host = TcpStream::connect(relay_addr).await.unwrap();
+    write_msg(
+        &mut host,
+        &RelayMsg::Allocate {
+            id: "peer-s1".into(),
+            role: "host".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let _: RelayMsg = read_msg(&mut host).await.unwrap();
+
+    // client 接入 → 配对成功 → 上报 session-start
+    let mut client = TcpStream::connect(relay_addr).await.unwrap();
+    write_msg(
+        &mut client,
+        &RelayMsg::Allocate {
+            id: "peer-s1".into(),
+            role: "client".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let ack: RelayMsg = read_msg(&mut client).await.unwrap();
+    assert!(matches!(ack, RelayMsg::Allocated { peer_connected: true, .. }));
+
+    // 等待 UDP 事件到达信令
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while sessions.count() == 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(sessions.count(), 1, "信令应记录到 1 个会话");
+    let rec = sessions.list().remove(0);
+    assert_eq!(rec.id, "peer-s1");
+    assert_eq!(rec.via, "relay");
+    assert!(!rec.host.is_empty(), "host 地址应非空");
+    assert!(!rec.client.is_empty(), "client 地址应非空");
+
+    // 断开 → 上报 session-end
+    drop(client);
+    drop(host);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while sessions.count() > 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(sessions.count(), 0, "会话结束应上报并移除");
+
+    serve.abort();
 }
