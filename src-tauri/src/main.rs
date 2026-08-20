@@ -72,6 +72,8 @@ fn main() {
             // 鼠标 / 键盘事件注入
             input_injector::inject_mouse_event,
             input_injector::inject_key_event,
+            // 音频静音
+            audio::set_audio_muted,
             // 屏幕抓取
             capture::list_monitors,
             capture::start_capture,

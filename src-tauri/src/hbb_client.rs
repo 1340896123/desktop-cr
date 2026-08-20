@@ -24,6 +24,9 @@ use base64::Engine as _;
 /// Tauri 应用标识(与 tauri.conf.json 保持一致,用于兜底配置目录解析)。
 const APP_IDENTIFIER: &str = "com.example.winui-remote-desktop";
 
+/// 流分辨率最大边长(等比缩放上限)。
+const MAX_STREAM_EDGE: u32 = 1920;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DeviceInfo {
     pub id: String,
@@ -185,20 +188,40 @@ pub(crate) fn stream_cfg() -> StreamConfig {
     cfg
 }
 
+/// 按最大边长等比缩放(结果四舍五入、最小为 1),保持宽高比;未超限时保持原值。
+fn scale_to_limit(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
+    let max_dim = width.max(height);
+    if max_dim <= max_edge || max_edge == 0 {
+        return (width, height);
+    }
+    let scale = f64::from(max_edge) / f64::from(max_dim);
+    (
+        ((f64::from(width) * scale).round() as u32).max(1),
+        ((f64::from(height) * scale).round() as u32).max(1),
+    )
+}
+
 /// 应用被控端收到的流参数(控制端经协议下发,见 network::Msg::Stream)。
 pub(crate) fn apply_stream_cfg(fps: u32, jpeg_quality: u8, width: u32, height: u32, codec: String) {
     let mut cfg = STREAM_CFG.lock().unwrap_or_else(|e| e.into_inner());
     if fps > 0 {
-        cfg.fps = fps.clamp(1, 30);
+        cfg.fps = fps.clamp(1, 60);
     }
     if jpeg_quality > 0 {
         cfg.jpeg_quality = jpeg_quality.clamp(1, 100);
     }
-    if width > 0 {
-        cfg.target_width = width.clamp(1, 1920);
-    }
-    if height > 0 {
-        cfg.target_height = height.clamp(1, 1920);
+    if width > 0 && height > 0 {
+        // 宽高同时提供时等比缩放,避免破坏宽高比
+        let (w, h) = scale_to_limit(width, height, MAX_STREAM_EDGE);
+        cfg.target_width = w;
+        cfg.target_height = h;
+    } else {
+        if width > 0 {
+            cfg.target_width = width.clamp(1, MAX_STREAM_EDGE);
+        }
+        if height > 0 {
+            cfg.target_height = height.clamp(1, MAX_STREAM_EDGE);
+        }
     }
     // codec 为空 → 默认 FFmpeg(h264 可用时);仅接受 jpeg/h264/hevc
     if codec.is_empty() {
@@ -508,7 +531,7 @@ pub async fn set_stream_quality(fps: u32, bitrate: Option<u32>, quality: String)
     let fps = if fps == 0 {
         default_fps
     } else {
-        fps.clamp(1, 30)
+        fps.clamp(1, 60)
     };
     let (width, height) = {
         let cfg = STREAM_CFG.lock().unwrap_or_else(|e| e.into_inner());
@@ -545,31 +568,32 @@ pub async fn set_stream_quality(fps: u32, bitrate: Option<u32>, quality: String)
 /// 设置流分辨率(写入 STREAM_CFG 并实时下发到被控端)。
 #[tauri::command]
 pub async fn set_stream_resolution(width: u32, height: u32, fps: u32) -> Result<(), String> {
-    let (fps, jpeg_quality) = {
+    let (fps, jpeg_quality, scaled_w, scaled_h) = {
         let cfg = STREAM_CFG.lock().unwrap_or_else(|e| e.into_inner());
         let mut cfg = cfg.clone();
-        cfg.target_width = width.clamp(1, 1920);
-        cfg.target_height = height.clamp(1, 1920);
+        let (w, h) = scale_to_limit(width, height, MAX_STREAM_EDGE);
+        cfg.target_width = w;
+        cfg.target_height = h;
         if fps > 0 {
-            cfg.fps = fps.clamp(1, 30);
+            cfg.fps = fps.clamp(1, 60);
         }
         let (f, q) = (cfg.fps, cfg.jpeg_quality);
         *STREAM_CFG.lock().unwrap_or_else(|e| e.into_inner()) = cfg;
-        (f, q)
+        (f, q, w, h)
     };
-    log::info!("[hbb_client] set_stream_resolution: {width}x{height} @ {fps}fps");
+    log::info!("[hbb_client] set_stream_resolution: {scaled_w}x{scaled_h} @ {fps}fps");
     crate::operation_log::op_log(
         "hbb_client",
         "set_stream_resolution",
-        &format!("{width}x{height} @ {fps}fps"),
+        &format!("{scaled_w}x{scaled_h} @ {fps}fps"),
     );
     // 有活跃会话时实时下发到被控端
     if crate::network::session_peer().is_some() {
         let _ = crate::network::session_send(crate::network::Msg::Stream {
             fps,
             jpeg_quality,
-            width: width.clamp(1, 1920),
-            height: height.clamp(1, 1920),
+            width: scaled_w,
+            height: scaled_h,
             monitor: None,
             codec: stream_codec_choice(),
         })
@@ -1102,21 +1126,21 @@ mod tests {
     fn apply_stream_cfg_clamps() {
         // 持锁避免与 operation_log 测试并发写同一日志文件
         let _guard = crate::operation_log::test_lock::LOG_WRITE_LOCK.lock().unwrap();
-        // 越界输入: fps>30 截到 30、quality>100 截到 100、超大分辨率截到 1920
+        // 越界输入: fps>60 截到 60、quality>100 截到 100、超大分辨率等比缩到 1920 边
         apply_stream_cfg(99, 200, 4000, 3000, String::new());
         let cfg = stream_cfg();
-        assert_eq!(cfg.fps, 30);
+        assert_eq!(cfg.fps, 60);
         assert_eq!(cfg.jpeg_quality, 100);
         assert_eq!(cfg.target_width, 1920);
-        assert_eq!(cfg.target_height, 1920);
+        assert_eq!(cfg.target_height, 1440);
 
         // width/height/fps 为 0 时保持原值不变
         apply_stream_cfg(0, 0, 0, 0, String::new());
         let cfg = stream_cfg();
-        assert_eq!(cfg.fps, 30);
+        assert_eq!(cfg.fps, 60);
         assert_eq!(cfg.jpeg_quality, 100);
         assert_eq!(cfg.target_width, 1920);
-        assert_eq!(cfg.target_height, 1920);
+        assert_eq!(cfg.target_height, 1440);
 
         // codec 仅接受 h264/jpeg(空视为 jpeg,非法值归一为 jpeg)
         apply_stream_cfg(0, 0, 0, 0, "h264".into());

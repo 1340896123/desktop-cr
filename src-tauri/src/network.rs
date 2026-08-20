@@ -29,6 +29,9 @@ const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// 握手超时。
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// 控制端主动 Ping 心跳间隔。
+const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// serde 默认编码类型(兼容旧版本帧消息)。
 fn default_codec() -> String {
     "jpeg".to_string()
@@ -175,10 +178,15 @@ pub struct RemoteFrameEvent {
 pub struct SessionMetrics {
     /// 最近一次 ping/pong 往返延迟(毫秒)
     pub rtt_ms: Option<u64>,
+    /// 当前连接路径,如"直连 x.x.x.x"或"中继 x.x.x.x"
+    pub mode: Option<String>,
 }
 
 /// 会话实时指标(仅控制端更新)。
-static SESSION_METRICS: Mutex<SessionMetrics> = Mutex::new(SessionMetrics { rtt_ms: None });
+static SESSION_METRICS: Mutex<SessionMetrics> = Mutex::new(SessionMetrics {
+    rtt_ms: None,
+    mode: None,
+});
 
 /// 读取会话实时指标。
 pub fn get_session_metrics() -> SessionMetrics {
@@ -404,6 +412,11 @@ pub async fn session_send(msg: OutMsg) -> bool {
 /// 关闭当前会话(踢出对端)。
 pub fn close_session() {
     *session_guard() = None;
+    // 断线后指标不应残留
+    *SESSION_METRICS.lock().unwrap_or_else(|e| e.into_inner()) = SessionMetrics {
+        rtt_ms: None,
+        mode: None,
+    };
 }
 
 /// 仅当会话仍属于指定对端时才关闭(避免误清新会话),返回是否清理。
@@ -412,6 +425,11 @@ fn close_session_if(peer_id: &str, peer_addr: &str) -> bool {
     if let Some(s) = guard.as_ref() {
         if s.peer_id == peer_id && s.peer_addr == peer_addr {
             *guard = None;
+            // 断线后指标不应残留
+            *SESSION_METRICS.lock().unwrap_or_else(|e| e.into_inner()) = SessionMetrics {
+                rtt_ms: None,
+                mode: None,
+            };
             return true;
         }
     }
@@ -734,7 +752,7 @@ async fn host_write_loop(
     let mut sent_audio_seq: u64 = 0;
     loop {
         let cfg = crate::hbb_client::stream_cfg();
-        let wait_ms = (1000u64 / u64::from(cfg.fps.clamp(1, 30))).max(1);
+        let wait_ms = (1000u64 / u64::from(cfg.fps.clamp(1, 60))).max(1);
         let outgoing: Vec<Msg> = tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(wait_ms)) => {
                 // 有最新帧才推送(没有帧则跳过本轮);codec 依流配置选 FFmpeg 视频或 JPEG
@@ -848,6 +866,11 @@ pub async fn connect_peer(
         peer_addr: addr.clone(),
         tx,
     });
+    // 记录连接路径(直连/信令外部/中继),供会话指标展示
+    *SESSION_METRICS.lock().unwrap_or_else(|e| e.into_inner()) = SessionMetrics {
+        rtt_ms: None,
+        mode: Some(via.clone()),
+    };
 
     // 3.5) 连接即下发当前流参数(codec 偏好等),使被控端默认走 FFmpeg 编码
     {
@@ -1208,10 +1231,16 @@ async fn peer_read_loop(
                     // 记录 ping/pong 往返延迟(实时指标)
                     let now = now_ms();
                     let rtt = now.saturating_sub(ts);
+                    let mode = SESSION_METRICS
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .mode
+                        .clone();
                     *SESSION_METRICS
                         .lock()
                         .unwrap_or_else(|e| e.into_inner()) = SessionMetrics {
                         rtt_ms: Some(rtt),
+                        mode,
                     };
                     log::debug!("[network] pong 延迟: {rtt} ms");
                 }
@@ -1221,18 +1250,22 @@ async fn peer_read_loop(
                     seq,
                     wav,
                 } => {
-                    // 远程音频回传:解码 WAV 后经控制端播放
-                    match base64::engine::general_purpose::STANDARD.decode(&wav) {
-                        Ok(data) => {
-                            if let Err(e) = crate::audio::play_audio(&data) {
-                                log::warn!("[network] 播放远程音频失败(seq={seq}): {e}");
-                            } else {
-                                log::debug!(
-                                    "[network] 收到并播放远程音频 sample_rate={sample_rate} channels={channels} seq={seq}"
-                                );
+                    // 远程音频回传:解码 WAV 后经控制端播放;静音时跳过
+                    if crate::audio::is_audio_muted() {
+                        log::debug!("[network] 音频静音中,跳过播放 seq={seq}");
+                    } else {
+                        match base64::engine::general_purpose::STANDARD.decode(&wav) {
+                            Ok(data) => {
+                                if let Err(e) = crate::audio::play_audio(&data) {
+                                    log::warn!("[network] 播放远程音频失败(seq={seq}): {e}");
+                                } else {
+                                    log::debug!(
+                                        "[network] 收到并播放远程音频 sample_rate={sample_rate} channels={channels} seq={seq}"
+                                    );
+                                }
                             }
+                            Err(e) => log::warn!("[network] 音频帧 base64 解码失败: {e}"),
                         }
-                        Err(e) => log::warn!("[network] 音频帧 base64 解码失败: {e}"),
                     }
                 }
                 _ => {}
@@ -1267,10 +1300,26 @@ async fn peer_write_loop(
     mut write_half: tokio::net::tcp::OwnedWriteHalf,
     mut rx: mpsc::Receiver<Msg>,
 ) -> Result<(), String> {
-    while let Some(msg) = rx.recv().await {
-        write_msg(&mut write_half, &msg)
-            .await
-            .map_err(|e| format!("发送消息失败: {e}"))?;
+    let ping_sleep = tokio::time::sleep(PING_INTERVAL);
+    tokio::pin!(ping_sleep);
+    loop {
+        tokio::select! {
+            maybe_msg = rx.recv() => {
+                let Some(msg) = maybe_msg else { break };
+                write_msg(&mut write_half, &msg)
+                    .await
+                    .map_err(|e| format!("发送消息失败: {e}"))?;
+            }
+            _ = &mut ping_sleep => {
+                // 控制端主动发心跳,使 rtt 指标真实可测
+                write_msg(&mut write_half, &Msg::Ping { ts: now_ms() })
+                    .await
+                    .map_err(|e| format!("发送心跳失败: {e}"))?;
+                ping_sleep
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + PING_INTERVAL);
+            }
+        }
     }
     Ok(())
 }
