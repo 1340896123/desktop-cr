@@ -9,9 +9,11 @@
 //!
 //! 非 Windows 平台:全部为编译占位,保证跨平台可编译。
 
+use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
+use tauri::{AppHandle, Emitter};
 
 /// 单块音频时长(秒);采集线程每块间隔约此值。
 const CHUNK_SECS: u32 = 1;
@@ -40,9 +42,16 @@ pub fn is_audio_muted() -> bool {
     AUDIO_MUTED.load(Ordering::Relaxed)
 }
 
-/// 设置音频静音(前端麦克风按钮真实可用)。
+/// 音频静音状态事件负载(前端据此同步静音按钮)。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioStatePayload {
+    pub muted: bool,
+}
+
+/// 设置音频静音(前端麦克风按钮真实可用),变更后经 `audio-state` 事件回执前端。
 #[tauri::command]
-pub fn set_audio_muted(muted: bool) -> Result<(), String> {
+pub fn set_audio_muted(muted: bool, app: AppHandle) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         AUDIO_MUTED.store(muted, Ordering::Relaxed);
@@ -53,7 +62,15 @@ pub fn set_audio_muted(muted: bool) -> Result<(), String> {
     }
     log::info!("[audio] 音频静音状态: {muted}");
     crate::operation_log::op_log("audio", "mute", &format!("muted={muted}"));
+    app.emit("audio-state", AudioStatePayload { muted })
+        .map_err(|e| format!("推送音频状态事件失败: {e}"))?;
     Ok(())
+}
+
+/// 读取当前音频静音状态(前端连接后初始化静音按钮)。
+#[tauri::command]
+pub fn get_audio_muted() -> bool {
+    AUDIO_MUTED.load(Ordering::Relaxed)
 }
 
 /// 音频采集线程句柄。

@@ -22,9 +22,9 @@ import {
   syncClipboard,
   onClipboardSynced,
 } from '../services/connection';
-import { onRemoteFrame, listMonitors, type MonitorInfo } from '../services/capture';
+import { onRemoteFrame, type MonitorInfo } from '../services/capture';
 import { getSessionMetrics, requestRemoteMonitors, selectSessionMonitor, onRemoteMonitors, type SessionMetrics } from '../services/session';
-import { setAudioMuted } from '../services/audio';
+import { setAudioMuted, getAudioMuted, onAudioStateChange } from '../services/audio';
 import RemoteCanvas from './RemoteCanvas';
 
 const useStyles = makeStyles({
@@ -290,6 +290,18 @@ const useStyles = makeStyles({
       color: '#F2F5F8',
     },
   },
+  centerItemDisabled: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    padding: '8px 10px',
+    borderRadius: '6px',
+    fontFamily,
+    fontSize: '13px',
+    color: '#64748B',
+    opacity: 0.6,
+    cursor: 'not-allowed',
+  },
   centerItemIcon: {
     display: 'flex',
     color: '#6BB7FF',
@@ -324,12 +336,17 @@ const useStyles = makeStyles({
     fontWeight: 600,
     backgroundColor: 'rgba(107, 183, 255, 0.15)',
   },
+displayMenuEmpty: {
+    padding: '7px 12px',
+    borderRadius: '6px',
+    fontFamily,
+    fontSize: '13px',
+    color: '#64748B',
+    opacity: 0.7,
+    cursor: 'default',
+    whiteSpace: 'nowrap',
+  },
 });
-
-/** 远程显示器列表为空时的降级默认屏（浏览器 / 非 Windows 下界面不崩） */
-const DEFAULT_MONITORS: MonitorInfo[] = [
-  { id: 1, name: '默认显示屏', width: 1920, height: 1080, isPrimary: true, isVirtual: false },
-];
 
 /** 控制中心画质选项（fps 上限 Rust 侧已放宽到 60） */
 const QUALITY_OPTIONS: Array<{ key: 'low' | 'medium' | 'high'; label: string; fps: number }> = [
@@ -352,7 +369,8 @@ function formatElapsed(seconds: number): string {
   return [h, m, s].map((v) => String(v).padStart(2, '0')).join(':');
 }
 
-function resolutionLabel(display: MonitorInfo): string {
+function resolutionLabel(display: MonitorInfo | null): string {
+  if (!display) return '--';
   if (display.height >= 2160) return '4K';
   if (display.height >= 1440) return '2K';
   return '1080P';
@@ -406,20 +424,29 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  const effectiveMonitors = monitors.length > 0 ? monitors : DEFAULT_MONITORS;
-  const selected = effectiveMonitors.find((m) => m.id === displayId) ?? effectiveMonitors[0];
+  const selected = monitors.find((m) => m.id === displayId) ?? monitors[0] ?? null;
 
-  // 远程显示器列表：连接后先用本机显示器兜底展示，再请求远程真实列表并订阅
+  // 远程显示器列表：连接建立时重置为空，仅请求远程真实列表并订阅（不再用本机显示器兜底）
   useEffect(() => {
     if (!connected) return;
+    setMonitors([]);
+    setDisplayId(1);
     let unlisten: (() => void) | undefined;
-    void listMonitors().then((ms) => {
-      if (ms.length > 0) setMonitors(ms);
-    });
     void requestRemoteMonitors();
     void onRemoteMonitors((ms) => {
       if (ms.length > 0) setMonitors(ms);
     }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, [connected]);
+
+  // 音频静音状态：连接后读取当前状态并订阅事件回执，前后端双源同步静音按钮
+  useEffect(() => {
+    if (!connected) return;
+    let unlisten: (() => void) | undefined;
+    void getAudioMuted().then((muted) => setMicMuted(muted));
+    void onAudioStateChange((muted) => setMicMuted(muted)).then((fn) => {
       unlisten = fn;
     });
     return () => unlisten?.();
@@ -519,9 +546,14 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
         </div>
 
         <div className={styles.barCenter}>
-          <div className={styles.displayTab} onClick={() => setDisplayMenuOpen((prev) => !prev)}>
+          <div
+            className={styles.displayTab}
+            onClick={() => {
+              if (selected) setDisplayMenuOpen((prev) => !prev);
+            }}
+          >
             <DesktopRegular fontSize={14} />
-            {selected.name || `显示屏 ${effectiveMonitors.indexOf(selected) + 1}`}
+            {selected ? selected.name || `显示屏 ${monitors.indexOf(selected) + 1}` : '正在获取远程显示器…'}
             <ChevronDownRegular fontSize={12} />
           </div>
           <button
@@ -559,7 +591,7 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
       </div>
 
       <div className={styles.canvasArea}>
-        <RemoteCanvas connected={connected} remoteWidth={selected.width} remoteHeight={selected.height} mode="canvas" streamSource="remote" />
+        <RemoteCanvas connected={connected} remoteWidth={selected?.width ?? 1280} remoteHeight={selected?.height ?? 720} mode="canvas" streamSource="remote" />
 
         <div className={styles.perfOverlay}>
           <div className={styles.perfTitle}>
@@ -589,20 +621,24 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
 
       {displayMenuOpen && (
         <div className={styles.displayMenu}>
-          {effectiveMonitors.map((monitor) => (
-            <div
-              key={monitor.id}
-              className={monitor.id === displayId ? `${styles.displayMenuItem} ${styles.displayMenuItemActive}` : styles.displayMenuItem}
-              onClick={() => {
-                // 切换目标显示器：下发 select_session_monitor 到被控端实时切换抓帧
-                setDisplayId(monitor.id);
-                void selectSessionMonitor(monitor.id);
-                setDisplayMenuOpen(false);
-              }}
-            >
-              {monitor.name || `显示屏 ${effectiveMonitors.indexOf(monitor) + 1}`} · {monitor.width}x{monitor.height}
-            </div>
-          ))}
+          {monitors.length === 0 ? (
+            <div className={styles.displayMenuEmpty}>暂无远程显示器信息</div>
+          ) : (
+            monitors.map((monitor) => (
+              <div
+                key={monitor.id}
+                className={monitor.id === displayId ? `${styles.displayMenuItem} ${styles.displayMenuItemActive}` : styles.displayMenuItem}
+                onClick={() => {
+                  // 切换目标显示器：下发 select_session_monitor 到被控端实时切换抓帧
+                  setDisplayId(monitor.id);
+                  void selectSessionMonitor(monitor.id);
+                  setDisplayMenuOpen(false);
+                }}
+              >
+                {monitor.name || `显示屏 ${monitors.indexOf(monitor) + 1}`} · {monitor.width}x{monitor.height}
+              </div>
+            ))
+          )}
         </div>
       )}
 
@@ -675,12 +711,8 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
             剪贴板同步
           </div>
           <div
-            className={styles.centerItem}
-            onClick={() =>
-              handleCenterAction(() => {
-                console.info('[session] 键盘输入设置：POC 阶段占位');
-              })
-            }
+            className={styles.centerItemDisabled}
+            onClick={() => handleCenterAction(() => setNotice('键盘输入设置暂未实现'))}
           >
             <span className={styles.centerItemIcon}>
               <KeyboardRegular fontSize={16} />
