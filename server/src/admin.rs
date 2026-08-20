@@ -15,6 +15,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -26,7 +27,10 @@ use serde_json::{json, Value};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::auth::AuthState;
+use crate::config::{ConfigStore, ServerConfig};
+use crate::devices::DeviceStore;
 use crate::message::PeerEntry;
+use crate::sessions::{SessionCore, SessionRecord};
 use crate::signal::SignalCore;
 
 /// 管理后台共享状态。
@@ -36,8 +40,12 @@ pub struct AdminState {
     pub auth: AuthState,
     /// 信令核心(读取在线设备列表)。
     pub core: SignalCore,
-    /// 是否开放自助注册(默认开放;生产环境建议关闭)。
-    pub open_register: bool,
+    /// 设备档案(含离线)。
+    pub devices: Arc<DeviceStore>,
+    /// 实时会话(中继上报)。
+    pub sessions: Arc<SessionCore>,
+    /// 服务策略配置(共享,后台可读写)。
+    pub cfg: Arc<RwLock<ConfigStore>>,
 }
 
 /// API 错误响应(JSON `{"error": "..."}`)。
@@ -131,17 +139,19 @@ pub struct RegisterReq {
     password: String,
 }
 
-/// 自助注册:`POST /api/auth/register`。默认开放,`--no-register` 时返回 403;
+/// 自助注册:`POST /api/auth/register`。默认开放,配置关闭时返回 403;
 /// 注册成功后自动签发令牌(与登录响应同构),客户端可直接进入应用。
 async fn register(
     State(state): State<AdminState>,
     Json(req): Json<RegisterReq>,
 ) -> Result<Json<LoginResp>, ApiError> {
-    if !state.open_register {
+    let cfg = state.cfg.read().unwrap_or_else(|e| e.into_inner()).get();
+    if !cfg.open_register {
         return Err(ApiError::forbidden(
             "服务器未开放自助注册,请联系管理员开通账号".into(),
         ));
     }
+    check_password_len(&state, &req.password)?;
     state
         .auth
         .store
@@ -181,12 +191,28 @@ async fn list_users(
     Ok(Json(state.auth.store.list_users()))
 }
 
+/// 用服务配置的密码最小长度校验密码(下限 6)。
+fn check_password_len(state: &AdminState, password: &str) -> Result<(), ApiError> {
+    let min = state
+        .cfg
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get()
+        .min_password_len
+        .max(6);
+    if password.chars().count() < min {
+        return Err(ApiError::bad_request(format!("密码长度至少 {min} 位")));
+    }
+    Ok(())
+}
+
 async fn create_user(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Json(req): Json<CreateUserReq>,
 ) -> Result<impl IntoResponse, ApiError> {
     bearer_user(&state, &headers)?;
+    check_password_len(&state, &req.password)?;
     state
         .auth
         .store
@@ -216,11 +242,139 @@ async fn reset_password(
     Json(req): Json<ResetPasswordReq>,
 ) -> Result<Json<Value>, ApiError> {
     bearer_user(&state, &headers)?;
+    check_password_len(&state, &req.password)?;
     state
         .auth
         .store
         .reset_password(&username, &req.password)
         .map_err(|e| ApiError::bad_request(e))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// 禁用/启用账号请求。
+#[derive(Debug, Deserialize)]
+pub struct DisableUserReq {
+    disabled: bool,
+}
+
+async fn set_user_disabled(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(username): Path<String>,
+    Json(req): Json<DisableUserReq>,
+) -> Result<Json<Value>, ApiError> {
+    bearer_user(&state, &headers)?;
+    state
+        .auth
+        .store
+        .set_disabled(&username, req.disabled)
+        .map_err(|e| ApiError::bad_request(e))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---------------------------------------------------------------------------
+// 设备 / 会话 / 配置 管理 API
+// ---------------------------------------------------------------------------
+
+async fn list_devices(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::devices::DeviceRecord>>, ApiError> {
+    bearer_user(&state, &headers)?;
+    Ok(Json(state.devices.list()))
+}
+
+async fn delete_device(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    bearer_user(&state, &headers)?;
+    state
+        .devices
+        .delete(&id)
+        .map_err(|e| ApiError::bad_request(e))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// 设备启用/禁用请求。
+#[derive(Debug, Deserialize)]
+pub struct DeviceEnabledReq {
+    enabled: bool,
+}
+
+async fn set_device_enabled(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<DeviceEnabledReq>,
+) -> Result<Json<Value>, ApiError> {
+    bearer_user(&state, &headers)?;
+    state
+        .devices
+        .set_enabled(&id, req.enabled)
+        .map_err(|e| ApiError::bad_request(e))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// 设备启用(等价于 `enabled=true`,与前端设备列表操作契约一致)。
+async fn enable_device(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    bearer_user(&state, &headers)?;
+    state
+        .devices
+        .set_enabled(&id, true)
+        .map_err(|e| ApiError::bad_request(e))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// 设备禁用(等价于 `enabled=false`,与前端设备列表操作契约一致)。
+async fn disable_device(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    bearer_user(&state, &headers)?;
+    state
+        .devices
+        .set_enabled(&id, false)
+        .map_err(|e| ApiError::bad_request(e))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn list_sessions(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SessionRecord>>, ApiError> {
+    bearer_user(&state, &headers)?;
+    Ok(Json(state.sessions.list()))
+}
+
+async fn get_config(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+) -> Result<Json<ServerConfig>, ApiError> {
+    bearer_user(&state, &headers)?;
+    Ok(Json(state.cfg.read().unwrap_or_else(|e| e.into_inner()).get()))
+}
+
+async fn put_config(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Json(req): Json<ServerConfig>,
+) -> Result<Json<Value>, ApiError> {
+    bearer_user(&state, &headers)?;
+    if req.min_password_len < 6 {
+        return Err(ApiError::bad_request("密码最小长度不能小于 6".into()));
+    }
+    state
+        .cfg
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .update(req);
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -238,9 +392,14 @@ async fn stats(
 ) -> Result<Json<Value>, ApiError> {
     bearer_user(&state, &headers)?;
     let peers_online = state.core.list_online().len();
+    let cfg = state.cfg.read().unwrap_or_else(|e| e.into_inner()).get();
     Ok(Json(json!({
         "users": state.auth.store.count(),
         "peersOnline": peers_online,
+        "devices": state.devices.count(),
+        "sessions": state.sessions.count(),
+        "maintenanceMode": cfg.maintenance_mode,
+        "announcement": cfg.announcement,
     })))
 }
 
@@ -257,6 +416,14 @@ let api = Router::new()
         .route("/api/admin/users", get(list_users).post(create_user))
 .route("/api/admin/users/:username", axum::routing::delete(delete_user))
         .route("/api/admin/users/:username/password", post(reset_password))
+        .route("/api/admin/users/:username/disable", post(set_user_disabled))
+        .route("/api/admin/devices", get(list_devices))
+        .route("/api/admin/devices/:id", axum::routing::delete(delete_device))
+        .route("/api/admin/devices/:id/enabled", post(set_device_enabled))
+        .route("/api/admin/devices/:id/enable", post(enable_device))
+        .route("/api/admin/devices/:id/disable", post(disable_device))
+        .route("/api/admin/sessions", get(list_sessions))
+        .route("/api/admin/config", get(get_config).put(put_config))
         .route("/api/admin/peers", get(peers))
         .route("/api/admin/stats", get(stats))
         .with_state(state);
@@ -453,13 +620,25 @@ mod tests {
         let store = Arc::new(UserStore::new(&dir));
         let pw = store.ensure_bootstrap(Some("bootpass")).unwrap();
         let secret = b"0123456789abcdef0123456789abcdef".to_vec();
-let auth = AuthState::new(store, secret);
+        let auth = AuthState::new(store, secret);
         let core = SignalCore::new("relay.example.com:21117");
+        let cfg = core.config();
+        // 开放注册,便于 register_flow 测试
+        {
+            let c = cfg.write().unwrap_or_else(|e| e.into_inner());
+            let mut sc = c.get();
+            sc.open_register = true;
+            c.update(sc);
+        }
+        let devices = core.device_store();
+        let sessions = core.session_core();
         (
             AdminState {
                 auth,
                 core,
-                open_register: true,
+                devices,
+                sessions,
+                cfg,
             },
             pw,
         )
@@ -699,12 +878,13 @@ let resp = app
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
         // 关闭自助注册 → 403
-        let closed = AdminState {
-            auth: state.auth,
-            core: state.core,
-            open_register: false,
-        };
-        let app2 = router(closed, None);
+        {
+            let c = state.cfg.write().unwrap_or_else(|e| e.into_inner());
+            let mut sc = c.get();
+            sc.open_register = false;
+            c.update(sc);
+        }
+        let app2 = router(state.clone(), None);
         let resp = app2
             .oneshot(
                 axum::http::Request::builder()
