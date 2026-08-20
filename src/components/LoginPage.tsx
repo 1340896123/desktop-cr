@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { makeStyles } from '@fluentui/react-components';
-import { palette, fontFamily, radius, spacing, shadow } from '../theme/tokens';
+import { palette, fontFamily, radius, spacing, shadow, titleBarHeight, zIndex } from '../theme/tokens';
 import { loginAccount, type AccountSession } from '../services/auth';
+import { onWindowMaximizedChange } from '../services/window';
+import { WindowControls } from './shared/WindowControls';
 
 const useStyles = makeStyles({
   root: {
@@ -10,7 +12,21 @@ const useStyles = makeStyles({
     justifyContent: 'center',
     height: '100vh',
     width: '100vw',
+    position: 'relative',
     backgroundColor: palette.background,
+  },
+  topBar: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: `${titleBarHeight}px`,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    backgroundColor: '#ffffff',
+    borderBottom: '1px solid #f3f4f6',
+    zIndex: zIndex.titleBar,
   },
   card: {
     width: '360px',
@@ -142,6 +158,16 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [maximized, setMaximized] = useState(false);
+
+  // 订阅窗口最大化状态，用于取消圆角边框（与主窗口行为一致）
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void onWindowMaximizedChange(setMaximized).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -162,7 +188,16 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
   };
 
   return (
-    <div className={styles.root}>
+    <div
+      className={styles.root}
+      style={{
+        borderRadius: maximized ? 0 : 8,
+        border: maximized ? 'none' : `1px solid ${palette.borderLight}`,
+      }}
+    >
+      <div className={styles.topBar} data-tauri-drag-region="deep">
+        <WindowControls />
+      </div>
       <div className={styles.card}>
         <div className={styles.brand}>
           <div className={styles.logo}>UU</div>
