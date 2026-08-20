@@ -4,17 +4,18 @@ import {
   ArrowLeftRegular,
   ArrowUpRegular,
   ArrowSyncRegular,
-  ChevronDownRegular,
   ArrowRightFilled,
   ArrowLeftFilled,
   FolderRegular,
   DocumentRegular,
+  DocumentImageRegular,
   CheckmarkCircleFilled,
   DeleteRegular,
+  PauseRegular,
+  PlayRegular,
   DismissRegular,
-  ImageRegular,
 } from '@fluentui/react-icons';
-import { palette, fontFamily, spacing, radius } from '../theme/tokens';
+import { fontFamily, spacing, radius } from '../theme/tokens';
 import {
   listDirectory,
   getIncomingDir,
@@ -30,12 +31,14 @@ import {
   onConnectionStateChange,
 } from '../services/connection';
 
+const UU_BLUE = '#0066ff';
+
 const useStyles = makeStyles({
   page: {
     flex: 1,
     height: '100%',
-    overflowY: 'auto',
-    padding: `${spacing.xl}px ${spacing.xxl}px`,
+    overflowY: 'hidden',
+    padding: `${spacing.md}px ${spacing.lg}px`,
     display: 'flex',
     flexDirection: 'column',
     gap: `${spacing.sm}px`,
@@ -44,86 +47,119 @@ const useStyles = makeStyles({
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: '4px',
+    flexShrink: 0,
   },
   title: {
     fontFamily,
-    fontSize: '24px',
+    fontSize: '20px',
     fontWeight: 700,
-    color: palette.textPrimary,
+    color: '#111827',
     letterSpacing: '-0.02em',
     margin: 0,
   },
   connectHint: {
     fontFamily,
-    fontSize: '13px',
-    color: palette.textMuted,
-    background: palette.muted,
+    fontSize: '12px',
+    color: '#8A94A6',
+    background: '#F1F3F5',
     borderRadius: radius.pill,
-    padding: '6px 14px',
-    maxWidth: '420px',
-    textAlign: 'center',
+    padding: '5px 12px',
   },
   connectHintActive: {
     color: '#1E7D43',
     background: '#E7F7EC',
   },
   transferPanel: {
-    display: 'flex',
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
     gap: '12px',
-    minHeight: '360px',
-    flex: '1 1 55%',
+    flex: 1,
+    minHeight: 0,
   },
   pane: {
-    flex: 1,
     display: 'flex',
     flexDirection: 'column',
-    backgroundColor: palette.backgroundElevated,
-    border: `1px solid ${palette.borderLight}`,
-    borderRadius: radius.card,
+    backgroundColor: '#ffffff',
+    border: '1px solid #E5E7EB',
+    borderRadius: '12px',
     overflow: 'hidden',
     minWidth: 0,
+    boxShadow: '0 1px 2px rgba(16,24,40,0.04), 0 1px 3px rgba(16,24,40,0.06)',
   },
   paneHeader: {
     display: 'flex',
     alignItems: 'center',
     gap: '8px',
-    padding: '10px 14px',
-    borderBottom: `1px solid ${palette.borderLight}`,
+    padding: '10px 12px',
+    backgroundColor: '#F9FAFB',
+    borderBottom: '1px solid #E5E7EB',
+    flexShrink: 0,
   },
   paneTitle: {
     fontFamily,
-    fontSize: '14px',
-    fontWeight: 600,
-    color: palette.textPrimary,
+    fontSize: '13px',
+    fontWeight: 700,
+    color: '#1F2937',
   },
   tag: {
-    fontSize: '11px',
+    fontFamily,
+    fontSize: '10px',
     lineHeight: '16px',
-    padding: '1px 8px',
+    padding: '0 7px',
     borderRadius: radius.pill,
     fontWeight: 600,
   },
   tagLocal: {
-    backgroundColor: palette.muted,
-    color: palette.textSecondary,
+    backgroundColor: '#E5E7EB',
+    color: '#4B5563',
   },
   tagRemote: {
-    backgroundColor: '#E7F7EC',
-    color: '#1E7D43',
+    backgroundColor: '#D1FAE5',
+    color: '#047857',
   },
-  paneSub: {
+  countText: {
+    fontFamily,
+    fontSize: '11px',
+    color: '#8A94A6',
     marginLeft: 'auto',
+    whiteSpace: 'nowrap',
+  },
+  headSendBtn: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '4px',
+    padding: '5px 10px',
+    borderRadius: radius.control,
+    border: 'none',
+    backgroundColor: '#E5E7EB',
+    color: '#374151',
     fontFamily,
     fontSize: '12px',
-    color: palette.textMuted,
+    cursor: 'not-allowed',
+    whiteSpace: 'nowrap',
+  },
+  headSendBtnActive: {
+    backgroundColor: UU_BLUE,
+    color: '#ffffff',
+    cursor: 'pointer',
+
+    '&:hover': {
+      backgroundColor: '#0052cc',
+    },
+  },
+  headGroup: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    marginLeft: 'auto',
   },
   pathBar: {
     display: 'flex',
     alignItems: 'center',
     gap: '2px',
-    padding: '6px 10px',
-    borderBottom: `1px solid ${palette.borderLight}`,
+    padding: '6px 8px',
+    borderBottom: '1px solid #F3F4F6',
+    flexShrink: 0,
   },
   pathIconBtn: {
     display: 'inline-flex',
@@ -134,286 +170,293 @@ const useStyles = makeStyles({
     border: 'none',
     background: 'transparent',
     borderRadius: radius.control,
-    color: palette.textSecondary,
+    color: '#9CA3AF',
     cursor: 'pointer',
     transition: 'background-color 150ms ease, color 150ms ease',
     flexShrink: 0,
 
     '&:hover': {
-      backgroundColor: palette.muted,
-      color: palette.textPrimary,
+      backgroundColor: '#F1F3F5',
+      color: '#111827',
     },
 
     '&:disabled': {
-      color: palette.textMuted,
+      color: '#D1D5DB',
       cursor: 'not-allowed',
       opacity: 0.5,
     },
   },
-  pathInputWrap: {
-    flex: 1,
-    display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
-    height: '28px',
-    padding: '0 10px',
-    backgroundColor: palette.background,
-    border: `1px solid ${palette.borderLight}`,
-    borderRadius: radius.control,
-    minWidth: 0,
-  },
   pathInput: {
     flex: 1,
     minWidth: 0,
-    border: 'none',
+    height: '26px',
+    padding: '0 10px',
+    backgroundColor: '#F9FAFB',
+    border: '1px solid #E5E7EB',
+    borderRadius: radius.control,
+    fontFamily,
+    fontSize: '12px',
+    color: '#4B5563',
     outline: 'none',
-    background: 'transparent',
-    fontFamily,
-    fontSize: '12px',
-    color: palette.textSecondary,
-  },
-  pathText: {
-    flex: 1,
-    fontFamily,
-    fontSize: '12px',
-    color: palette.textSecondary,
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-  },
-  fileList: {
-    flex: 1,
-    overflowY: 'auto',
-    fontFamily,
-    fontSize: '13px',
-    color: palette.textPrimary,
-  },
-  listHead: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    padding: '6px 12px',
-    color: palette.textMuted,
-    fontSize: '12px',
-    borderBottom: `1px solid ${palette.borderLight}`,
-  },
-  colName: {
-    flex: '1 1 48%',
-    minWidth: 0,
-    display: 'flex',
-    alignItems: 'center',
-    gap: '6px',
-  },
-  colDate: {
-    flex: '1 1 24%',
-    minWidth: 0,
-  },
-  colType: {
-    flex: '0 0 48px',
-  },
-  colSize: {
-    flex: '0 0 76px',
-    textAlign: 'right',
-  },
-  fileRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    padding: '5px 12px',
-    cursor: 'pointer',
-    transition: 'background-color 120ms ease',
-    borderBottom: `1px solid rgba(229, 231, 235, 0.4)`,
+    transition: 'border-color 150ms ease',
 
-    '&:hover': {
-      backgroundColor: palette.muted,
+    '&:focus': {
+      border: `1px solid ${UU_BLUE}`,
     },
   },
-  fileRowSelected: {
-    backgroundColor: palette.primarySoft,
+  fileTableWrap: {
+    flex: 1,
+    overflowY: 'auto',
+    minHeight: 0,
+  },
+  fileTable: {
+    width: '100%',
+    borderCollapse: 'collapse',
+    fontFamily,
+    fontSize: '12px',
+    color: '#111827',
+  },
+  th: {
+    padding: '6px 8px',
+    textAlign: 'left',
+    fontWeight: 400,
+    color: '#6B7280',
+    backgroundColor: '#F9FAFB',
+    borderBottom: '1px solid #F3F4F6',
+    position: 'sticky',
+    top: 0,
+    whiteSpace: 'nowrap',
+  },
+  thCheck: {
+    width: '32px',
+  },
+  td: {
+    padding: '6px 8px',
+    borderBottom: '1px solid rgba(243, 244, 246, 0.7)',
+    whiteSpace: 'nowrap',
+  },
+  tr: {
+    cursor: 'pointer',
+    transition: 'background-color 120ms ease',
+
     '&:hover': {
-      backgroundColor: palette.primarySoft,
+      backgroundColor: '#EFF6FF',
+    },
+  },
+  trSelected: {
+    backgroundColor: '#E8F1FF',
+
+    '&:hover': {
+      backgroundColor: '#E8F1FF',
     },
   },
   fileName: {
-    whiteSpace: 'nowrap',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    fontWeight: 500,
+    color: '#1F2937',
+    maxWidth: '220px',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
-  },
-  fileIcon: {
-    flexShrink: 0,
-    display: 'flex',
-  },
-  middle: {
-    display: 'flex',
-    flexDirection: 'column',
-    justifyContent: 'center',
-    gap: '8px',
-    padding: '0 2px',
-  },
-  transferBtn: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: '4px',
-    padding: '8px 12px',
-    borderRadius: radius.control,
-    border: `1px solid ${palette.border}`,
-    backgroundColor: palette.backgroundElevated,
-    color: palette.textMuted,
-    fontFamily,
-    fontSize: '13px',
-    cursor: 'not-allowed',
     whiteSpace: 'nowrap',
   },
-  transferBtnActive: {
-    border: `1px solid ${palette.primary}`,
-    backgroundColor: palette.primary,
-    color: '#fff',
-    cursor: 'pointer',
-    boxShadow: 'none',
-
-    '&:hover': {
-      backgroundColor: palette.primaryHover,
-    },
+  fileIcon: {
+    display: 'flex',
+    flexShrink: 0,
+  },
+  dateCol: {
+    color: '#9CA3AF',
+  },
+  typeCol: {
+    color: '#4B5563',
+  },
+  sizeCol: {
+    color: '#4B5563',
+    textAlign: 'right',
   },
   taskSection: {
-    flex: '1 1 45%',
+    backgroundColor: '#ffffff',
+    border: '1px solid #E5E7EB',
+    borderRadius: '12px',
+    padding: '12px',
+    boxShadow: '0 1px 2px rgba(16,24,40,0.04), 0 1px 3px rgba(16,24,40,0.06)',
+    flexShrink: 0,
     display: 'flex',
     flexDirection: 'column',
-    backgroundColor: palette.backgroundElevated,
-    border: `1px solid ${palette.borderLight}`,
-    borderRadius: radius.card,
-    overflow: 'hidden',
-    minHeight: '180px',
+    gap: '8px',
   },
   taskHeader: {
     display: 'flex',
     alignItems: 'center',
-    gap: '8px',
-    padding: '10px 14px',
-    borderBottom: `1px solid ${palette.borderLight}`,
+    justifyContent: 'space-between',
+    borderBottom: '1px solid #F3F4F6',
+    paddingBottom: '8px',
   },
   taskTitle: {
     fontFamily,
-    fontSize: '14px',
-    fontWeight: 600,
-    color: palette.textPrimary,
+    fontSize: '13px',
+    fontWeight: 700,
+    color: '#1F2937',
   },
   taskCount: {
     fontFamily,
     fontSize: '12px',
-    color: palette.textMuted,
+    color: '#9CA3AF',
+    fontWeight: 400,
+    marginLeft: '6px',
   },
   batchOps: {
-    marginLeft: 'auto',
     display: 'flex',
     alignItems: 'center',
-    gap: '2px',
+    gap: '12px',
+    color: '#6B7280',
+    fontSize: '11px',
   },
   batchBtn: {
     display: 'inline-flex',
     alignItems: 'center',
     gap: '4px',
-    padding: '5px 10px',
     border: 'none',
     background: 'transparent',
-    borderRadius: radius.control,
-    color: palette.textSecondary,
+    padding: 0,
+    color: '#6B7280',
     fontFamily,
-    fontSize: '12px',
+    fontSize: '11px',
     cursor: 'pointer',
-    transition: 'background-color 150ms ease',
+    transition: 'color 150ms ease',
 
     '&:hover': {
-      backgroundColor: palette.muted,
-      color: palette.textPrimary,
+      color: '#111827',
     },
   },
-  taskTable: {
-    flex: 1,
+  batchBtnDanger: {
+    '&:hover': {
+      color: '#DC2626',
+    },
+  },
+  taskList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+    maxHeight: '200px',
     overflowY: 'auto',
-    fontFamily,
-    fontSize: '13px',
   },
   taskRow: {
     display: 'flex',
     alignItems: 'center',
     gap: '8px',
-    padding: '7px 14px',
-    borderBottom: `1px solid rgba(229, 231, 235, 0.4)`,
-
-    '&:hover': {
-      backgroundColor: palette.muted,
-    },
+    backgroundColor: '#F9FAFB',
+    padding: '8px',
+    borderRadius: '8px',
+    border: '1px solid #F3F4F6',
+    fontFamily,
+    fontSize: '12px',
+    color: '#4B5563',
   },
-  taskName: {
-    flex: '1 1 28%',
-    minWidth: 0,
+  taskNameCol: {
     display: 'flex',
     alignItems: 'center',
     gap: '6px',
+    width: '25%',
+    minWidth: 0,
   },
-  taskStatus: {
-    flex: '0 0 160px',
+  taskStatusCol: {
     display: 'flex',
-    flexDirection: 'column',
-    gap: '3px',
-    color: '#1E7D43',
-    fontSize: '12px',
+    alignItems: 'center',
+    gap: '6px',
+    minWidth: '150px',
+    flexShrink: 0,
+  },
+  taskStatusSent: {
+    color: '#059669',
     fontWeight: 500,
   },
+  taskStatusPaused: {
+    color: '#6B7280',
+  },
+  taskStatusFailed: {
+    color: '#DC2626',
+  },
   progressTrack: {
-    width: '100%',
+    width: '80px',
     height: '4px',
     borderRadius: radius.pill,
-    backgroundColor: palette.muted,
+    backgroundColor: '#E5E7EB',
     overflow: 'hidden',
+    flexShrink: 0,
   },
   progressBar: {
     height: '100%',
     borderRadius: radius.pill,
-    backgroundColor: palette.primary,
+    backgroundColor: UU_BLUE,
     transition: 'width 120ms linear',
   },
   taskSize: {
-    flex: '0 0 70px',
+    width: '70px',
     textAlign: 'right',
-    color: palette.textSecondary,
-    fontSize: '12px',
+    flexShrink: 0,
+    whiteSpace: 'nowrap',
   },
-  taskPath: {
+  pathChip: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
     flex: '1 1 20%',
     minWidth: 0,
-    color: palette.textMuted,
-    fontSize: '12px',
-    whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  chipTag: {
+    fontSize: '10px',
+    padding: '0 5px',
+    borderRadius: '4px',
+    fontWeight: 500,
+    flexShrink: 0,
+  },
+  chipTagLocal: {
+    backgroundColor: '#E5E7EB',
+    color: '#374151',
+  },
+  chipTagRemote: {
+    backgroundColor: '#D1FAE5',
+    color: '#047857',
+  },
+  speedBadge: {
+    backgroundColor: '#111827',
+    color: '#FBBF24',
+    padding: '2px 6px',
+    borderRadius: '4px',
+    fontSize: '10px',
+    fontFamily: 'Consolas, monospace',
+    flexShrink: 0,
+    whiteSpace: 'nowrap',
   },
   taskDel: {
-    flexShrink: 0,
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
-    width: '26px',
-    height: '26px',
+    width: '24px',
+    height: '24px',
     border: 'none',
     background: 'transparent',
     borderRadius: radius.control,
-    color: palette.textMuted,
+    color: '#9CA3AF',
     cursor: 'pointer',
+    flexShrink: 0,
 
     '&:hover': {
       backgroundColor: 'rgba(220, 38, 38, 0.1)',
-      color: palette.destructive,
+      color: '#DC2626',
     },
   },
   empty: {
-    padding: '32px 16px',
+    padding: '24px 16px',
     textAlign: 'center',
-    color: palette.textMuted,
+    color: '#8A94A6',
     fontFamily,
-    fontSize: '13px',
+    fontSize: '12px',
   },
 });
 
@@ -461,7 +504,7 @@ function formatDate(ms: number | null): string {
   if (ms === null) return '--';
   const d = new Date(ms);
   const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 const FileIcon: React.FC<{ isDir: boolean; ext: string }> = ({ isDir, ext }) => {
@@ -475,28 +518,33 @@ const FileIcon: React.FC<{ isDir: boolean; ext: string }> = ({ isDir, ext }) => 
   if (ext === 'png' || ext === 'jpg' || ext === 'jpeg' || ext === 'webp' || ext === 'gif') {
     return (
       <span style={{ color: '#5DA8FF', display: 'flex' }}>
-        <ImageRegular fontSize={16} />
+        <DocumentImageRegular fontSize={16} />
       </span>
     );
   }
+  const color =
+    ext === 'xlsx' || ext === 'xls'
+      ? '#1E7D43'
+      : ext === 'zip' || ext === 'rar' || ext === '7z'
+        ? '#D97706'
+        : '#8A94A6';
   return (
-    <span
-      style={{
-        color:
-          ext === 'xlsx' || ext === 'xls'
-            ? '#1E7D43'
-            : ext === 'zip' || ext === 'rar' || ext === '7z'
-              ? '#D97706'
-              : '#8A94A6',
-        display: 'flex',
-      }}
-    >
+    <span style={{ color, display: 'flex' }}>
       <DocumentRegular fontSize={16} />
     </span>
   );
 };
 
-export const FileTransferPage: React.FC = () => {
+interface FileTransferPageProps {
+  /** 当前连接的远端设备名称（远端面板头部展示） */
+  deviceName?: string;
+}
+
+/**
+ * 文件传输：左「我的电脑」/ 右「远端」双栏 + 底部传输列表队列。
+ * 保持真实传输逻辑（listDirectory/sendFile/requestRemoteDir/requestFilePull/进度事件/连接联动）。
+ */
+export const FileTransferPage: React.FC<FileTransferPageProps> = ({ deviceName }) => {
   const styles = useStyles();
   const [connected, setConnected] = useState(false);
   const [incomingPath, setIncomingPath] = useState('');
@@ -716,6 +764,14 @@ export const FileTransferPage: React.FC = () => {
 
   const completedCount = useMemo(() => tasks.filter((t) => t.status === 'sent').length, [tasks]);
 
+  const pauseAll = () =>
+    setTasks((prev) => prev.map((t) => (t.status === 'transferring' ? { ...t, status: 'paused' } : t)));
+  const resumeAll = () =>
+    setTasks((prev) => prev.map((t) => (t.status === 'paused' ? { ...t, status: 'transferring' } : t)));
+  const cancelAll = () =>
+    setTasks((prev) => prev.filter((t) => t.status !== 'transferring' && t.status !== 'paused'));
+  const clearFinished = () => setTasks((prev) => prev.filter((t) => t.status !== 'sent'));
+
   return (
     <div className={styles.page}>
       <div className={styles.header}>
@@ -730,167 +786,196 @@ export const FileTransferPage: React.FC = () => {
       </div>
 
       <div className={styles.transferPanel}>
+        {/* 左栏：本机 */}
         <div className={styles.pane}>
           <div className={styles.paneHeader}>
             <span className={styles.paneTitle}>我的电脑</span>
             <span className={`${styles.tag} ${styles.tagLocal}`}>本机</span>
-            <span className={styles.paneSub}>{localSelected.size} 个已选</span>
+            <span className={styles.countText}>{localSelected.size} 个已选</span>
+            <button
+              type="button"
+              className={canSendToRemote ? `${styles.headSendBtn} ${styles.headSendBtnActive}` : styles.headSendBtn}
+              disabled={!canSendToRemote}
+              onClick={() => void sendToRemote()}
+            >
+              发送
+              <ArrowRightFilled fontSize={12} />
+            </button>
           </div>
           <div className={styles.pathBar}>
-            <button
-              type="button"
-              className={styles.pathIconBtn}
-              aria-label="后退"
-              disabled={localHistory.length === 0}
-              onClick={localBack}
-            >
-              <ArrowLeftRegular fontSize={14} />
+            <button type="button" className={styles.pathIconBtn} aria-label="后退" disabled={localHistory.length === 0} onClick={localBack}>
+              <ArrowLeftRegular fontSize={13} />
             </button>
-            <button
-              type="button"
-              className={styles.pathIconBtn}
-              aria-label="向上一级"
-              onClick={() => goLocal(parentDir(localPath), false)}
-            >
-              <ArrowUpRegular fontSize={14} />
+            <button type="button" className={styles.pathIconBtn} aria-label="向上一级" onClick={() => goLocal(parentDir(localPath), false)}>
+              <ArrowUpRegular fontSize={13} />
             </button>
-            <button
-              type="button"
-              className={styles.pathIconBtn}
-              aria-label="刷新"
-              onClick={() => void refreshLocal(localPath)}
-            >
-              <ArrowSyncRegular fontSize={14} />
+            <button type="button" className={styles.pathIconBtn} aria-label="刷新" onClick={() => void refreshLocal(localPath)}>
+              <ArrowSyncRegular fontSize={13} />
             </button>
-            <div className={styles.pathInputWrap}>
-              <span className={styles.pathText}>{localPath}</span>
-              <ChevronDownRegular fontSize={12} style={{ color: palette.textMuted, flexShrink: 0 }} />
-            </div>
+            <input
+              className={styles.pathInput}
+              value={localPath}
+              onChange={(e) => setLocalPath(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') goLocal(e.currentTarget.value, true);
+              }}
+              spellCheck={false}
+            />
           </div>
-          <div className={styles.fileList}>
-            <div className={styles.listHead}>
-              <span className={styles.colName}>名称</span>
-              <span className={styles.colDate}>修改日期</span>
-              <span className={styles.colType}>类型</span>
-              <span className={styles.colSize}>大小</span>
-            </div>
-            {localEntries.map((file, idx) => (
-              <div
-                key={file.name}
-                className={
-                  localSelected.has(idx) ? `${styles.fileRow} ${styles.fileRowSelected}` : styles.fileRow
-                }
-                onClick={() => setLocalSelected((prev) => toggleSelect(prev, idx))}
-                onDoubleClick={() => {
-                  if (file.isDir) goLocal(joinPath(localPath, file.name), true);
-                }}
-              >
-                <span className={styles.colName}>
-                  <span className={styles.fileIcon}>
-                    <FileIcon isDir={file.isDir} ext={file.ext} />
-                  </span>
-                  <span className={styles.fileName}>{file.name}</span>
-                </span>
-                <span className={styles.colDate}>{formatDate(file.modifiedMs)}</span>
-                <span className={styles.colType}>{file.isDir ? '文件夹' : file.ext || '文件'}</span>
-                <span className={styles.colSize}>{formatSize(file.size, file.isDir)}</span>
-              </div>
-            ))}
+          <div className={styles.fileTableWrap}>
+            <table className={styles.fileTable}>
+              <thead>
+                <tr>
+                  <th className={`${styles.th} ${styles.thCheck}`}>
+                    <input
+                      type="checkbox"
+                      checked={localEntries.length > 0 && localSelected.size === localEntries.length}
+                      onChange={() =>
+                        setLocalSelected(localSelected.size === localEntries.length ? new Set() : new Set(localEntries.map((_, i) => i)))
+                      }
+                    />
+                  </th>
+                  <th className={styles.th}>名称</th>
+                  <th className={styles.th}>修改日期</th>
+                  <th className={styles.th}>类型</th>
+                  <th className={styles.th}>大小</th>
+                </tr>
+              </thead>
+              <tbody>
+                {localEntries.map((file, idx) => (
+                  <tr
+                    key={file.name}
+                    className={localSelected.has(idx) ? `${styles.tr} ${styles.trSelected}` : styles.tr}
+                    onClick={() => setLocalSelected((prev) => toggleSelect(prev, idx))}
+                    onDoubleClick={() => {
+                      if (file.isDir) goLocal(joinPath(localPath, file.name), true);
+                    }}
+                  >
+                    <td className={styles.td}>
+                      <input
+                        type="checkbox"
+                        checked={localSelected.has(idx)}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={() => setLocalSelected((prev) => toggleSelect(prev, idx))}
+                      />
+                    </td>
+                    <td className={styles.td}>
+                      <span className={styles.fileName}>
+                        <span className={styles.fileIcon}>
+                          <FileIcon isDir={file.isDir} ext={file.ext} />
+                        </span>
+                        {file.name}
+                      </span>
+                    </td>
+                    <td className={`${styles.td} ${styles.dateCol}`}>{formatDate(file.modifiedMs)}</td>
+                    <td className={`${styles.td} ${styles.typeCol}`}>{file.isDir ? '文件夹' : file.ext || '文件'}</td>
+                    <td className={`${styles.td} ${styles.sizeCol}`}>{formatSize(file.size, file.isDir)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
             {localEntries.length === 0 && <div className={styles.empty}>本目录为空</div>}
           </div>
         </div>
 
-        <div className={styles.middle}>
-          <button
-            type="button"
-            className={canSendToRemote ? `${styles.transferBtn} ${styles.transferBtnActive}` : styles.transferBtn}
-            disabled={!canSendToRemote}
-            onClick={() => void sendToRemote()}
-          >
-            发送
-            <ArrowRightFilled fontSize={12} />
-          </button>
-          <button
-            type="button"
-            className={canPullToLocal ? `${styles.transferBtn} ${styles.transferBtnActive}` : styles.transferBtn}
-            disabled={!canPullToLocal}
-            onClick={() => void pullToLocal()}
-          >
-            <ArrowLeftFilled fontSize={12} />
-            发送
-          </button>
-        </div>
-
+        {/* 右栏：远端 */}
         <div className={styles.pane}>
           <div className={styles.paneHeader}>
-            <span className={`${styles.tag} ${styles.tagRemote}`}>远端</span>
-            <span className={styles.paneTitle}>远程主机</span>
-            <span className={styles.paneSub}>{remoteSelected.size} 个已选</span>
+            <button
+              type="button"
+              className={canPullToLocal ? `${styles.headSendBtn} ${styles.headSendBtnActive}` : styles.headSendBtn}
+              disabled={!canPullToLocal}
+              onClick={() => void pullToLocal()}
+            >
+              <ArrowLeftFilled fontSize={12} />
+              发送
+            </button>
+            <span className={styles.headGroup}>
+              <span className={`${styles.tag} ${styles.tagRemote}`}>远端</span>
+              <span className={styles.paneTitle}>{deviceName ?? '远程主机'}</span>
+              <span className={styles.countText}>{remoteSelected.size} 个已选</span>
+            </span>
           </div>
           <div className={styles.pathBar}>
-            <button
-              type="button"
-              className={styles.pathIconBtn}
-              aria-label="后退"
-              disabled={remoteHistory.length === 0}
-              onClick={remoteBack}
-            >
-              <ArrowLeftRegular fontSize={14} />
+            <button type="button" className={styles.pathIconBtn} aria-label="后退" disabled={remoteHistory.length === 0} onClick={remoteBack}>
+              <ArrowLeftRegular fontSize={13} />
             </button>
-            <button
-              type="button"
-              className={styles.pathIconBtn}
-              aria-label="向上一级"
-              onClick={() => goRemote(parentDir(remotePath), false)}
-            >
-              <ArrowUpRegular fontSize={14} />
+            <button type="button" className={styles.pathIconBtn} aria-label="向上一级" onClick={() => goRemote(parentDir(remotePath), false)}>
+              <ArrowUpRegular fontSize={13} />
             </button>
-            <button
-              type="button"
-              className={styles.pathIconBtn}
-              aria-label="刷新"
-              onClick={() => void refreshRemote(remotePath)}
-            >
-              <ArrowSyncRegular fontSize={14} />
+            <button type="button" className={styles.pathIconBtn} aria-label="刷新" onClick={() => void refreshRemote(remotePath)}>
+              <ArrowSyncRegular fontSize={13} />
             </button>
-            <div className={styles.pathInputWrap}>
-              <span className={styles.pathText}>{remotePath}</span>
-              <ChevronDownRegular fontSize={12} style={{ color: palette.textMuted, flexShrink: 0 }} />
-            </div>
+            <input
+              className={styles.pathInput}
+              value={remotePath}
+              onChange={(e) => setRemotePath(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') goRemote(e.currentTarget.value, true);
+              }}
+              spellCheck={false}
+            />
           </div>
-          <div className={styles.fileList}>
-            <div className={styles.listHead}>
-              <span className={styles.colName}>名称</span>
-              <span className={styles.colDate}>修改日期</span>
-              <span className={styles.colType}>类型</span>
-              <span className={styles.colSize}>大小</span>
-            </div>
-            {!connected && <div className={styles.empty}>未连接,无法浏览远端目录</div>}
-            {connected && remoteError && <div className={styles.empty}>加载失败:{remoteError}</div>}
-            {connected &&
-              !remoteError &&
-              remoteEntries.map((file, idx) => (
-                <div
-                  key={file.name}
-                  className={
-                    remoteSelected.has(idx) ? `${styles.fileRow} ${styles.fileRowSelected}` : styles.fileRow
-                  }
-                  onClick={() => setRemoteSelected((prev) => toggleSelect(prev, idx))}
-                  onDoubleClick={() => {
-                    if (file.isDir) goRemote(joinPath(remotePath, file.name), true);
-                  }}
-                >
-                  <span className={styles.colName}>
-                    <span className={styles.fileIcon}>
-                      <FileIcon isDir={file.isDir} ext={file.ext} />
-                    </span>
-                    <span className={styles.fileName}>{file.name}</span>
-                  </span>
-                  <span className={styles.colDate}>{formatDate(file.modifiedMs)}</span>
-                  <span className={styles.colType}>{file.isDir ? '文件夹' : file.ext || '文件'}</span>
-                  <span className={styles.colSize}>{formatSize(file.size, file.isDir)}</span>
-                </div>
-              ))}
+          <div className={styles.fileTableWrap}>
+            <table className={styles.fileTable}>
+              <thead>
+                <tr>
+                  <th className={`${styles.th} ${styles.thCheck}`} />
+                  <th className={styles.th}>名称</th>
+                  <th className={styles.th}>修改日期</th>
+                  <th className={styles.th}>类型</th>
+                  <th className={styles.th}>大小</th>
+                </tr>
+              </thead>
+              <tbody>
+                {!connected && (
+                  <tr>
+                    <td colSpan={5}>
+                      <div className={styles.empty}>未连接，无法浏览远端目录</div>
+                    </td>
+                  </tr>
+                )}
+                {connected && remoteError && (
+                  <tr>
+                    <td colSpan={5}>
+                      <div className={styles.empty}>加载失败：{remoteError}</div>
+                    </td>
+                  </tr>
+                )}
+                {connected &&
+                  !remoteError &&
+                  remoteEntries.map((file, idx) => (
+                    <tr
+                      key={file.name}
+                      className={remoteSelected.has(idx) ? `${styles.tr} ${styles.trSelected}` : styles.tr}
+                      onClick={() => setRemoteSelected((prev) => toggleSelect(prev, idx))}
+                      onDoubleClick={() => {
+                        if (file.isDir) goRemote(joinPath(remotePath, file.name), true);
+                      }}
+                    >
+                      <td className={styles.td}>
+                        <input
+                          type="checkbox"
+                          checked={remoteSelected.has(idx)}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={() => setRemoteSelected((prev) => toggleSelect(prev, idx))}
+                        />
+                      </td>
+                      <td className={styles.td}>
+                        <span className={styles.fileName}>
+                          <span className={styles.fileIcon}>
+                            <FileIcon isDir={file.isDir} ext={file.ext} />
+                          </span>
+                          {file.name}
+                        </span>
+                      </td>
+                      <td className={`${styles.td} ${styles.dateCol}`}>{formatDate(file.modifiedMs)}</td>
+                      <td className={`${styles.td} ${styles.typeCol}`}>{file.isDir ? '文件夹' : file.ext || '文件'}</td>
+                      <td className={`${styles.td} ${styles.sizeCol}`}>{formatSize(file.size, file.isDir)}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
             {connected && !remoteError && remoteEntries.length === 0 && (
               <div className={styles.empty}>本目录为空</div>
             )}
@@ -898,77 +983,96 @@ export const FileTransferPage: React.FC = () => {
         </div>
       </div>
 
+      {/* 底部传输列表 */}
       <div className={styles.taskSection}>
         <div className={styles.taskHeader}>
-          <span className={styles.taskTitle}>传输列表</span>
-          <span className={styles.taskCount}>已完成 {completedCount} / {tasks.length}</span>
+          <span className={styles.taskTitle}>
+            传输列表
+            <span className={styles.taskCount}>已传输 {completedCount} 个文件</span>
+          </span>
           <div className={styles.batchOps}>
-            <button
-              type="button"
-              className={styles.batchBtn}
-              onClick={() => setTasks((prev) => prev.filter((t) => t.status !== 'sent'))}
-            >
-              <CheckmarkCircleFilled fontSize={12} />
-              清除完结任务
+            <button type="button" className={styles.batchBtn} onClick={pauseAll}>
+              <PauseRegular fontSize={11} />
+              全部暂停
             </button>
-            <button
-              type="button"
-              className={styles.batchBtn}
-              onClick={() => setTasks([])}
-            >
-              <DismissRegular fontSize={12} />
-              全部清除
+            <button type="button" className={styles.batchBtn} onClick={resumeAll}>
+              <PlayRegular fontSize={11} />
+              全部开始
+            </button>
+            <button type="button" className={styles.batchBtn} onClick={cancelAll}>
+              <DismissRegular fontSize={11} />
+              全部取消
+            </button>
+            <button type="button" className={`${styles.batchBtn} ${styles.batchBtnDanger}`} onClick={clearFinished}>
+              <DeleteRegular fontSize={11} />
+              清除完结任务
             </button>
           </div>
         </div>
-        <div className={styles.taskTable}>
-          <div className={styles.listHead}>
-            <span className={styles.taskName}>名称</span>
-            <span className={styles.taskStatus}>状态</span>
-            <span className={styles.taskSize}>大小</span>
-            <span className={styles.taskPath}>发送路径</span>
-            <span className={styles.taskPath}>接收路径</span>
-            <span style={{ flex: '0 0 30px' }} />
-          </div>
+        <div className={styles.taskList}>
           {tasks.map((task) => {
             const percent = task.size > 0 ? Math.min(100, Math.round((task.received / task.size) * 100)) : 0;
+            const sendIsRemote = task.sendPath.startsWith('远端');
+            const recvIsRemote = task.recvPath.startsWith('远端');
             return (
               <div key={task.key} className={styles.taskRow}>
-                <span className={styles.taskName}>
+                <span className={styles.taskNameCol}>
                   <span className={styles.fileIcon}>
-                    <DocumentRegular fontSize={15} style={{ color: palette.textMuted }} />
+                    <DocumentRegular fontSize={15} style={{ color: '#8A94A6' }} />
                   </span>
-                  <span className={styles.fileName}>{task.name}</span>
+                  <span
+                    style={{
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      fontWeight: 500,
+                      color: '#1F2937',
+                    }}
+                  >
+                    {task.name}
+                  </span>
                 </span>
-                <span className={styles.taskStatus}>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                    {task.status === 'sent' && <CheckmarkCircleFilled fontSize={14} />}
-                    {task.status === 'sent' ? '已完成' : task.status === 'transferring' ? '传输中' : task.status}
-                  </span>
-                  {task.status === 'transferring' && (
-                    <span className={styles.progressTrack}>
-                      <span className={styles.progressBar} style={{ width: `${percent}%` }} />
+                <span className={styles.taskStatusCol}>
+                  {task.status === 'sent' && (
+                    <span className={styles.taskStatusSent}>
+                      <CheckmarkCircleFilled fontSize={14} /> 已发送
                     </span>
                   )}
+                  {task.status === 'paused' && <span className={styles.taskStatusPaused}>已暂停</span>}
+                  {task.status === 'failed' && <span className={styles.taskStatusFailed}>失败</span>}
                   {task.status === 'transferring' && (
-                    <span style={{ color: palette.textMuted, fontSize: '11px', fontWeight: 400 }}>
-                      {formatSize(task.received, false)} / {formatSize(task.size, false)}
-                    </span>
+                    <>
+                      <span className={styles.progressTrack}>
+                        <span className={styles.progressBar} style={{ width: `${percent}%` }} />
+                      </span>
+                      <span style={{ color: '#8A94A6', fontSize: '11px', whiteSpace: 'nowrap' }}>
+                        {formatSize(task.received, false)} / {formatSize(task.size, false)}
+                      </span>
+                    </>
                   )}
                 </span>
                 <span className={styles.taskSize}>{formatSize(task.size, false)}</span>
-                <span className={styles.taskPath}>{task.sendPath}</span>
-                <span className={styles.taskPath}>{task.recvPath}</span>
-                <span style={{ flex: '0 0 30px' }}>
-                  <button
-                    type="button"
-                    className={styles.taskDel}
-                    onClick={() => removeTask(task.key)}
-                    aria-label="删除任务"
-                  >
-                    <DeleteRegular fontSize={14} />
-                  </button>
+                <span className={styles.pathChip}>
+                  <span className={sendIsRemote ? `${styles.chipTag} ${styles.chipTagRemote}` : `${styles.chipTag} ${styles.chipTagLocal}`}>
+                    {sendIsRemote ? '远端' : '本机'}
+                  </span>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.sendPath}</span>
                 </span>
+                <span className={styles.pathChip}>
+                  <span className={recvIsRemote ? `${styles.chipTag} ${styles.chipTagRemote}` : `${styles.chipTag} ${styles.chipTagLocal}`}>
+                    {recvIsRemote ? '远端' : '本机'}
+                  </span>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.recvPath}</span>
+                </span>
+                <span className={styles.speedBadge}>{task.direction === 'send' ? '↑' : '↓'} {percent}%</span>
+                <button
+                  type="button"
+                  className={styles.taskDel}
+                  onClick={() => removeTask(task.key)}
+                  aria-label="删除任务"
+                >
+                  <DeleteRegular fontSize={13} />
+                </button>
               </div>
             );
           })}

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { makeStyles } from '@fluentui/react-components';
 import { TitleBar } from './components/TitleBar';
 import { Sidebar, type SidebarDevice } from './components/Sidebar';
@@ -7,6 +7,9 @@ import RemoteSessionView from './components/RemoteSessionView';
 import VirtualDisplayPanel from './components/VirtualDisplayPanel';
 import FileTransferPage from './components/FileTransferPage';
 import SettingsPage from './components/SettingsPage';
+import RemoteAssistPage from './components/RemoteAssistPage';
+import LoginPage from './components/LoginPage';
+import { Toast } from './components/shared/Toast';
 import {
   connectToDevice,
   disconnectFromDevice,
@@ -16,6 +19,12 @@ import {
   type ConnectionState,
   type DeviceInfo,
 } from './services/connection';
+import {
+  getAccount,
+  checkAccountToken,
+  logoutAccount,
+  type AccountSession,
+} from './services/auth';
 import { palette, fontFamily, spacing } from './theme/tokens';
 import { onWindowMaximizedChange } from './services/window';
 
@@ -26,7 +35,7 @@ const useStyles = makeStyles({
     height: '100vh',
     width: '100vw',
     overflow: 'hidden',
-    backgroundColor: palette.background,
+    backgroundColor: '#F4F6F9',
   },
   body: {
     flex: 1,
@@ -37,6 +46,7 @@ const useStyles = makeStyles({
     flex: 1,
     overflow: 'hidden',
     position: 'relative',
+    backgroundColor: '#F4F6F9',
   },
   placeholderPage: {
     height: '100%',
@@ -56,7 +66,7 @@ const useStyles = makeStyles({
   },
 });
 
-type View = 'home' | 'session' | 'transfer' | 'settings' | 'cloud' | 'vdisplay';
+type View = 'home' | 'session' | 'transfer' | 'settings' | 'cloud' | 'vdisplay' | 'assist';
 
 export const App: React.FC = () => {
   const styles = useStyles();
@@ -66,6 +76,41 @@ export const App: React.FC = () => {
   const [view, setView] = useState<View>('home');
   const [connecting, setConnecting] = useState(false);
   const [maximized, setMaximized] = useState(false);
+  const [account, setAccount] = useState<AccountSession | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+
+  const showToast = useCallback((msg: string) => {
+    setToastMsg(msg);
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => setToastMsg(null), 2000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    };
+  }, []);
+
+  // 启动时读取本地会话并校验令牌;未登录或令牌失效则进入登录页
+  useEffect(() => {
+    void (async () => {
+      const existing = await getAccount();
+      if (existing) {
+        try {
+          await checkAccountToken(existing);
+          setAccount(existing);
+        } catch {
+          await logoutAccount().catch(() => undefined);
+          setAccount(null);
+        }
+      } else {
+        setAccount(null);
+      }
+      setAuthChecked(true);
+    })();
+  }, []);
 
   const load = useCallback(async () => {
     setDevices(await getDevices());
@@ -127,6 +172,27 @@ export const App: React.FC = () => {
       setView('session');
     } catch (error) {
       console.error('[app] 连接失败', error);
+      showToast(`连接失败: ${String(error)}`);
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  // 远程协助页：匹配到对端设备后连接；若不在设备列表则补充进列表以便进入会话视图
+  const handleConnectPeer = async (peerId: string, name: string) => {
+    setDevices((prev) =>
+      prev.some((d) => d.id === peerId) ? prev : [...prev, { id: peerId, name, status: 'online' }],
+    );
+    setSelectedId(peerId);
+    setConnecting(true);
+    try {
+      const next = await connectToDevice(peerId);
+      setState(next);
+      setView('session');
+      showToast(`已连接设备 ${name}`);
+    } catch (error) {
+      console.error('[app] 远程协助连接失败', error);
+      showToast(`连接失败: ${String(error)}`);
     } finally {
       setConnecting(false);
     }
@@ -138,6 +204,45 @@ export const App: React.FC = () => {
     setState({ connected: false });
     setView('home');
   };
+
+  // 退出账号登录：清除本地会话并回到登录页
+  const handleLogout = async () => {
+    try {
+      await logoutAccount();
+    } finally {
+      setState({ connected: false });
+      setView('home');
+      setAccount(null);
+    }
+  };
+
+  // 未完成登录校验前不渲染内容；校验后未登录则进入登录页
+  if (!authChecked) {
+    return <div className={styles.root} />;
+  }
+
+  if (authChecked && !account) {
+    return (
+      <>
+        <LoginPage onLogin={(s) => setAccount(s)} />
+        <Toast message={toastMsg} />
+      </>
+    );
+  }
+
+  // 账号登录门禁：校验未完成显示加载态,未登录显示登录页
+  if (!authChecked) {
+    return (
+      <div className={styles.root}>
+        <div className={styles.placeholderPage}>
+          <div className={styles.placeholderTitle}>正在验证登录状态…</div>
+        </div>
+      </div>
+    );
+  }
+  if (!account) {
+    return <LoginPage onLogin={(acc) => setAccount(acc)} />;
+  }
 
   return (
     <div
@@ -151,22 +256,24 @@ export const App: React.FC = () => {
         onBack={
           view === 'session'
             ? handleExitSession
-            : view === 'vdisplay' || view === 'transfer'
+            : view === 'vdisplay' || view === 'transfer' || view === 'assist'
               ? () => setView('home')
               : undefined
         }
         onRefresh={() => void load()}
-        onSettings={() => setView('settings')}
+        onShowToast={showToast}
+        maximized={maximized}
       />
 
       <div className={styles.body}>
         <Sidebar
           devices={sidebarDevices}
           selectedDeviceId={selected?.id ?? null}
+          activeView={view}
           onSelectDevice={selectDevice}
           onSelectCloud={() => setView('cloud')}
-          onSelectAssist={() => setView('cloud')}
-          onSelectFavorites={() => setView('cloud')}
+          onSelectAssist={() => setView('assist')}
+          onSelectFavorites={() => setView('assist')}
           onSelectSettings={() => setView('settings')}
           onSelectVirtualDisplays={() => setView('vdisplay')}
         />
@@ -187,11 +294,15 @@ export const App: React.FC = () => {
           )}
 
           {view === 'transfer' && (
-            <FileTransferPage />
+            <FileTransferPage deviceName={selected?.name} />
           )}
 
           {view === 'settings' && (
-            <SettingsPage />
+            <SettingsPage onLogout={() => void handleLogout()} />
+          )}
+
+          {view === 'assist' && (
+            <RemoteAssistPage onConnectDevice={handleConnectPeer} onShowToast={showToast} />
           )}
 
           {view === 'home' && selected && (
@@ -218,7 +329,7 @@ export const App: React.FC = () => {
           {view === 'cloud' && (
             <div className={styles.placeholderPage}>
               <div className={styles.placeholderTitle}>云设备市场</div>
-              <div>通过市场发现云端设备，或在设置中配置 HBBS / HBBR 服务器（后续阶段）</div>
+              <div>通过市场发现云端设备，或在设置中配置信令 / 中继服务器（后续阶段）</div>
               <div style={{ color: palette.textMuted }}>
                 在线设备 {onlineCount} / {devices.length}
               </div>
@@ -226,6 +337,8 @@ export const App: React.FC = () => {
           )}
         </main>
       </div>
+
+      <Toast message={toastMsg} />
     </div>
   );
 };

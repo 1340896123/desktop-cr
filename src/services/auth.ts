@@ -1,0 +1,50 @@
+import { invoke } from '@tauri-apps/api/core';
+import { isTauri } from './connection';
+
+/** 账号登录会话(与 Rust 侧 AccountSession 对应) */
+export interface AccountSession {
+  server: string;
+  username: string;
+  token: string;
+}
+
+/** 登录 dcr-signal 账号服务;成功后返回会话 */
+export async function loginAccount(
+  server: string,
+  username: string,
+  password: string,
+): Promise<AccountSession> {
+  if (!isTauri()) {
+    console.warn('[auth] 非 Tauri 环境,模拟登录成功');
+    return { server, username, token: 'mock-token' };
+  }
+  return invoke<AccountSession>('login_account', { server, username, password });
+}
+
+/** 校验令牌是否仍有效(应用启动时调用);令牌失效时抛错 */
+export async function checkAccountToken(session: AccountSession): Promise<string> {
+  if (!isTauri()) {
+    console.warn('[auth] 非 Tauri 环境,跳过令牌校验');
+    return session.username;
+  }
+  return invoke<string>('check_account_token', { session });
+}
+
+/** 退出登录(清除本地会话) */
+export async function logoutAccount(): Promise<void> {
+  if (!isTauri()) {
+    console.warn('[auth] 非 Tauri 环境,跳过退出登录');
+    return;
+  }
+  await invoke('logout_account');
+}
+
+/** 读取当前登录会话;未登录返回 null */
+export async function getAccount(): Promise<AccountSession | null> {
+  if (!isTauri()) {
+    console.warn('[auth] 非 Tauri 环境,返回空会话');
+    return null;
+  }
+  const account = await invoke<AccountSession | null>('get_account');
+  return account ?? null;
+}

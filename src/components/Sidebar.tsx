@@ -1,128 +1,148 @@
 import React, { useState } from 'react';
 import { makeStyles } from '@fluentui/react-components';
 import {
-  DesktopRegular,
-  CloudRegular,
-  HeadsetRegular,
-  StarRegular,
-  StorageRegular,
-  SettingsRegular,
   ChevronDownRegular,
   ChevronRightRegular,
-  AddRegular,
-  VideoRegular,
+  CloudRegular,
+  DesktopRegular,
+  GridRegular,
+  HeadsetRegular,
+  SettingsRegular,
+  StarRegular,
 } from '@fluentui/react-icons';
-import { palette, fontFamily, spacing, sidebarWidth } from '../theme/tokens';
+import { fontFamily } from '../theme/tokens';
+
+const UU_BLUE = '#0066ff';
 
 const useStyles = makeStyles({
   sidebar: {
-    width: `${sidebarWidth}px`,
+    width: '240px',
     flexShrink: 0,
     height: '100%',
     display: 'flex',
     flexDirection: 'column',
-    backgroundColor: palette.sidebar,
-    borderRight: `1px solid ${palette.borderLight}`,
+    backgroundColor: '#f7f9fc',
+    borderRight: '1px solid rgba(229, 231, 235, 0.8)',
+    overflow: 'hidden',
+    fontFamily,
+    fontSize: '12px',
+    userSelect: 'none',
+  },
+  nav: {
+    flex: 1,
     overflowY: 'auto',
     overflowX: 'hidden',
-    padding: `${spacing.xs}px 0`,
+    padding: '8px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
   },
   group: {
-    marginBottom: `${spacing.sm}px`,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px',
   },
   groupHeader: {
     display: 'flex',
     alignItems: 'center',
-    gap: '6px',
-    padding: '7px 12px 7px 14px',
-    fontFamily,
-    fontSize: '14px',
-    fontWeight: 600,
-    color: palette.textPrimary,
+    justifyContent: 'space-between',
+    padding: '8px 12px',
+    borderRadius: '8px',
     cursor: 'pointer',
-    userSelect: 'none',
+    fontWeight: 600,
+    color: '#374151',
     transition: 'background-color 150ms ease',
 
     '&:hover': {
-      backgroundColor: palette.sidebarItemHover,
+      backgroundColor: 'rgba(229, 231, 235, 0.6)',
     },
   },
-  groupChevron: {
-    marginLeft: 'auto',
+  groupTitle: {
     display: 'flex',
-    color: palette.textMuted,
-    flexShrink: 0,
+    alignItems: 'center',
+    gap: '8px',
+  },
+  groupIcon: {
+    display: 'flex',
+    color: '#6B7280',
+  },
+  chevron: {
+    display: 'flex',
+    color: '#9CA3AF',
+    fontSize: '10px',
+  },
+  subList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px',
+    paddingLeft: '8px',
   },
   item: {
     display: 'flex',
     alignItems: 'center',
     gap: '10px',
-    padding: '7px 12px 7px 14px',
-    fontFamily,
-    fontSize: '14px',
-    color: palette.textSecondary,
+    padding: '6px 10px',
+    paddingLeft: '12px',
+    borderRadius: '8px',
     cursor: 'pointer',
-    userSelect: 'none',
-    borderLeft: '3px solid transparent',
-    transition: 'background-color 150ms ease, color 150ms ease',
+    color: '#4B5563',
     position: 'relative',
+    transition: 'background-color 150ms ease',
 
     '&:hover': {
-      backgroundColor: palette.sidebarItemHover,
-      color: palette.textPrimary,
+      backgroundColor: 'rgba(229, 231, 235, 0.4)',
     },
   },
   itemActive: {
-    backgroundColor: palette.sidebarItemActive,
-    borderLeftColor: palette.primary,
-    color: palette.textPrimary,
+    backgroundColor: 'rgba(229, 231, 235, 0.8)',
+    color: '#111827',
     fontWeight: 600,
   },
-  itemIcon: {
-    display: 'flex',
+  activeBar: {
+    position: 'absolute',
+    left: 0,
+    top: '6px',
+    bottom: '6px',
+    width: '4px',
+    backgroundColor: UU_BLUE,
+    borderTopRightRadius: '4px',
+    borderBottomRightRadius: '4px',
+  },
+  statusDot: {
+    width: '8px',
+    height: '8px',
+    borderRadius: '50%',
     flexShrink: 0,
-    color: palette.primary,
+  },
+  gridSquare: {
+    width: '16px',
+    height: '16px',
+    borderRadius: '4px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: '#ffffff',
+    flexShrink: 0,
+  },
+  blueSquare: {
+    width: '16px',
+    height: '16px',
+    borderRadius: '4px',
+    backgroundColor: UU_BLUE,
+    color: '#ffffff',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
   },
   itemLabel: {
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
-    flex: 1,
-  },
-  itemBadge: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
-    fontSize: '11px',
-    color: palette.textMuted,
-  },
-  spacer: {
-    flex: 1,
   },
   footer: {
-    borderTop: `1px solid ${palette.borderLight}`,
-    paddingTop: `${spacing.xs}px`,
-    marginTop: `${spacing.xs}px`,
-  },
-  addRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    padding: '7px 12px 7px 14px',
-    fontFamily,
-    fontSize: '13px',
-    color: palette.textMuted,
-    cursor: 'pointer',
-    userSelect: 'none',
-
-    '&:hover': {
-      backgroundColor: palette.sidebarItemHover,
-      color: palette.textPrimary,
-    },
-  },
-  addIcon: {
-    display: 'flex',
-    color: palette.primary,
+    padding: '8px',
+    borderTop: '1px solid rgba(229, 231, 235, 0.7)',
   },
 });
 
@@ -131,70 +151,6 @@ export interface SidebarDevice {
   name: string;
   online: boolean;
 }
-
-interface SidebarGroupProps {
-  title: string;
-  icon: React.ReactNode;
-  children: React.ReactNode;
-  defaultOpen?: boolean;
-  showChevron?: boolean;
-}
-
-const SidebarGroup: React.FC<SidebarGroupProps> = ({ title, icon, children, defaultOpen = true, showChevron = true }) => {
-  const styles = useStyles();
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div className={styles.group}>
-      <div
-        className={styles.groupHeader}
-        onClick={() => setOpen((prev) => !prev)}
-        role="button"
-        aria-expanded={open}
-        tabIndex={0}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') setOpen((prev) => !prev);
-        }}
-      >
-        <span className={styles.itemIcon}>{icon}</span>
-        <span>{title}</span>
-        {showChevron && (
-          <span className={styles.groupChevron}>
-            {open ? <ChevronDownRegular fontSize={14} /> : <ChevronRightRegular fontSize={14} />}
-          </span>
-        )}
-      </div>
-      {open && children}
-    </div>
-  );
-};
-
-interface SidebarItemProps {
-  icon?: React.ReactNode;
-  label: string;
-  active?: boolean;
-  right?: React.ReactNode;
-  onClick?: () => void;
-}
-
-export const SidebarItem: React.FC<SidebarItemProps> = ({ icon, label, active, right, onClick }) => {
-  const styles = useStyles();
-  return (
-    <div
-      className={active ? `${styles.item} ${styles.itemActive}` : styles.item}
-      onClick={onClick}
-      role="button"
-      tabIndex={0}
-      aria-current={active}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') onClick?.();
-      }}
-    >
-      {icon && <span className={styles.itemIcon}>{icon}</span>}
-      <span className={styles.itemLabel}>{label}</span>
-      {right && <span className={styles.itemBadge}>{right}</span>}
-    </div>
-  );
-};
 
 interface SidebarProps {
   devices: SidebarDevice[];
@@ -205,11 +161,13 @@ interface SidebarProps {
   onSelectFavorites?: () => void;
   onSelectSettings?: () => void;
   onSelectVirtualDisplays?: () => void;
+  /** 当前激活的视图标识，用于高亮「设置」与「远程协助」子项 */
+  activeView?: string;
 }
 
 /**
- * 截图左侧边栏：我的设备 / 云设备 / 远程协助 分组，底部设置。
- * 选中设备：淡蓝背景 + 左侧蓝色细条。
+ * 左侧边栏：我的设备 / 云设备 / 远程协助（可折叠分组），底部固定「设置」。
+ * 设备子项 = 状态点 + 方块网格图标 + 名称，选中项灰色背景 + 左侧蓝色竖条。
  */
 export const Sidebar: React.FC<SidebarProps> = ({
   devices,
@@ -219,79 +177,169 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectAssist,
   onSelectFavorites,
   onSelectSettings,
-  onSelectVirtualDisplays,
+  activeView,
 }) => {
   const styles = useStyles();
-  const onlineCount = devices.filter((d) => d.online).length;
+  const [expanded, setExpanded] = useState({ myDevices: true, cloudDevices: false, remoteAssist: true });
+  const [assistSub, setAssistSub] = useState<'start' | 'favorites'>('start');
+
+  const toggle = (key: keyof typeof expanded) => setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
 
   return (
     <nav className={styles.sidebar} aria-label="主导航">
-      <SidebarGroup title="我的设备" icon={<DesktopRegular fontSize={16} />} defaultOpen>
-        {devices.map((device) => (
-          <SidebarItem
-            key={device.id}
-            icon={<DesktopRegular fontSize={15} />}
-            label={device.name}
-            active={device.id === selectedDeviceId}
-            right={
-              <span>
-                <span
-                  style={{
-                    display: 'inline-block',
-                    width: 6,
-                    height: 6,
-                    borderRadius: '50%',
-                    backgroundColor: device.online ? palette.online : palette.offline,
-                  }}
-                />
-                {onlineCount > 0 ? ` ${onlineCount} 在线` : ''}
+      <div className={styles.nav}>
+        <div className={styles.group}>
+          <div className={styles.groupHeader} onClick={() => toggle('myDevices')} role="button" aria-expanded={expanded.myDevices}>
+            <span className={styles.groupTitle}>
+              <span className={styles.groupIcon}>
+                <DesktopRegular fontSize={16} />
               </span>
-            }
-            onClick={() => onSelectDevice?.(device.id)}
-          />
-        ))}
-        <SidebarItem
-          icon={<VideoRegular fontSize={15} />}
-          label="虚拟屏管理"
-          onClick={onSelectVirtualDisplays}
-        />
-        <div className={styles.addRow} role="button" tabIndex={0} onClick={onSelectCloud}>
-          <span className={styles.addIcon}>
-            <AddRegular fontSize={15} />
-          </span>
-          <span>添加设备</span>
+              <span>我的设备</span>
+            </span>
+            <span className={styles.chevron}>
+              {expanded.myDevices ? <ChevronDownRegular fontSize={12} /> : <ChevronRightRegular fontSize={12} />}
+            </span>
+          </div>
+          {expanded.myDevices && (
+            <div className={styles.subList}>
+              {devices.map((device) => {
+                const active = device.id === selectedDeviceId && activeView !== 'settings';
+                return (
+                  <div
+                    key={device.id}
+                    className={active ? `${styles.item} ${styles.itemActive}` : styles.item}
+                    onClick={() => onSelectDevice?.(device.id)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') onSelectDevice?.(device.id);
+                    }}
+                  >
+                    {active && <span className={styles.activeBar} />}
+                    <span
+                      className={styles.statusDot}
+                      style={{ backgroundColor: device.online ? '#10B981' : '#D1D5DB' }}
+                    />
+                    <span
+                      className={styles.gridSquare}
+                      style={{ backgroundColor: device.online ? '#3B82F6' : '#9CA3AF' }}
+                    >
+                      <GridRegular fontSize={9} />
+                    </span>
+                    <span className={styles.itemLabel}>{device.name}</span>
+                  </div>
+                );
+              })}
+              {devices.length === 0 && (
+                <div className={styles.item}>
+                  <span className={styles.itemLabel} style={{ color: '#9CA3AF' }}>暂无设备</span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
-      </SidebarGroup>
 
-      <SidebarGroup title="云设备" icon={<CloudRegular fontSize={16} />} defaultOpen>
-        <SidebarItem
-          icon={<StorageRegular fontSize={15} />}
-          label="市场"
-          onClick={onSelectCloud}
-        />
-      </SidebarGroup>
+        <div className={styles.group}>
+          <div className={styles.groupHeader} onClick={() => toggle('cloudDevices')} role="button" aria-expanded={expanded.cloudDevices}>
+            <span className={styles.groupTitle}>
+              <span className={styles.groupIcon}>
+                <CloudRegular fontSize={16} />
+              </span>
+              <span>云设备</span>
+            </span>
+            <span className={styles.chevron}>
+              {expanded.cloudDevices ? <ChevronDownRegular fontSize={12} /> : <ChevronRightRegular fontSize={12} />}
+            </span>
+          </div>
+          {expanded.cloudDevices && (
+            <div className={styles.subList}>
+              <div className={styles.item} onClick={onSelectCloud} role="button" tabIndex={0}>
+                <span className={styles.blueSquare}>
+                  <CloudRegular fontSize={9} />
+                </span>
+                <span className={styles.itemLabel}>市场</span>
+              </div>
+            </div>
+          )}
+        </div>
 
-      <SidebarGroup title="远程协助" icon={<HeadsetRegular fontSize={16} />} defaultOpen>
-        <SidebarItem
-          icon={<HeadsetRegular fontSize={15} />}
-          label="开始协助"
-          onClick={onSelectAssist}
-        />
-        <SidebarItem
-          icon={<StarRegular fontSize={15} />}
-          label="收藏设备"
-          onClick={onSelectFavorites}
-        />
-      </SidebarGroup>
-
-      <div className={styles.spacer} />
+        <div className={styles.group}>
+          <div className={styles.groupHeader} onClick={() => toggle('remoteAssist')} role="button" aria-expanded={expanded.remoteAssist}>
+            <span className={styles.groupTitle}>
+              <span className={styles.groupIcon}>
+                <HeadsetRegular fontSize={16} />
+              </span>
+              <span>远程协助</span>
+            </span>
+            <span className={styles.chevron}>
+              {expanded.remoteAssist ? <ChevronDownRegular fontSize={12} /> : <ChevronRightRegular fontSize={12} />}
+            </span>
+          </div>
+          {expanded.remoteAssist && (
+            <div className={styles.subList}>
+              <div
+                className={assistSub === 'start' && activeView === 'assist' ? `${styles.item} ${styles.itemActive}` : styles.item}
+                onClick={() => {
+                  setAssistSub('start');
+                  onSelectAssist?.();
+                }}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    setAssistSub('start');
+                    onSelectAssist?.();
+                  }
+                }}
+              >
+                {assistSub === 'start' && activeView === 'assist' && <span className={styles.activeBar} />}
+                <span className={styles.blueSquare}>
+                  <HeadsetRegular fontSize={9} />
+                </span>
+                <span className={styles.itemLabel}>开始协助</span>
+              </div>
+              <div
+                className={assistSub === 'favorites' && activeView === 'assist' ? `${styles.item} ${styles.itemActive}` : styles.item}
+                onClick={() => {
+                  setAssistSub('favorites');
+                  onSelectFavorites?.();
+                }}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    setAssistSub('favorites');
+                    onSelectFavorites?.();
+                  }
+                }}
+              >
+                {assistSub === 'favorites' && activeView === 'assist' && <span className={styles.activeBar} />}
+                <span className={styles.blueSquare}>
+                  <StarRegular fontSize={9} />
+                </span>
+                <span className={styles.itemLabel}>收藏设备</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
 
       <div className={styles.footer}>
-        <SidebarItem
-          icon={<SettingsRegular fontSize={16} />}
-          label="设置"
+        <div
+          className={activeView === 'settings' ? `${styles.item} ${styles.itemActive}` : styles.item}
           onClick={onSelectSettings}
-        />
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') onSelectSettings?.();
+          }}
+        >
+          {activeView === 'settings' && <span className={styles.activeBar} />}
+          <span className={styles.groupIcon}>
+            <SettingsRegular fontSize={16} />
+          </span>
+          <span className={styles.itemLabel}>设置</span>
+        </div>
       </div>
     </nav>
   );

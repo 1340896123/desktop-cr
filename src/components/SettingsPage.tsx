@@ -19,6 +19,8 @@ import {
   GlobeRegular,
   ServerRegular,
   KeyRegular,
+  HeadsetRegular,
+  FlashRegular,
 } from '@fluentui/react-icons';
 import { palette, fontFamily, spacing, radius, shadow } from '../theme/tokens';
 import { startHost, stopHost, isHostRunning, onHostStateChange, type HostState } from '../services/connection';
@@ -288,6 +290,42 @@ const useStyles = makeStyles({
     fontSize: '13px',
     color: palette.textMuted,
   },
+  grayBtn: {
+    background: '#F3F4F6',
+    color: '#374151',
+    border: '1px solid #E5E7EB',
+    padding: '6px 16px',
+    borderRadius: radius.control,
+    fontFamily,
+    fontSize: '12px',
+    fontWeight: 500,
+    cursor: 'pointer',
+    flexShrink: 0,
+    transition: 'background-color 150ms ease',
+
+    '&:hover': {
+      backgroundColor: '#E5E7EB',
+    },
+  },
+  macGrid: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: '8px',
+    color: '#4B5563',
+    fontSize: '12px',
+  },
+  macRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '8px 10px',
+    backgroundColor: '#F9FAFB',
+    borderRadius: '8px',
+  },
+  macRowKey: {
+    fontWeight: 600,
+    color: '#111827',
+  },
 });
 
 const useSwitchStyles = makeStyles({
@@ -355,26 +393,7 @@ export const ToggleSwitch: React.FC<ToggleSwitchProps> = ({ on, onChange }) => {
   );
 };
 
-const settings: Record<string, { title: string; desc?: string; icon: React.ReactNode }[]> = {
-  安全: [
-    { title: '连接前锁定屏幕', icon: <ShieldRegularIcon /> },
-    { title: '每次连接需要验证码', icon: <PowerRegular fontSize={16} /> },
-  ],
-  键盘: [
-    { title: '发送 Ctrl 组合键到远端', icon: <RocketRegular fontSize={16} /> },
-    { title: '将 Win 键发送到远端', icon: <PowerRegular fontSize={16} /> },
-  ],
-};
-
-function ShieldRegularIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-      <path d="M12 3l7 3v6c0 4.4-3 7.5-7 9-4-1.5-7-4.6-7-9V6l7-3z" />
-    </svg>
-  );
-}
-
-type TabKey = '常规' | '安全' | '键盘' | '网络' | '日志';
+type TabKey = '常规' | '安全' | '键盘' | '网络' | '账号' | '日志';
 
 /** 校验对端地址格式 host:port（IPv4 / hostname，端口 1..65535） */
 function isValidPeerAddr(addr: string): boolean {
@@ -394,11 +413,11 @@ function formatLogTime(time: string): string {
 }
 
 /**
- * 设置界面：顶部「常规/安全/键盘/网络/日志」标签页 + 卡片式设置项。
+ * 设置界面：顶部「常规/安全/键盘/网络/账号/日志」标签页 + 卡片式设置项。
  * 「网络」tab 为真实功能（被控端模式 + 对端设备列表，读写持久化配置），
- * 「日志」tab 展示操作日志，其余 tab 保持静态展示。
+ * 「账号」tab 展示当前登录账号与退出登录，「日志」tab 展示操作日志，其余 tab 保持静态展示。
  */
-export const SettingsPage: React.FC = () => {
+export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
   const styles = useStyles();
   const [tab, setTab] = useState<TabKey>('常规');
   const [toggles, setToggles] = useState<Record<string, boolean>>({
@@ -407,10 +426,9 @@ export const SettingsPage: React.FC = () => {
     sleep: true,
     autoupdate: false,
     dragfloat: true,
-    lock: true,
-    password: false,
-    ctrl: true,
-    win: false,
+    sameAccount: true,
+    allowAssist: true,
+    directP2p: true,
     relay: true,
     tcp: false,
   });
@@ -565,7 +583,7 @@ export const SettingsPage: React.FC = () => {
       <h1 className={styles.title}>设置</h1>
 
       <div className={styles.tabs}>
-        {(['常规', '安全', '键盘', '网络', '日志'] as TabKey[]).map((t) => (
+        {(['常规', '安全', '键盘', '网络', '账号', '日志'] as TabKey[]).map((t) => (
           <button
             key={t}
             type="button"
@@ -684,26 +702,101 @@ export const SettingsPage: React.FC = () => {
         </>
       )}
 
-      {(tab === '安全' || tab === '键盘') && (
-        <div className={styles.card}>
-          {(settings[tab] ?? []).map((row, idx) => (
-            <React.Fragment key={row.title}>
-              {idx > 0 && <div className={styles.rowDivider} />}
-              <div className={styles.row}>
-                <span className={styles.rowIcon}>{row.icon}</span>
-                <div className={styles.rowBody}>
-                  <div className={styles.rowTitle}>{row.title}</div>
-                  {row.desc && <div className={styles.rowDesc}>{row.desc}</div>}
-                </div>
-                <ToggleSwitch on={toggles[row.title] ?? false} onChange={() => toggle(row.title)} />
+      {tab === '安全' && (
+        <>
+          <div className={styles.card}>
+            <div className={styles.row}>
+              <span className={styles.rowIcon}>
+                <PersonRegular fontSize={16} />
+              </span>
+              <div className={styles.rowBody}>
+                <div className={styles.rowTitle}>允许同账号控制本设备</div>
               </div>
-            </React.Fragment>
-          ))}
-        </div>
+              <ToggleSwitch on={toggles.sameAccount} onChange={() => toggle('sameAccount')} />
+            </div>
+            <div className={styles.rowDivider} />
+            <div className={styles.row}>
+              <span className={styles.rowIcon}>
+                <HeadsetRegular fontSize={16} />
+              </span>
+              <div className={styles.rowBody}>
+                <div className={styles.rowTitle}>允许他人远程协助</div>
+              </div>
+              <ToggleSwitch on={toggles.allowAssist} onChange={() => toggle('allowAssist')} />
+            </div>
+            <div className={styles.rowDivider} />
+            <div className={styles.row}>
+              <div className={styles.rowBody}>
+                <div className={styles.rowTitle}>远程协助连接本设备的方式</div>
+                <div className={styles.rowDesc}>通过本机【设备 ID】和【设备验证码】即可发起远程协助</div>
+              </div>
+              <div className={styles.selectWrap}>
+                <select className={styles.select} defaultValue="验证码连接">
+                  <option>验证码连接</option>
+                </select>
+                <span className={styles.selectChevron}>
+                  <ChevronDownRegular fontSize={12} />
+                </span>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {tab === '键盘' && (
+        <>
+          <div className={styles.card}>
+            <div className={styles.row}>
+              <div className={styles.rowBody}>
+                <div className={styles.rowTitle}>仅控制端响应的快捷键</div>
+                <div className={styles.rowDesc}>远控时按下以下快捷键，仅在本机响应，不会传到被控端。</div>
+              </div>
+              <button type="button" className={styles.grayBtn}>
+                添加
+              </button>
+            </div>
+          </div>
+          <div className={styles.card}>
+            <div className={styles.row}>
+              <span className={styles.rowBody}>
+                <span className={styles.rowTitle}>远控 macOS 按键映射</span>
+              </span>
+              <button type="button" className={styles.grayBtn}>
+                还原默认按键
+              </button>
+            </div>
+            <div className={styles.rowDivider} />
+            <div className={styles.row}>
+              <div className={styles.macGrid} style={{ width: '100%' }}>
+                <div className={styles.macRow}>
+                  <span>Win 键</span>
+                  <span className={styles.macRowKey}>⌘ Command</span>
+                </div>
+                <div className={styles.macRow}>
+                  <span>Alt 键</span>
+                  <span className={styles.macRowKey}>⌥ Option</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
       )}
 
       {tab === '网络' && (
         <>
+          <div className={styles.card}>
+            <div className={styles.row}>
+              <span className={styles.rowIcon}>
+                <FlashRegular fontSize={16} />
+              </span>
+              <div className={styles.rowBody}>
+                <div className={styles.rowTitle}>Direct P2P 直连加速</div>
+                <div className={styles.rowDesc}>开启后优先提升局域网与打洞极速穿透能力</div>
+              </div>
+              <ToggleSwitch on={toggles.directP2p} onChange={() => toggle('directP2p')} />
+            </div>
+          </div>
+
           <div className={styles.card}>
             <div className={styles.row}>
               <span className={styles.rowIcon}>
@@ -910,6 +1003,34 @@ export const SettingsPage: React.FC = () => {
 
           {notice && <div className={styles.noticeText}>{notice}</div>}
         </>
+      )}
+
+      {tab === '账号' && (
+        <div className={styles.card}>
+          <div className={styles.row}>
+            <span className={styles.rowIcon}>
+              <PersonRegular fontSize={16} />
+            </span>
+            <div className={styles.rowBody}>
+              <div className={styles.rowTitle}>当前登录账号</div>
+              <div className={styles.rowDesc}>
+                {config?.account
+                  ? `${config.account.username} · ${config.account.server}`
+                  : '未登录（登录后解锁远程控制功能）'}
+              </div>
+            </div>
+            {config?.account && (
+              <button
+                type="button"
+                className={styles.hostToggle}
+                style={{ backgroundColor: palette.destructive }}
+                onClick={() => onLogout?.()}
+              >
+                退出登录
+              </button>
+            )}
+          </div>
+        </div>
       )}
 
       {tab === '日志' && (

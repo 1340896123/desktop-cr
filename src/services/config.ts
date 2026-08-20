@@ -9,6 +9,13 @@ export interface PeerConfig {
   platform?: string;
 }
 
+/** 账号登录会话（登录 dcr-signal 服务后持久化） */
+export interface AccountSession {
+  server: string;
+  username: string;
+  token: string;
+}
+
 /** 应用配置（持久化到 app_config_dir/config.json） */
 export interface AppConfig {
   hostEnabled: boolean;
@@ -20,6 +27,8 @@ export interface AppConfig {
   relayServer?: string;
   /** 本机唯一 ID，信令注册用，默认 "dcr-<主机名>" */
   hostId: string;
+  /** 账号登录会话，登录后解锁应用 */
+  account?: AccountSession;
 }
 
 /** 浏览器模式降级时的默认配置 */

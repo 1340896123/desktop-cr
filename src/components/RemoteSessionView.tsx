@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { makeStyles } from '@fluentui/react-components';
 import {
-  ShieldRegular,
   MicRegular,
   MicOffRegular,
   AddRegular,
@@ -11,11 +10,11 @@ import {
   ClipboardRegular,
   SettingsRegular,
   ImageRegular,
-  ArrowLeftRegular,
   DesktopRegular,
   KeyboardRegular,
+  Wifi3Regular,
 } from '@fluentui/react-icons';
-import { palette, fontFamily, radius, zIndex } from '../theme/tokens';
+import { fontFamily, radius, zIndex } from '../theme/tokens';
 import { setFullscreen as requestFullscreen, setQuality, setResolution, syncClipboard } from '../services/connection';
 import { onRemoteFrame } from '../services/capture';
 import RemoteCanvas from './RemoteCanvas';
@@ -25,7 +24,7 @@ const useStyles = makeStyles({
     height: '100%',
     display: 'flex',
     flexDirection: 'column',
-    backgroundColor: '#1C2733',
+    backgroundColor: '#0f172a',
     position: 'relative',
     overflow: 'hidden',
   },
@@ -33,13 +32,14 @@ const useStyles = makeStyles({
     height: '40px',
     display: 'flex',
     alignItems: 'center',
-    gap: '8px',
-    padding: '0 8px',
-    backgroundColor: 'rgba(38, 47, 58, 0.95)',
-    borderBottom: '1px solid rgba(255,255,255,0.08)',
+    gap: '12px',
+    padding: '0 14px',
+    backgroundColor: 'rgba(30, 41, 59, 0.95)',
+    borderBottom: '1px solid rgba(51, 65, 85, 0.5)',
     userSelect: 'none',
     zIndex: zIndex.titleBar,
     flexShrink: 0,
+    backdropFilter: 'blur(4px)',
   },
   barLeft: {
     display: 'flex',
@@ -47,42 +47,51 @@ const useStyles = makeStyles({
     gap: '8px',
     minWidth: 0,
   },
-  backBtn: {
+  devicePill: {
     display: 'inline-flex',
     alignItems: 'center',
-    justifyContent: 'center',
-    width: '28px',
-    height: '28px',
-    border: 'none',
-    background: 'transparent',
-    borderRadius: radius.control,
-    color: '#C9D2DD',
-    cursor: 'pointer',
-
-    '&:hover': {
-      backgroundColor: 'rgba(255,255,255,0.1)',
-    },
-  },
-  appIcon: {
-    width: '18px',
-    height: '18px',
-    borderRadius: '5px',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexShrink: 0,
-  },
-  deviceName: {
+    gap: '6px',
+    padding: '3px 10px',
+    borderRadius: '6px',
+    backgroundColor: '#334155',
+    color: '#F8FAFC',
     fontFamily,
-    fontSize: '14px',
-    fontWeight: 600,
-    color: '#F2F5F8',
+    fontSize: '12px',
+    fontWeight: 700,
     whiteSpace: 'nowrap',
   },
-  shield: {
+  devicePillIcon: {
+    display: 'flex',
+    color: '#60A5FA',
+  },
+  superScreen: {
     display: 'inline-flex',
-    color: '#6BB7FF',
-    flexShrink: 0,
+    alignItems: 'center',
+    padding: '2px 8px',
+    borderRadius: '4px',
+    backgroundColor: 'rgba(37, 99, 235, 0.8)',
+    color: '#ffffff',
+    fontFamily,
+    fontSize: '10px',
+    whiteSpace: 'nowrap',
+  },
+  signalGroup: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    color: '#34D399',
+  },
+  signalDot: {
+    width: '8px',
+    height: '8px',
+    borderRadius: '50%',
+    backgroundColor: '#34D399',
+  },
+  timer: {
+    fontFamily,
+    fontSize: '12px',
+    color: '#CBD5E1',
+    fontVariantNumeric: 'tabular-nums',
   },
   barCenter: {
     display: 'flex',
@@ -120,23 +129,10 @@ const useStyles = makeStyles({
       backgroundColor: 'rgba(255,255,255,0.1)',
     },
   },
-  signal: {
-    width: '8px',
-    height: '8px',
-    borderRadius: '50%',
-    backgroundColor: '#34C759',
-  },
-  timer: {
-    fontFamily,
-    fontSize: '12px',
-    color: '#C9D2DD',
-    fontVariantNumeric: 'tabular-nums',
-    marginLeft: '4px',
-  },
   barRight: {
     display: 'flex',
     alignItems: 'center',
-    gap: '4px',
+    gap: '10px',
     marginLeft: 'auto',
   },
   iconBtn: {
@@ -175,6 +171,24 @@ const useStyles = makeStyles({
       color: '#F2F5F8',
     },
   },
+  disconnectBtn: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '5px 14px',
+    borderRadius: '6px',
+    border: 'none',
+    backgroundColor: '#DC2626',
+    color: '#ffffff',
+    fontFamily,
+    fontSize: '12px',
+    fontWeight: 500,
+    cursor: 'pointer',
+    transition: 'background-color 150ms ease',
+
+    '&:hover': {
+      backgroundColor: '#B91C1C',
+    },
+  },
   canvasArea: {
     flex: 1,
     position: 'relative',
@@ -184,16 +198,27 @@ const useStyles = makeStyles({
     position: 'absolute',
     right: '14px',
     bottom: '14px',
-    backgroundColor: 'rgba(15, 23, 32, 0.78)',
+    backgroundColor: 'rgba(15, 23, 32, 0.9)',
     borderRadius: '8px',
     padding: '10px 14px',
     fontFamily,
-    fontSize: '12px',
+    fontSize: '11px',
     lineHeight: '20px',
-    color: '#D6DEE6',
+    color: '#CBD5E1',
     backdropFilter: 'blur(4px)',
+    border: '1px solid rgba(51, 65, 85, 0.8)',
     zIndex: 5,
     fontVariantNumeric: 'tabular-nums',
+    minWidth: '220px',
+  },
+  perfTitle: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    color: '#34D399',
+    fontWeight: 700,
+    borderBottom: '1px solid rgba(30, 41, 59, 0.9)',
+    paddingBottom: '4px',
+    marginBottom: '4px',
   },
   perfRow: {
     display: 'flex',
@@ -314,6 +339,12 @@ function formatElapsed(seconds: number): string {
   return [h, m, s].map((v) => String(v).padStart(2, '0')).join(':');
 }
 
+function resolutionLabel(display: DisplayOption): string {
+  if (display.height >= 2160) return '4K';
+  if (display.height >= 1440) return '2K';
+  return '1080P';
+}
+
 interface RemoteSessionViewProps {
   deviceName: string;
   connected: boolean;
@@ -322,8 +353,8 @@ interface RemoteSessionViewProps {
 }
 
 /**
- * 截图「远程控制窗口」界面：深色会话栏（设备名/盾牌/显示屏标签/计时/麦克风/控制中心）+
- * 全屏远程画面 + 右下角性能状态浮窗。
+ * 远程会话窗口：深色顶部栏（设备名胶囊 + 超级屏 + 信号 + 计时 / 显示屏下拉 /
+ * 麦克风 + 控制中心 + 断开连接）+ 全屏远程画面 + 右下角性能浮窗。
  */
 export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName, connected, onExit, onOpenVirtualDisplays }) => {
   const styles = useStyles();
@@ -355,7 +386,6 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
   const selected = DISPLAYS.find((d) => d.id === displayId) ?? DISPLAYS[0];
 
   // 统计实时帧率：基于 remote-frame 事件计数（与 RemoteCanvas 内部的帧订阅互不冲突）。
-  // RemoteCanvas 负责绘制，这里只做每秒计数并刷新性能浮窗。
   useEffect(() => {
     if (!connected) return;
     frameCountRef.current = 0;
@@ -384,20 +414,17 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
     <div className={styles.session}>
       <div className={styles.bar}>
         <div className={styles.barLeft}>
-          {onExit && (
-            <button type="button" className={styles.backBtn} onClick={onExit} aria-label="退出远程会话">
-              <ArrowLeftRegular fontSize={16} />
-            </button>
-          )}
-          <span className={styles.appIcon}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
-              <rect x="4" y="4" width="16" height="16" rx="4" fill={palette.primary} />
-              <path d="M9 12h6M12 9v6" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
-            </svg>
+          <span className={styles.devicePill}>
+            <span className={styles.devicePillIcon}>
+              <DesktopRegular fontSize={11} />
+            </span>
+            {deviceName}
           </span>
-          <span className={styles.deviceName}>{deviceName}</span>
-          <span className={styles.shield}>
-            <ShieldRegular fontSize={16} />
+          <span className={styles.superScreen}>超级屏</span>
+          <span className={styles.signalGroup}>
+            <span className={styles.signalDot} />
+            <Wifi3Regular fontSize={12} />
+            <span className={styles.timer}>{formatElapsed(elapsed)}</span>
           </span>
         </div>
 
@@ -415,8 +442,6 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
           >
             <AddRegular fontSize={16} />
           </button>
-          <span className={styles.signal} title="连接正常" />
-          <span className={styles.timer}>{formatElapsed(elapsed)}</span>
         </div>
 
         <div className={styles.barRight}>
@@ -432,6 +457,9 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
             <SettingsRegular fontSize={15} />
             控制中心
           </button>
+          <button type="button" className={styles.disconnectBtn} onClick={onExit}>
+            断开连接
+          </button>
         </div>
       </div>
 
@@ -439,33 +467,25 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
         <RemoteCanvas connected={connected} remoteWidth={selected.width} remoteHeight={selected.height} mode="canvas" streamSource="remote" />
 
         <div className={styles.perfOverlay}>
-          <div className={styles.perfRow}>
-            <span>UDP relay</span>
-            <span className={styles.perfVal}>{formatElapsed(elapsed)}</span>
+          <div className={styles.perfTitle}>
+            <span>连接模式: UDP P2P</span>
+            <span>{resolutionLabel(selected)}</span>
           </div>
           <div className={styles.perfRow}>
-            <span>帧率</span>
+            <span>帧率:</span>
             <span className={styles.perfVal}>{fps > 0 ? `${fps} fps` : '-- fps'}</span>
           </div>
           <div className={styles.perfRow}>
-            <span>码率</span>
-            <span className={styles.perfVal}>3.0 Mbps</span>
+            <span>码率:</span>
+            <span className={styles.perfVal}>2.7 Mbps</span>
           </div>
           <div className={styles.perfRow}>
-            <span>网络延迟</span>
-            <span className={styles.perfVal}>10 ms</span>
+            <span>延迟:</span>
+            <span className={styles.perfVal}>2 ms</span>
           </div>
           <div className={styles.perfRow}>
-            <span>帧耗时</span>
-            <span className={styles.perfVal}>15 ms frm.</span>
-          </div>
-          <div className={styles.perfRow}>
-            <span>丢包</span>
-            <span className={styles.perfVal}>0.08 loss</span>
-          </div>
-          <div className={styles.perfRow}>
-            <span>分辨率</span>
-            <span className={styles.perfVal}>4K</span>
+            <span>丢包率:</span>
+            <span className={styles.perfVal}>0.0% loss</span>
           </div>
         </div>
 
