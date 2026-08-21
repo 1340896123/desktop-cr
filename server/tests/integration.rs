@@ -440,6 +440,69 @@ async fn signal_list_filters_by_account() {
     serve.abort();
 }
 
+/// 同一账号多设备发现回归:两条独立长连接注册同一账号后,List 必须同时返回两台在线设备。
+#[tokio::test]
+async fn signal_list_discovers_multiple_devices_for_same_account() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let core = std::sync::Arc::new(signal::SignalCore::new(""));
+    let serve = tokio::spawn(async move {
+        let _ = signal::serve(listener, udp, core).await;
+    });
+
+    let mut hosts = Vec::new();
+    for (id, name, lan) in [
+        ("alice-desktop", "Alice Desktop", "192.168.1.10:21118"),
+        ("alice-laptop", "Alice Laptop", "192.168.1.11:21118"),
+    ] {
+        let mut host = TcpStream::connect(addr).await.unwrap();
+        write_msg(
+            &mut host,
+            &SignalMsg::Register {
+                id: id.into(),
+                lan: lan.into(),
+                name: name.into(),
+                os: "Windows 11".into(),
+                version: "0.1.0".into(),
+                user: "alice".into(),
+                token: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let ack: SignalMsg = read_msg(&mut host).await.unwrap();
+        assert!(matches!(ack, SignalMsg::RegisterAck { ok: true, .. }));
+        hosts.push(host);
+    }
+
+    let mut query = TcpStream::connect(addr).await.unwrap();
+    write_msg(
+        &mut query,
+        &SignalMsg::List {
+            user: "alice".into(),
+            token: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let ack: SignalMsg = read_msg(&mut query).await.unwrap();
+    match ack {
+        SignalMsg::ListAck { peers, auth_error } => {
+            assert!(!auth_error);
+            assert_eq!(peers.len(), 2, "同账号两台设备应同时发现: {peers:?}");
+            assert!(peers.iter().any(|peer| peer.id == "alice-desktop"));
+            assert!(peers.iter().any(|peer| peer.id == "alice-laptop"));
+            assert!(peers.iter().all(|peer| peer.owner == "alice"));
+        }
+        other => panic!("期望 ListAck,得到 {other:?}"),
+    }
+
+    drop(query);
+    drop(hosts);
+    serve.abort();
+}
+
 /// 重连竞态:旧连接断开不得误删已被新连接接管的同 id 记录。
 /// 新连接注册同 id 后,旧连接因代次不符被跳过注销,设备仍在线。
 #[tokio::test]
