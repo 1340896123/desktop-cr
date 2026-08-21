@@ -42,17 +42,11 @@ fn default_codec() -> String {
 #[serde(tag = "t", rename_all = "kebab-case")]
 pub enum Msg {
     /// 握手:发送方标识
-    Hello {
-        id: String,
-        app: String,
-        ver: u32,
-    },
+    Hello { id: String, app: String, ver: u32 },
     /// 握手响应:被控端标识
-    HelloAck {
-        id: String,
-    },
+    HelloAck { id: String },
     /// 视频帧(jpeg 为 base64 编码;dur 为被控端编码耗时毫秒,用于性能统计;
-/// codec 为 "jpeg" | "h264" | "hevc",h264/hevc 时 jpeg 字段为 Annex-B 字节的 base64)。
+    /// codec 为 "jpeg" | "h264" | "hevc",h264/hevc 时 jpeg 字段为 Annex-B 字节的 base64)。
     Frame {
         w: u32,
         h: u32,
@@ -80,11 +74,9 @@ pub enum Msg {
         mods: Vec<String>,
     },
     /// 剪贴板文本
-    Clipboard {
-        text: String,
-    },
+    Clipboard { text: String },
     /// 流参数调整(控制端 → 被控端,被控端抓帧循环实时应用;monitor 为可选的目标显示器;
-/// codec 为 "jpeg" | "h264",控制端无 FFmpeg 时应下发 "jpeg")。
+    /// codec 为 "jpeg" | "h264",控制端无 FFmpeg 时应下发 "jpeg")。
     Stream {
         fps: u32,
         jpeg_quality: u8,
@@ -101,32 +93,15 @@ pub enum Msg {
         monitors: Vec<crate::capture::MonitorInfo>,
     },
     /// 文件传输开始(控制端 → 被控端;id 为本次传输标识)
-    FileStart {
-        id: u32,
-        name: String,
-        size: u64,
-    },
+    FileStart { id: u32, name: String, size: u64 },
     /// 文件数据块(data 为 base64 编码的字节块)
-    FileData {
-        id: u32,
-        seq: u64,
-        data: String,
-    },
+    FileData { id: u32, seq: u64, data: String },
     /// 文件传输结束(control 端发送,表示所有块已发完)
-    FileEnd {
-        id: u32,
-        total_chunks: u64,
-    },
+    FileEnd { id: u32, total_chunks: u64 },
     /// 文件传输进度应答(被控端 → 控制端)
-    FileAck {
-        id: u32,
-        received: u64,
-        total: u64,
-    },
+    FileAck { id: u32, received: u64, total: u64 },
     /// 请求对端目录列表(控制端 → 被控端)
-    DirList {
-        path: String,
-    },
+    DirList { path: String },
     /// 目录列表应答(被控端 → 控制端)
     DirListAck {
         path: String,
@@ -134,18 +109,11 @@ pub enum Msg {
         error: Option<String>,
     },
     /// 请求对端发送指定文件(控制端 → 被控端;id 由控制端分配,对端复用)
-    FileRequest {
-        id: u32,
-        path: String,
-    },
+    FileRequest { id: u32, path: String },
     /// 心跳(毫秒时间戳)
-    Ping {
-        ts: u64,
-    },
+    Ping { ts: u64 },
     /// 心跳响应
-    Pong {
-        ts: u64,
-    },
+    Pong { ts: u64 },
     /// 音频帧(wav 为 base64 编码;协议预留,当前仅被控端记录日志)
     Audio {
         sample_rate: u16,
@@ -200,7 +168,10 @@ pub fn get_session_metrics() -> SessionMetrics {
 static HOST_MONITOR: Mutex<Option<u32>> = Mutex::new(None);
 
 fn host_monitor() -> Option<u32> {
-    HOST_MONITOR.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    HOST_MONITOR
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 fn set_host_monitor(m: Option<u32>) {
@@ -228,7 +199,9 @@ pub fn list_dir(path: &str) -> Result<Vec<FileEntry>, String> {
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(path).map_err(|e| format!("读取目录失败: {e}"))? {
         let entry = entry.map_err(|e| format!("读取目录项失败: {e}"))?;
-        let ftype = entry.file_type().map_err(|e| format!("读取文件类型失败: {e}"))?;
+        let ftype = entry
+            .file_type()
+            .map_err(|e| format!("读取文件类型失败: {e}"))?;
         let name = entry.file_name().to_string_lossy().to_string();
         // 目录符号链接按文件处理,避免递归循环
         let is_dir = ftype.is_dir() && !ftype.is_symlink();
@@ -300,7 +273,11 @@ async fn network_file_start(id: u32, name: &str, size: u64) {
                 );
             }
             log::info!("[network] 接收文件开始: id={id}, name={safe_name}, size={size}");
-            crate::operation_log::op_log("network", "file_start", &format!("id={id} name={safe_name} size={size}"));
+            crate::operation_log::op_log(
+                "network",
+                "file_start",
+                &format!("id={id} name={safe_name} size={size}"),
+            );
         }
         Err(e) => log::warn!("[network] 创建接收文件 {safe_name} 失败: {e}"),
     }
@@ -513,7 +490,11 @@ async fn handle_host_connection(
         .await
         .map_err(|_| format!("握手超时(来自 {addr})"))??;
     let peer_id = match &hello {
-        Msg::Hello { id, app: app_name, ver } => {
+        Msg::Hello {
+            id,
+            app: app_name,
+            ver,
+        } => {
             if app_name != APP_NAME || *ver != PROTOCOL_VERSION {
                 return Err(format!("协议不匹配: app={app_name}, ver={ver:?}"));
             }
@@ -569,11 +550,20 @@ async fn handle_host_connection(
 }
 
 /// 被控端收消息循环:鼠标/键盘注入、剪贴板写入、ping→pong。
-async fn host_read_loop(app: AppHandle, mut read_half: tokio::net::tcp::OwnedReadHalf) -> Result<(), String> {
+async fn host_read_loop(
+    app: AppHandle,
+    mut read_half: tokio::net::tcp::OwnedReadHalf,
+) -> Result<(), String> {
     loop {
         let msg = read_msg(&mut read_half).await?;
         match msg {
-            Msg::Mouse { x, y, kind, button, delta } => {
+            Msg::Mouse {
+                x,
+                y,
+                kind,
+                button,
+                delta,
+            } => {
                 // 协议坐标为 0..1 归一化,换算成 0..65535 绝对坐标
                 let ex = x.clamp(0.0, 1.0) * 65535.0;
                 let ey = y.clamp(0.0, 1.0) * 65535.0;
@@ -597,10 +587,17 @@ async fn host_read_loop(app: AppHandle, mut read_half: tokio::net::tcp::OwnedRea
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
-                    log::info!("[network] (非 Windows) 收到鼠标消息 kind={kind} x={ex:.1} y={ey:.1}");
+                    log::info!(
+                        "[network] (非 Windows) 收到鼠标消息 kind={kind} x={ex:.1} y={ey:.1}"
+                    );
                 }
             }
-            Msg::Key { key, kind, code, mods } => {
+            Msg::Key {
+                key,
+                kind,
+                code,
+                mods,
+            } => {
                 let event_type = if kind == "up" { "keyup" } else { "keydown" };
                 #[cfg(target_os = "windows")]
                 {
@@ -905,13 +902,11 @@ async fn signal_query<T>(addr: &str, send: dcr_server::message::SignalMsg) -> Re
 where
     T: serde::de::DeserializeOwned,
 {
-    let mut stream = tokio::time::timeout(
-        std::time::Duration::from_secs(8),
-        TcpStream::connect(addr),
-    )
-    .await
-    .map_err(|_| format!("连接信令服务器 {addr} 超时"))?
-    .map_err(|e| format!("连接信令服务器 {addr} 失败: {e}"))?;
+    let mut stream =
+        tokio::time::timeout(std::time::Duration::from_secs(8), TcpStream::connect(addr))
+            .await
+            .map_err(|_| format!("连接信令服务器 {addr} 超时"))?
+            .map_err(|e| format!("连接信令服务器 {addr} 失败: {e}"))?;
     dcr_server::framing::write_msg(&mut stream, &send).await?;
     dcr_server::framing::read_msg(&mut stream).await
 }
@@ -1018,11 +1013,8 @@ pub(crate) async fn open_transport(
 ) -> Result<(TcpStream, String), String> {
     // 1) 直连配置地址(LAN)
     if let Some(addr) = direct {
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            TcpStream::connect(addr),
-        )
-        .await
+        match tokio::time::timeout(std::time::Duration::from_secs(3), TcpStream::connect(addr))
+            .await
         {
             Ok(Ok(s)) => return Ok((s, format!("直连 {addr}"))),
             Ok(Err(e)) => log::info!("[network] 直连 {addr} 失败: {e}"),
@@ -1032,11 +1024,8 @@ pub(crate) async fn open_transport(
     // 2) 外部地址(信令服务器返回的反射地址)
     if let Some(addr) = external {
         if direct.map(|d| d != addr).unwrap_or(true) {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                TcpStream::connect(addr),
-            )
-            .await
+            match tokio::time::timeout(std::time::Duration::from_secs(3), TcpStream::connect(addr))
+                .await
             {
                 Ok(Ok(s)) => return Ok((s, format!("直连外部 {addr}"))),
                 Ok(Err(e)) => log::info!("[network] 直连外部 {addr} 失败: {e}"),
@@ -1074,10 +1063,28 @@ pub(crate) async fn signal_register_loop(
     version: String,
 ) {
     let Some(signal_addr) = signal_addr else {
+        log::warn!("[network] 信令注册未启动: 未配置生效信令服务器");
+        crate::operation_log::op_log(
+            "network",
+            "signal_register_skipped",
+            "reason=未配置生效信令服务器",
+        );
         return;
     };
     log::info!(
         "[network] 信令注册循环启动: id={host_id}, lan={lan}, user={user}, name={name}, os={os}, v={version}, server={signal_addr}"
+    );
+    crate::operation_log::op_log(
+        "network",
+        "signal_register_loop_started",
+        &format!(
+            "id={host_id}, server={signal_addr}, lan={lan}, user={user}, auth={}",
+            if user.is_empty() {
+                "未登录"
+            } else {
+                "待校验令牌"
+            }
+        ),
     );
     // 读取当前登录账号与令牌(登录/登出后随心跳自动更新归属,同账号设备才能互见;
     // 令牌用于服务端校验身份,服务端以令牌解析出的用户名为准)
@@ -1176,7 +1183,17 @@ async fn signal_keepalive_loop(
                 auth_error: false,
             }) => {
                 auth_failed = false;
-                log::info!("[network] 信令注册完成(长连接保持): {msg}");
+                let auth = if token_now.is_empty() {
+                    "未登录"
+                } else {
+                    "令牌已携带"
+                };
+                log::info!("[network] 信令注册完成(长连接保持): id={host_id}, server={signal_addr}, user={user_now}, auth={auth}, result={msg}");
+                crate::operation_log::op_log(
+                    "network",
+                    "signal_register_ready",
+                    &format!("id={host_id}, server={signal_addr}, user={user_now}, auth={auth}, result={msg}"),
+                );
             }
             Ok(SignalMsg::RegisterAck {
                 ok: false,
@@ -1189,12 +1206,22 @@ async fn signal_keepalive_loop(
                     if !auth_failed {
                         auth_failed = true;
                         log::warn!("[network] 信令注册被拒(登录令牌无效或已过期): {msg}");
+                        crate::operation_log::op_log(
+                            "network",
+                            "signal_register_rejected",
+                            &format!("id={host_id}, server={signal_addr}, reason=令牌无效或已过期"),
+                        );
                         if let Some(app) = &app {
                             crate::hbb_client::handle_auth_expired(app);
                         }
                     }
                 } else {
                     log::warn!("[network] 信令注册被拒: {msg}");
+                    crate::operation_log::op_log(
+                        "network",
+                        "signal_register_rejected",
+                        &format!("id={host_id}, server={signal_addr}, reason={msg}"),
+                    );
                 }
                 drop(stream);
                 tokio::time::sleep(if auth_failed {
@@ -1251,7 +1278,19 @@ async fn signal_keepalive_loop(
                     ..
                 }) => {
                     if auth_changed {
-                        log::info!("[network] 归属账号/令牌已更新为 {user_tick}");
+                        let auth = if token_tick.is_empty() {
+                            "未登录"
+                        } else {
+                            "令牌已携带"
+                        };
+                        log::info!("[network] 信令设备归属已更新: id={host_id}, user={user_tick}, auth={auth}");
+                        crate::operation_log::op_log(
+                            "network",
+                            "signal_registration_owner_updated",
+                            &format!(
+                                "id={host_id}, server={signal_addr}, user={user_tick}, auth={auth}"
+                            ),
+                        );
                         last_user = user_tick;
                         last_token = token_tick;
                     }
@@ -1298,9 +1337,7 @@ async fn signal_keepalive_loop(
 }
 
 /// 读取信令服务器应答(8 秒超时)。
-async fn read_signal_ack(
-    stream: &mut TcpStream,
-) -> Result<dcr_server::message::SignalMsg, String> {
+async fn read_signal_ack(stream: &mut TcpStream) -> Result<dcr_server::message::SignalMsg, String> {
     tokio::time::timeout(
         std::time::Duration::from_secs(8),
         dcr_server::framing::read_msg(stream),
@@ -1553,7 +1590,9 @@ mod tests {
     #[test]
     fn msg_tag_serialization() {
         // 序列化后应含内部标签 `t`
-        let hello_ack = Msg::HelloAck { id: "peer-1".into() };
+        let hello_ack = Msg::HelloAck {
+            id: "peer-1".into(),
+        };
         let s = serde_json::to_string(&hello_ack).unwrap();
         assert!(s.contains("\"t\":\"hello-ack\""));
 
@@ -1589,7 +1628,9 @@ mod tests {
                 app: "desktop-cr".into(),
                 ver: 1,
             },
-            Msg::HelloAck { id: "host-1".into() },
+            Msg::HelloAck {
+                id: "host-1".into(),
+            },
             Msg::Frame {
                 w: 1280,
                 h: 720,
@@ -1612,7 +1653,9 @@ mod tests {
                 code: Some("KeyA".into()),
                 mods: vec!["Control".into()],
             },
-            Msg::Clipboard { text: "你好".into() },
+            Msg::Clipboard {
+                text: "你好".into(),
+            },
             Msg::Stream {
                 fps: 30,
                 jpeg_quality: 85,
@@ -1691,7 +1734,9 @@ mod tests {
 
     /// 测试辅助:生成带模式的测试文件(每文件唯一偏移,便于字节级比对)。
     fn make_src_file(path: &std::path::Path, base: u8, size: usize) {
-        let bytes: Vec<u8> = (0..size).map(|i| base.wrapping_add((i % 251) as u8)).collect();
+        let bytes: Vec<u8> = (0..size)
+            .map(|i| base.wrapping_add((i % 251) as u8))
+            .collect();
         std::fs::write(path, bytes).unwrap();
     }
 
@@ -1735,7 +1780,10 @@ mod tests {
         }
         write_msg(
             &mut *writer.lock().await,
-            &Msg::FileEnd { id, total_chunks: seq },
+            &Msg::FileEnd {
+                id,
+                total_chunks: seq,
+            },
         )
         .await
         .unwrap();
@@ -1790,7 +1838,11 @@ mod tests {
         assert_eq!(acks.len(), 4, "应收到 4 条 FileAck,实际: {acks:?}");
         for a in &acks {
             match a {
-                Msg::FileAck { id: aid, received, total: t } => {
+                Msg::FileAck {
+                    id: aid,
+                    received,
+                    total: t,
+                } => {
                     assert_eq!(*aid, id);
                     assert_eq!(total, *t);
                     assert!(*received <= total);
@@ -1800,7 +1852,9 @@ mod tests {
         }
         // 结束应答应报完整进度
         match acks.last() {
-            Some(Msg::FileAck { received, total: t, .. }) => {
+            Some(Msg::FileAck {
+                received, total: t, ..
+            }) => {
                 assert_eq!(*received, total);
                 assert_eq!(*t, total);
             }
