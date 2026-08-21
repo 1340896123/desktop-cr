@@ -28,7 +28,7 @@ import {
   type AccountSession,
 } from './services/auth';
 import { palette, fontFamily, spacing } from './theme/tokens';
-import { onWindowMaximizedChange, openFileTransferWindow } from './services/window';
+import { onWindowMaximizedChange, openFileTransferWindow, openRemoteSessionWindow } from './services/window';
 
 const useStyles = makeStyles({
   root: {
@@ -215,9 +215,12 @@ export const App: React.FC = () => {
     setView('home');
   };
 
-  // 进入远程桌面：先发起连接，成功后再切到会话视图
+  // 进入远程桌面:Tauri 模式弹出独立会话窗口(窗口内自行连接);
+  // 浏览器模式回退页内会话视图
   const handleEnterDesktop = async () => {
     if (!selected) return;
+    const opened = await openRemoteSessionWindow(selected.id, selected.name);
+    if (opened) return;
     setConnecting(true);
     try {
       const next = await connectToDevice(selected.id);
@@ -238,11 +241,17 @@ export const App: React.FC = () => {
   };
 
   // 远程协助页：匹配到对端设备后连接；若不在设备列表则补充进列表以便进入会话视图
+  // Tauri 模式弹出独立会话窗口,浏览器模式回退页内会话视图
   const handleConnectPeer = async (peerId: string, name: string) => {
     setDevices((prev) =>
       prev.some((d) => d.id === peerId) ? prev : [...prev, { id: peerId, name, status: 'online' }],
     );
     setSelectedId(peerId);
+    const opened = await openRemoteSessionWindow(peerId, name);
+    if (opened) {
+      showToast(`已打开远程桌面窗口 ${name}`);
+      return;
+    }
     setConnecting(true);
     try {
       const next = await connectToDevice(peerId);

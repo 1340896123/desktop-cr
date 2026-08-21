@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::task::JoinHandle;
 
@@ -76,7 +76,8 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            host_enabled: false,
+            // 默认开启被控端:应用启动即监听端口并向信令注册,本机设备默认可被同账号发现
+            host_enabled: true,
             host_port: 21118,
             peers: Vec::new(),
             keep_running_on_exit: false,
@@ -155,6 +156,10 @@ static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// 被控端任务句柄。
 static HOST_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+
+/// 最近一次设备发现结果。列表每 5 秒自动刷新，只有结果变化才写操作日志，避免淹没诊断记录。
+#[cfg(target_os = "windows")]
+static DISCOVERY_SNAPSHOT: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
 
 /// 流参数(全局共享)。
 static STREAM_CFG: Mutex<StreamConfig> = Mutex::new(StreamConfig {
@@ -264,10 +269,7 @@ pub(crate) fn apply_stream_cfg(fps: u32, jpeg_quality: u8, width: u32, height: u
 }
 
 fn config_file() -> PathBuf {
-    let dir = CONFIG_DIR
-        .get()
-        .cloned()
-        .unwrap_or_else(default_config_dir);
+    let dir = CONFIG_DIR.get().cloned().unwrap_or_else(default_config_dir);
     dir.join("config.json")
 }
 
@@ -324,8 +326,15 @@ fn account_server_host(server: &str) -> Option<String> {
 /// 账号服务与信令服务通常同机部署。首次登录或旧配置仍为内置公网默认值时,
 /// 自动将信令切到登录账号所在主机；用户明确填写的自定义信令地址保持不变。
 pub(crate) fn effective_signal_server(cfg: &AppConfig) -> Option<String> {
-    let configured = cfg.signal_server.as_deref().filter(|s| !s.trim().is_empty());
-    if let Some(host) = cfg.account.as_ref().and_then(|a| account_server_host(&a.server)) {
+    let configured = cfg
+        .signal_server
+        .as_deref()
+        .filter(|s| !s.trim().is_empty());
+    if let Some(host) = cfg
+        .account
+        .as_ref()
+        .and_then(|a| account_server_host(&a.server))
+    {
         if configured.is_none() || configured == Some(DEFAULT_SIGNAL_SERVER) {
             return Some(format!("{host}:21116"));
         }
@@ -336,12 +345,27 @@ pub(crate) fn effective_signal_server(cfg: &AppConfig) -> Option<String> {
 /// 生效的中继服务器地址。账号服务与中继服务可以分离,登录不参与地址推导。
 pub(crate) fn effective_relay_server(cfg: &AppConfig) -> Option<String> {
     let configured = cfg.relay_server.as_deref().filter(|s| !s.trim().is_empty());
-    if let Some(host) = cfg.account.as_ref().and_then(|a| account_server_host(&a.server)) {
+    if let Some(host) = cfg
+        .account
+        .as_ref()
+        .and_then(|a| account_server_host(&a.server))
+    {
         if configured.is_none() || configured == Some(DEFAULT_RELAY_SERVER) {
             return Some(format!("{host}:21117"));
         }
     }
     configured.map(str::to_string)
+}
+
+/// 记录设备发现状态变化。明细同时保留在普通日志中，操作日志仅保留状态转变。
+#[cfg(target_os = "windows")]
+fn log_discovery_snapshot(detail: String) {
+    let mut previous = DISCOVERY_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());
+    if previous.as_deref() == Some(detail.as_str()) {
+        return;
+    }
+    *previous = Some(detail.clone());
+    crate::operation_log::op_log("hbb_client", "device_discovery", &detail);
 }
 
 /// 登录令牌失效处理:通知前端重新登录(广播 `auth-expired`)并清除本地会话。
@@ -354,7 +378,11 @@ pub(crate) fn handle_auth_expired(app: &AppHandle) {
         if let Err(e) = save_app_config_inner(&cfg) {
             log::warn!("[hbb_client] 清除过期会话失败: {e}");
         }
-        crate::operation_log::op_log("hbb_client", "auth_expired", "登录令牌已过期,已清除本地会话");
+        crate::operation_log::op_log(
+            "hbb_client",
+            "auth_expired",
+            "登录令牌已过期,已清除本地会话",
+        );
     }
 }
 
@@ -382,7 +410,11 @@ pub fn save_app_config(config: AppConfig) -> Result<(), String> {
     crate::operation_log::op_log(
         "hbb_client",
         "save_app_config",
-        &format!("host_port={} peers={}", config.host_port, config.peers.len()),
+        &format!(
+            "host_port={} peers={}",
+            config.host_port,
+            config.peers.len()
+        ),
     );
     result
 }
@@ -418,7 +450,7 @@ pub async fn list_devices(app: AppHandle) -> Vec<DeviceInfo> {
         // 已登录时信令服务器取账号服务主机(令牌只在该部署有效),避免登录到
         // 自定义服务器后仍访问旧信令服务器导致同账号设备完全发现不到。
         let mut signal_peers = Vec::new();
-        if let Some(sig) = effective_signal_server(&cfg) {
+        let mut discovery_result = if let Some(sig) = effective_signal_server(&cfg) {
             let (my_user, my_token) = cfg
                 .account
                 .as_ref()
@@ -432,11 +464,33 @@ pub async fn list_devices(app: AppHandle) -> Vec<DeviceInfo> {
                         log::warn!("[hbb_client] 信令认证失败(登录令牌无效或已过期),通知重新登录");
                         handle_auth_expired(&app);
                     }
+                    let peer_summary = peers
+                        .iter()
+                        .map(|peer| format!("{}@{}", peer.id, peer.owner))
+                        .collect::<Vec<_>>()
+                        .join("|");
+                    log::info!(
+                        "[hbb_client] 信令发现响应: server={sig}, requested_user={my_user}, token={}, auth_error={auth_error}, peers={} [{peer_summary}]",
+                        if my_token.is_empty() { "未携带" } else { "已携带" },
+                        peers.len(),
+                    );
+                    let response = format!(
+                        "server={sig}, requested_user={my_user}, token={}, auth_error={auth_error}, signal_peers={}",
+                        if my_token.is_empty() { "未携带" } else { "已携带" },
+                        peers.len(),
+                    );
                     signal_peers = peers;
+                    response
                 }
-                Err(e) => log::warn!("[hbb_client] 信令设备列表获取失败: {e}"),
+                Err(e) => {
+                    log::warn!("[hbb_client] 信令设备列表获取失败: server={sig}, user={my_user}, error={e}");
+                    format!("server={sig}, requested_user={my_user}, result=获取失败, error={e}")
+                }
             }
-        }
+        } else {
+            log::warn!("[hbb_client] 信令设备发现未执行: 未配置生效信令服务器");
+            "result=未执行, reason=未配置生效信令服务器".into()
+        };
         let signal_online: HashSet<String> = signal_peers.iter().map(|p| p.id.clone()).collect();
 
         for (i, peer) in cfg.peers.iter().enumerate() {
@@ -474,12 +528,18 @@ pub async fn list_devices(app: AppHandle) -> Vec<DeviceInfo> {
             };
             // 已登录账号时仅展示本账号设备,避免混入其他账号的在线设备
             let my_user = cfg.account.as_ref().map(|a| a.username.clone());
+            let mut local_skipped = 0usize;
+            let mut owner_filtered = 0usize;
+            let mut known_merged = 0usize;
+            let mut signal_added = 0usize;
             for p in signal_peers {
                 if p.id == local_id {
+                    local_skipped += 1;
                     continue;
                 }
                 if let Some(u) = &my_user {
                     if p.owner != *u {
+                        owner_filtered += 1;
                         continue;
                     }
                 }
@@ -494,9 +554,23 @@ pub async fn list_devices(app: AppHandle) -> Vec<DeviceInfo> {
                         status: "online".into(),
                         platform: "signal".into(),
                     });
+                    signal_added += 1;
+                } else {
+                    known_merged += 1;
                 }
             }
+            discovery_result.push_str(&format!(
+                ", signal_added={signal_added}, known_merged={known_merged}, local_skipped={local_skipped}, owner_filtered={owner_filtered}"
+            ));
         }
+
+        discovery_result.push_str(&format!(
+            ", visible_devices={}, visible_online={}",
+            devices.len(),
+            devices.iter().filter(|d| d.status == "online").count(),
+        ));
+        log::info!("[hbb_client] 设备发现合并结果: {discovery_result}");
+        log_discovery_snapshot(discovery_result);
 
         log::info!(
             "[hbb_client] list_devices: 共 {} 个对端(其中 {} 在线)",
@@ -578,7 +652,8 @@ pub async fn connect_to_device(peer_id: String, app: AppHandle) -> Result<Connec
     })?;
 
     // 真实建立连接(直连 → 外部 → 中继);失败时广播断开并返回错误
-    match crate::network::connect_peer(app.clone(), peer_id.clone(), direct, external, relay).await {
+    match crate::network::connect_peer(app.clone(), peer_id.clone(), direct, external, relay).await
+    {
         Ok(via) => {
             crate::operation_log::op_log(
                 "hbb_client",
@@ -612,7 +687,11 @@ pub async fn connect_to_device(peer_id: String, app: AppHandle) -> Result<Connec
 #[tauri::command]
 pub fn disconnect_from_device(app: AppHandle) -> Result<(), String> {
     let peer = crate::network::session_peer().unwrap_or_default();
-    crate::operation_log::op_log("hbb_client", "disconnect_from_device", &format!("peer={peer}"));
+    crate::operation_log::op_log(
+        "hbb_client",
+        "disconnect_from_device",
+        &format!("peer={peer}"),
+    );
     crate::network::close_session();
     let state = ConnectionState {
         connected: false,
@@ -656,7 +735,11 @@ pub(crate) fn quality_params(quality: &str) -> (u8, u32) {
 /// quality: "low/medium/high" → jpeg 质量 50/70/85,档位默认帧率 10/20/30;
 /// fps 为 0 时使用档位默认帧率。
 #[tauri::command]
-pub async fn set_stream_quality(fps: u32, bitrate: Option<u32>, quality: String) -> Result<(), String> {
+pub async fn set_stream_quality(
+    fps: u32,
+    bitrate: Option<u32>,
+    quality: String,
+) -> Result<(), String> {
     let _ = bitrate; // 协议保留参数(LAN 直连下无需码率控制)
     let (jpeg_quality, default_fps) = quality_params(&quality);
     let fps = if fps == 0 {
@@ -733,12 +816,9 @@ pub async fn set_stream_resolution(width: u32, height: u32, fps: u32) -> Result<
     Ok(())
 }
 
-/// 切换全屏(真实 Tauri 窗口操作,保持原实现)。
+/// 切换全屏:作用于发起调用的窗口(独立会话窗口内即全屏该窗口)。
 #[tauri::command]
-pub fn set_fullscreen(fullscreen: bool, app: AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "找不到主窗口 (main)".to_string())?;
+pub fn set_fullscreen(fullscreen: bool, window: tauri::WebviewWindow) -> Result<(), String> {
     let result = window
         .set_fullscreen(fullscreen)
         .map_err(|e| format!("设置全屏失败: {e}"));
@@ -795,6 +875,86 @@ pub fn get_transfer_device_name() -> Option<String> {
         .clone()
 }
 
+/// 独立远程会话窗口的目标设备信息(主窗口打开窗口时写入,窗口页面读取)。
+static REMOTE_SESSION_INFO: Mutex<Option<RemoteSessionInfo>> = Mutex::new(None);
+
+/// 独立远程会话窗口的目标设备信息。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSessionInfo {
+    pub peer_id: String,
+    pub device_name: String,
+}
+
+/// 打开独立远程会话窗口(单例:已存在时写入新目标并聚焦到前台)。
+///
+/// 目标设备写入静态变量,由窗口页面经 `get_remote_session_info` 读取后自行
+/// 发起连接(连接会话为全局单例,由该窗口全权管理生命周期)。
+///
+/// 窗口关闭时若仍有活跃会话则自动断开,防止关窗后会话悬挂。
+///
+/// 注意:必须为 async 命令 —— Windows 上 `WebviewWindowBuilder::build()`
+/// 在同步 command 中会死锁(同 `open_file_transfer_window`)。
+#[tauri::command]
+pub async fn open_remote_session_window(
+    app: AppHandle,
+    peer_id: String,
+    device_name: String,
+) -> Result<(), String> {
+    *REMOTE_SESSION_INFO
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(RemoteSessionInfo {
+        peer_id: peer_id.clone(),
+        device_name: device_name.clone(),
+    });
+    if let Some(win) = app.get_webview_window("remote-session") {
+        // 已开窗口:通知其切换目标并重连(仅会话窗口监听该事件)
+        let _ = app.emit(
+            "remote-session-target",
+            serde_json::json!({ "peerId": peer_id, "deviceName": device_name }),
+        );
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    let win = tauri::WebviewWindowBuilder::new(
+        &app,
+        "remote-session",
+        tauri::WebviewUrl::App("session.html".into()),
+    )
+    .title("远程桌面")
+    .inner_size(1280.0, 800.0)
+    .min_inner_size(640.0, 480.0)
+    .resizable(true)
+    .build()
+    .map_err(|e| format!("打开远程会话窗口失败: {e}"))?;
+    // 关窗即断开:窗口销毁时清理全局会话,避免会话悬挂到下一次连接
+    let handle = app.clone();
+    win.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            if crate::network::session_peer().is_some() {
+                log::info!("[hbb_client] 远程会话窗口关闭,自动断开会话");
+                crate::network::close_session();
+                let state = ConnectionState {
+                    connected: false,
+                    peer_id: None,
+                    error: None,
+                };
+                let _ = handle.emit("connection-state", &state);
+            }
+        }
+    });
+    Ok(())
+}
+
+/// 读取独立远程会话窗口的目标设备信息(未设置时返回 None)。
+#[tauri::command]
+pub fn get_remote_session_info() -> Option<RemoteSessionInfo> {
+    REMOTE_SESSION_INFO
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
 /// 读取系统剪贴板文本。
 ///
 /// Windows 下读取 Unicode 文本;非 Windows 平台返回空串并记录日志。
@@ -834,10 +994,9 @@ pub async fn sync_clipboard(app: AppHandle) -> Result<String, String> {
     let text = get_clipboard_text()?;
     // 有活跃会话时真实同步到对端
     if crate::network::session_peer().is_some() {
-        let sent = crate::network::session_send(crate::network::OutMsg::Clipboard {
-            text: text.clone(),
-        })
-        .await;
+        let sent =
+            crate::network::session_send(crate::network::OutMsg::Clipboard { text: text.clone() })
+                .await;
         if !sent {
             log::warn!("[hbb_client] 剪贴板同步失败: 会话已断开");
         }
@@ -998,7 +1157,12 @@ async fn send_file_task(id: u32, path: String, name: String, size: u64, app: App
             }),
         );
     }
-    if !crate::network::session_send(crate::network::Msg::FileEnd { id, total_chunks: seq }).await {
+    if !crate::network::session_send(crate::network::Msg::FileEnd {
+        id,
+        total_chunks: seq,
+    })
+    .await
+    {
         log::warn!("[hbb_client] 文件结束通知失败: 会话已断开(id={id})");
         return;
     }
@@ -1100,7 +1264,13 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "unknown".into());
         let device_version = env!("CARGO_PKG_VERSION").to_string();
+        log::info!(
+            "[hbb_client] 被控端启动准备注册: id={host_id}, port={port}, signal_server={}, account={}",
+            signal_addr.as_deref().unwrap_or("(未配置)"),
+            if device_user.is_empty() { "未登录" } else { device_user.as_str() },
+        );
 
+        let emit_handle = app.clone();
         let handle = tokio::spawn(async move {
             let listener = match tokio::net::TcpListener::from_std(std_listener) {
                 Ok(l) => l,
@@ -1158,12 +1328,20 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
                 serve.await;
             }
             // host 退出(含异常返回)后广播停止
-            let _ = app.emit("host-state", serde_json::json!({ "running": false, "port": 0 }));
+            let _ = app.emit(
+                "host-state",
+                serde_json::json!({ "running": false, "port": 0 }),
+            );
         });
         *HOST_TASK
             .lock()
             .map_err(|e| format!("failed to lock host task: {e}"))? = Some(handle);
         log::info!("[hbb_client] start_host: 监听 0.0.0.0:{port}");
+        // 广播运行中(与停止/异常退出的 running:false 对称,供设置页与托盘菜单同步状态)
+        let _ = emit_handle.emit(
+            "host-state",
+            serde_json::json!({ "running": true, "port": port }),
+        );
         crate::operation_log::op_log("hbb_client", "start_host", &format!("port={port}"));
         Ok(())
     }
@@ -1180,7 +1358,10 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
             &format!("失败: 非 Windows 平台不支持 (port={port})"),
         );
         // 广播"未运行"以保持状态一致(host 实际并未启动,避免使用伪造的 running:true)
-        let _ = app.emit("host-state", serde_json::json!({ "running": false, "port": 0 }));
+        let _ = app.emit(
+            "host-state",
+            serde_json::json!({ "running": false, "port": 0 }),
+        );
         Err(msg)
     }
 }
@@ -1196,8 +1377,11 @@ pub fn stop_host(app: AppHandle) -> Result<(), String> {
     // host 停止时一并停止抓帧与音频采集(由 start_host 启动)
     let _ = crate::capture::stop_capture();
     crate::audio::stop_audio_capture();
-    app.emit("host-state", serde_json::json!({ "running": false, "port": 0 }))
-        .map_err(|e| format!("failed to emit host-state: {e}"))?;
+    app.emit(
+        "host-state",
+        serde_json::json!({ "running": false, "port": 0 }),
+    )
+    .map_err(|e| format!("failed to emit host-state: {e}"))?;
     log::info!("[hbb_client] stop_host: 已停止");
     crate::operation_log::op_log("hbb_client", "stop_host", "");
     Ok(())
@@ -1318,7 +1502,9 @@ mod tests {
     #[test]
     fn apply_stream_cfg_clamps() {
         // 持锁避免与 operation_log 测试并发写同一日志文件
-        let _guard = crate::operation_log::test_lock::LOG_WRITE_LOCK.lock().unwrap();
+        let _guard = crate::operation_log::test_lock::LOG_WRITE_LOCK
+            .lock()
+            .unwrap();
         // 越界输入: fps>60 截到 60、quality>100 截到 100、超大分辨率等比缩到 1920 边
         apply_stream_cfg(99, 200, 4000, 3000, String::new());
         let cfg = stream_cfg();
@@ -1351,8 +1537,14 @@ mod tests {
             account: None,
             ..AppConfig::default()
         };
-        assert_eq!(effective_signal_server(&cfg).as_deref(), Some("sig.example.com:21116"));
-        assert_eq!(effective_relay_server(&cfg).as_deref(), Some("relay.example.com:21117"));
+        assert_eq!(
+            effective_signal_server(&cfg).as_deref(),
+            Some("sig.example.com:21116")
+        );
+        assert_eq!(
+            effective_relay_server(&cfg).as_deref(),
+            Some("relay.example.com:21117")
+        );
 
         // 已登录:明确配置的独立信令/中继地址优先保留
         let cfg = AppConfig {
@@ -1365,8 +1557,14 @@ mod tests {
             }),
             ..AppConfig::default()
         };
-        assert_eq!(effective_signal_server(&cfg).as_deref(), Some("sig.example.com:21116"));
-        assert_eq!(effective_relay_server(&cfg).as_deref(), Some("relay.example.com:21117"));
+        assert_eq!(
+            effective_signal_server(&cfg).as_deref(),
+            Some("sig.example.com:21116")
+        );
+        assert_eq!(
+            effective_relay_server(&cfg).as_deref(),
+            Some("relay.example.com:21117")
+        );
 
         // 配置仍为内置默认值时,登录账号主机提供同部署信令/中继
         let cfg = AppConfig {
@@ -1379,15 +1577,30 @@ mod tests {
             }),
             ..AppConfig::default()
         };
-        assert_eq!(effective_signal_server(&cfg).as_deref(), Some("account.example.com:21116"));
-        assert_eq!(effective_relay_server(&cfg).as_deref(), Some("account.example.com:21117"));
+        assert_eq!(
+            effective_signal_server(&cfg).as_deref(),
+            Some("account.example.com:21116")
+        );
+        assert_eq!(
+            effective_relay_server(&cfg).as_deref(),
+            Some("account.example.com:21117")
+        );
     }
 
     #[test]
     fn account_server_host_parses() {
-        assert_eq!(account_server_host("http://120.78.77.248:21120").as_deref(), Some("120.78.77.248"));
-        assert_eq!(account_server_host("https://svc.example.com").as_deref(), Some("svc.example.com"));
-        assert_eq!(account_server_host("myhost:1234").as_deref(), Some("myhost"));
+        assert_eq!(
+            account_server_host("http://120.78.77.248:21120").as_deref(),
+            Some("120.78.77.248")
+        );
+        assert_eq!(
+            account_server_host("https://svc.example.com").as_deref(),
+            Some("svc.example.com")
+        );
+        assert_eq!(
+            account_server_host("myhost:1234").as_deref(),
+            Some("myhost")
+        );
         assert_eq!(account_server_host("").as_deref(), None);
     }
 
@@ -1437,8 +1650,14 @@ mod tests {
         assert_eq!(back.relay_fallback_enabled, cfg.relay_fallback_enabled);
         assert_eq!(back.peers[0].addr, "192.168.1.5:21118");
         assert_eq!(back.peers[0].platform.as_deref(), Some("windows"));
-        assert_eq!(back.signal_server.as_deref(), Some("signal.example.com:21116"));
-        assert_eq!(back.relay_server.as_deref(), Some("relay.example.com:21117"));
+        assert_eq!(
+            back.signal_server.as_deref(),
+            Some("signal.example.com:21116")
+        );
+        assert_eq!(
+            back.relay_server.as_deref(),
+            Some("relay.example.com:21117")
+        );
         assert_eq!(back.host_id, "dcr-test-pc");
         assert_eq!(back.account.as_ref().unwrap().username, "alice");
         assert_eq!(back.account.as_ref().unwrap().token, "jwt-token");
@@ -1448,9 +1667,18 @@ mod tests {
         let back: AppConfig = serde_json::from_str(old).unwrap();
         assert!(back.signal_server.is_none());
         assert!(back.relay_server.is_none());
-        assert!(back.account.is_none(), "旧配置无 account 字段,应回退为 None");
+        assert!(
+            back.account.is_none(),
+            "旧配置无 account 字段,应回退为 None"
+        );
         assert!(!back.host_id.is_empty(), "host_id 应有默认值");
-        assert!(!back.keep_running_on_exit, "旧配置无 keepRunningOnExit,应回退 false");
-        assert!(back.relay_fallback_enabled, "旧配置无 relayFallbackEnabled,应回退 true");
+        assert!(
+            !back.keep_running_on_exit,
+            "旧配置无 keepRunningOnExit,应回退 false"
+        );
+        assert!(
+            back.relay_fallback_enabled,
+            "旧配置无 relayFallbackEnabled,应回退 true"
+        );
     }
 }

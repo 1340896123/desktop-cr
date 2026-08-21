@@ -12,6 +12,7 @@ mod input_injector;
 mod media_pipeline;
 mod network;
 mod operation_log;
+mod tray;
 mod virtual_display;
 
 use tauri::Manager;
@@ -40,6 +41,8 @@ fn main() {
                     }
                 });
             }
+            // 系统托盘:常驻图标 + 常用菜单;失败仅记日志,不影响主功能
+            tray::setup(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -76,6 +79,9 @@ fn main() {
             // 独立文件传输窗口
             hbb_client::open_file_transfer_window,
             hbb_client::get_transfer_device_name,
+            // 独立远程会话窗口
+            hbb_client::open_remote_session_window,
+            hbb_client::get_remote_session_info,
             // 被控端管理
             hbb_client::start_host,
             hbb_client::stop_host,

@@ -8,11 +8,12 @@ export default defineConfig({
   build: {
     outDir: '../dist',
     emptyOutDir: true,
-    // 多页面入口:主窗口 + 独立文件传输窗口(相对项目根目录)
+    // 多页面入口:主窗口 + 独立文件传输/远程会话窗口(相对项目根目录)
     rollupOptions: {
       input: {
         main: 'src/index.html',
         transfer: 'src/transfer.html',
+        session: 'src/session.html',
       },
     },
   },

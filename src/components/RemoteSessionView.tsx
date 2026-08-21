@@ -556,14 +556,16 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
             {selected ? selected.name || `显示屏 ${monitors.indexOf(selected) + 1}` : '正在获取远程显示器…'}
             <ChevronDownRegular fontSize={12} />
           </div>
-          <button
-            type="button"
-            className={styles.addBtn}
-            aria-label="添加显示屏"
-            onClick={onOpenVirtualDisplays}
-          >
-            <AddRegular fontSize={16} />
-          </button>
+          {onOpenVirtualDisplays && (
+            <button
+              type="button"
+              className={styles.addBtn}
+              aria-label="添加显示屏"
+              onClick={onOpenVirtualDisplays}
+            >
+              <AddRegular fontSize={16} />
+            </button>
+          )}
         </div>
 
         <div className={styles.barRight}>

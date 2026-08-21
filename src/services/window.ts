@@ -55,3 +55,16 @@ export async function openFileTransferWindow(deviceName?: string): Promise<boole
   await invoke('open_file_transfer_window', { deviceName: deviceName ?? null });
   return true;
 }
+
+/**
+ * 打开独立远程会话窗口(单例:已存在时切换目标并聚焦),连接由该窗口自行发起。
+ * 返回是否成功;浏览器模式返回 false,由调用方回退到页内会话视图。
+ */
+export async function openRemoteSessionWindow(peerId: string, deviceName: string): Promise<boolean> {
+  if (!isTauri()) {
+    console.warn('[window] 浏览器模式,无法打开独立窗口');
+    return false;
+  }
+  await invoke('open_remote_session_window', { peerId, deviceName });
+  return true;
+}

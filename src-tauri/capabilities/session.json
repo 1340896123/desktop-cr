@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "remote-session-capability",
+  "description": "远程会话窗口能力:连接/断开/流参数/剪贴板/显示器切换/会话指标/窗口全屏",
+  "windows": ["remote-session"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging"
+  ]
+}
