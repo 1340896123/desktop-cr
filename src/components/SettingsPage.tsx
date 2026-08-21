@@ -26,13 +26,6 @@ import { startHost, stopHost, isHostRunning, onHostStateChange, type HostState }
 import { getAppConfig, saveAppConfig, genPeerId, type AppConfig } from '../services/config';
 import { getOperationLogs, type OperationLogEntry } from '../services/logs';
 import { getIncomingDir } from '../services/fileTransfer';
-import { runMediaPipelineTest, type PipelineReport } from '../services/media';
-import {
-  runRealtimeBench,
-  runAudioRelayBench,
-  type RealtimeBenchReport,
-  type AudioRelayBenchReport,
-} from '../services/bench';
 
 const useStyles = makeStyles({
   page: {
@@ -401,69 +394,6 @@ const useStyles = makeStyles({
     fontWeight: 600,
     color: '#111827',
   },
-  paramRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '10px',
-    flexWrap: 'wrap',
-    marginBottom: '8px',
-  },
-  paramLabel: {
-    fontFamily,
-    fontSize: '12px',
-    color: palette.textSecondary,
-    minWidth: '52px',
-  },
-  paramInput: {
-    width: '150px',
-    height: '28px',
-    padding: '0 8px',
-    backgroundColor: palette.background,
-    border: `1px solid ${palette.borderLight}`,
-    borderRadius: radius.control,
-    fontFamily,
-    fontSize: '12px',
-    color: palette.textPrimary,
-    outline: 'none',
-
-    '&:focus': {
-      border: `1px solid ${palette.primary}`,
-    },
-  },
-  paramCheck: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '6px',
-    fontFamily,
-    fontSize: '12px',
-    color: palette.textPrimary,
-    cursor: 'pointer',
-  },
-  benchResult: {
-    margin: '0 16px 16px',
-    padding: '12px',
-    backgroundColor: '#F9FAFB',
-    border: `1px solid ${palette.borderLight}`,
-    borderRadius: radius.control,
-    fontFamily: 'monospace',
-    fontSize: '12px',
-    lineHeight: '20px',
-    color: palette.textPrimary,
-    whiteSpace: 'pre-wrap',
-    wordBreak: 'break-all',
-    maxHeight: '260px',
-    overflowY: 'auto',
-  },
-  benchWarn: {
-    margin: '0 16px 16px',
-    padding: '10px 12px',
-    backgroundColor: '#FEF3C7',
-    border: '1px solid #F59E0B',
-    borderRadius: radius.control,
-    fontFamily,
-    fontSize: '12px',
-    color: '#92400E',
-  },
 });
 
 const useSwitchStyles = makeStyles({
@@ -544,7 +474,7 @@ export const ToggleSwitch: React.FC<ToggleSwitchProps> = ({ on, onChange, disabl
   );
 };
 
-type TabKey = '常规' | '安全' | '键盘' | '网络' | '账号' | '日志' | '诊断';
+type TabKey = '常规' | '安全' | '键盘' | '网络' | '账号' | '日志';
 
 /** 校验对端地址格式 host:port（IPv4 / hostname，端口 1..65535） */
 function isValidPeerAddr(addr: string): boolean {
@@ -564,10 +494,9 @@ function formatLogTime(time: string): string {
 }
 
 /**
- * 设置界面：顶部「常规/安全/键盘/网络/账号/日志/诊断」标签页 + 卡片式设置项。
+ * 设置界面：顶部「常规/安全/键盘/网络/账号/日志」标签页 + 卡片式设置项。
  * 「网络」tab 为真实功能（被控端模式 + 对端设备列表，读写持久化配置），
- * 「诊断」tab 提供媒体全链路测试与实时/音频回环基准入口，「账号」tab 展示当前
- * 登录账号与退出登录，「日志」tab 展示操作日志，其余 tab 保持静态展示。
+ * 「账号」tab 展示当前登录账号与退出登录，「日志」tab 展示操作日志，其余 tab 保持静态展示。
  */
 export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
   const styles = useStyles();
@@ -591,32 +520,6 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
   const [logsError, setLogsError] = useState<string | null>(null);
   const [incomingDir, setIncomingDir] = useState('');
 
-  // 诊断 tab:媒体全链路测试参数与结果
-  const [mediaKind, setMediaKind] = useState<'video' | 'audio' | 'both'>('video');
-  const [mediaSeconds, setMediaSeconds] = useState('5');
-  const [mediaOutDir, setMediaOutDir] = useState('');
-  const [mediaRunning, setMediaRunning] = useState(false);
-  const [mediaReport, setMediaReport] = useState<PipelineReport | null>(null);
-
-  // 诊断 tab:实时链路基准参数与结果
-  const [benchMode, setBenchMode] = useState<'loopback' | 'relay'>('loopback');
-  const [benchRelayAddr, setBenchRelayAddr] = useState('120.78.77.248:21117');
-  const [benchSeconds, setBenchSeconds] = useState('5');
-  const [benchTargetFps, setBenchTargetFps] = useState('30');
-  const [benchSynthetic, setBenchSynthetic] = useState(false);
-  const [benchTargetW, setBenchTargetW] = useState('1280');
-  const [benchTargetH, setBenchTargetH] = useState('720');
-  const [benchCodec, setBenchCodec] = useState<'jpeg' | 'h264' | 'hevc'>('jpeg');
-  const [benchRunning, setBenchRunning] = useState(false);
-  const [benchReport, setBenchReport] = useState<RealtimeBenchReport | null>(null);
-
-  // 诊断 tab:音频公网回环基准参数与结果
-  const [audioRelayAddr, setAudioRelayAddr] = useState('120.78.77.248:21117');
-  const [audioSeconds, setAudioSeconds] = useState('5');
-  const [audioOutPath, setAudioOutPath] = useState('');
-  const [audioRunning, setAudioRunning] = useState(false);
-  const [audioReport, setAudioReport] = useState<AudioRelayBenchReport | null>(null);
-
   // 加载操作日志（最新在前）
   const loadLogs = async () => {
     setLogsError(null);
@@ -639,11 +542,9 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
       setRelayServerInput(cfg.relayServer ?? '');
       setHostIdInput(cfg.hostId ?? '');
     })();
-    // 真实接收目录(文件传输落盘位置),供「存储路径」与诊断基准输出默认值使用
+    // 真实接收目录(文件传输落盘位置),供「存储路径」展示
     void getIncomingDir().then((dir) => {
       setIncomingDir(dir);
-      setMediaOutDir((prev) => prev || dir);
-      setAudioOutPath((prev) => prev || `${dir}\\audio_loopback_verify.wav`);
     });
     void isHostRunning().then((running) => setHostState((prev) => ({ ...prev, running })));
     void onHostStateChange((state) => setHostState(state)).then((fn) => {
@@ -677,80 +578,6 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
   // 退出后保持被控端运行：翻转 keepRunningOnExit 并经防抖持久化
   const toggleKeepRunningOnExit = () => {
     setConfig((prev) => (prev ? { ...prev, keepRunningOnExit: !prev.keepRunningOnExit } : prev));
-  };
-
-  // 运行媒体全链路测试(真实采集 → 编码 → 回环传输 → 解码 → 落盘)
-  const runMediaTest = async () => {
-    if (mediaRunning) return;
-    setMediaRunning(true);
-    setMediaReport(null);
-    try {
-      const report = await runMediaPipelineTest(
-        mediaKind,
-        Number(mediaSeconds) || 5,
-        mediaOutDir.trim(),
-      );
-      if (!report) {
-        setNotice('非 Tauri 环境，无法运行媒体全链路测试');
-        return;
-      }
-      setMediaReport(report);
-    } catch (error) {
-      setNotice(`媒体全链路测试失败: ${String(error)}`);
-    } finally {
-      setMediaRunning(false);
-    }
-  };
-
-  // 运行实时链路基准(真实 DXGI 采集 → 编码 → 协议帧发送 → 本机解码渲染)
-  const runBench = async () => {
-    if (benchRunning) return;
-    setBenchRunning(true);
-    setBenchReport(null);
-    try {
-      const report = await runRealtimeBench({
-        mode: benchMode,
-        relayAddr: benchMode === 'relay' ? benchRelayAddr.trim() : undefined,
-        seconds: Number(benchSeconds) || 5,
-        targetFps: Number(benchTargetFps) || 30,
-        synthetic: benchSynthetic,
-        targetW: Number(benchTargetW) || 1280,
-        targetH: Number(benchTargetH) || 720,
-        codec: benchCodec,
-      });
-      if (!report) {
-        setNotice('非 Tauri 环境，无法运行实时链路基准');
-        return;
-      }
-      setBenchReport(report);
-    } catch (error) {
-      setNotice(`实时链路基准失败: ${String(error)}`);
-    } finally {
-      setBenchRunning(false);
-    }
-  };
-
-  // 运行音频公网回环基准(真实 WASAPI 回环采集 → 经公网中继回传 → 校验落盘)
-  const runAudioBench = async () => {
-    if (audioRunning) return;
-    setAudioRunning(true);
-    setAudioReport(null);
-    try {
-      const report = await runAudioRelayBench({
-        relayAddr: audioRelayAddr.trim(),
-        seconds: Number(audioSeconds) || 5,
-        outPath: audioOutPath.trim(),
-      });
-      if (!report) {
-        setNotice('非 Tauri 环境，无法运行音频公网回环基准');
-        return;
-      }
-      setAudioReport(report);
-    } catch (error) {
-      setNotice(`音频公网回环基准失败: ${String(error)}`);
-    } finally {
-      setAudioRunning(false);
-    }
   };
 
   // 允许他人远程协助：持久化 hostEnabled 并真实启停被控端（与远程协助页同一接线）
@@ -863,7 +690,7 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
       <h1 className={styles.title}>设置</h1>
 
       <div className={styles.tabs}>
-        {(['常规', '安全', '键盘', '网络', '账号', '日志', '诊断'] as TabKey[]).map((t) => (
+        {(['常规', '安全', '键盘', '网络', '账号', '日志'] as TabKey[]).map((t) => (
           <button
             key={t}
             type="button"
@@ -1345,291 +1172,6 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
             </div>
           )}
         </div>
-      )}
-
-      {tab === '诊断' && (
-        <>
-          {/* 媒体全链路测试：真实采集 → 编码 → 回环传输 → 解码 → 落盘 */}
-          <div className={styles.card}>
-            <div className={styles.row}>
-              <span className={styles.rowIcon}>
-                <FlashRegular fontSize={16} />
-              </span>
-              <div className={styles.rowBody}>
-                <div className={styles.rowTitle}>媒体全链路测试</div>
-                <div className={styles.rowDesc}>
-                  真实采集 → 编码 → 回环传输 → 解码 → 落盘，验证音视频全链路可用性
-                </div>
-              </div>
-            </div>
-            <div className={styles.rowDivider} />
-            <div className={styles.row}>
-              <div className={styles.rowBody}>
-                <div className={styles.paramRow}>
-                  <span className={styles.paramLabel}>管道类型</span>
-                  <span className={styles.selectWrap} style={{ minWidth: 110 }}>
-                    <select
-                      className={styles.select}
-                      value={mediaKind}
-                      onChange={(e) => setMediaKind(e.target.value as 'video' | 'audio' | 'both')}
-                    >
-                      <option value="video">视频</option>
-                      <option value="audio">音频</option>
-                      <option value="both">全部</option>
-                    </select>
-                    <span className={styles.selectChevron}>
-                      <ChevronDownRegular fontSize={12} />
-                    </span>
-                  </span>
-                  <span className={styles.paramLabel} style={{ minWidth: 0 }}>
-                    秒数
-                  </span>
-                  <input
-                    className={styles.paramInput}
-                    style={{ width: 80 }}
-                    value={mediaSeconds}
-                    onChange={(e) => setMediaSeconds(e.target.value)}
-                  />
-                </div>
-                <div className={styles.paramRow}>
-                  <span className={styles.paramLabel}>输出目录</span>
-                  <input
-                    className={styles.pathInput}
-                    style={{ flex: 1 }}
-                    placeholder="留空使用接收目录"
-                    value={mediaOutDir}
-                    onChange={(e) => setMediaOutDir(e.target.value)}
-                  />
-                </div>
-                <button
-                  type="button"
-                  className={styles.grayBtn}
-                  disabled={mediaRunning}
-                  style={mediaRunning ? { opacity: 0.55, cursor: 'not-allowed' } : undefined}
-                  onClick={() => void runMediaTest()}
-                >
-                  {mediaRunning ? '运行中…' : '运行全链路测试'}
-                </button>
-              </div>
-            </div>
-            {mediaReport && (
-              <pre className={styles.benchResult}>{`管道类型: ${mediaReport.kind}
-视频帧数: ${mediaReport.frames}${
-                mediaReport.frameWidth
-                  ? ` | 分辨率: ${mediaReport.frameWidth}x${mediaReport.frameHeight}`
-                  : ''
-              }
-音频: ${
-                mediaReport.audioRate
-                  ? `${mediaReport.audioRate}Hz/${mediaReport.audioChannels}ch 共 ${mediaReport.audioSamples} 采样`
-                  : '无'
-              }
-输出目录: ${mediaReport.outDir}
-耗时: ${mediaReport.elapsedMs} ms`}</pre>
-            )}
-          </div>
-
-          {/* 实时链路基准：真实抓屏 → 编码 → 协议帧发送 → 本机解码渲染 */}
-          <div className={styles.card}>
-            <div className={styles.row}>
-              <span className={styles.rowIcon}>
-                <PlayRegular fontSize={16} />
-              </span>
-              <div className={styles.rowBody}>
-                <div className={styles.rowTitle}>实时链路基准</div>
-                <div className={styles.rowDesc}>
-                  真实 DXGI 抓屏 → 编码 → 协议帧发送 → 本机解码渲染，输出实时帧率与各阶段耗时
-                </div>
-              </div>
-            </div>
-            <div className={styles.rowDivider} />
-            <div className={styles.row}>
-              <div className={styles.rowBody}>
-                <div className={styles.paramRow}>
-                  <span className={styles.paramLabel}>传输模式</span>
-                  <span className={styles.selectWrap} style={{ minWidth: 130 }}>
-                    <select
-                      className={styles.select}
-                      value={benchMode}
-                      onChange={(e) => setBenchMode(e.target.value as 'loopback' | 'relay')}
-                    >
-                      <option value="loopback">loopback(本机回环)</option>
-                      <option value="relay">relay(公网中继)</option>
-                    </select>
-                    <span className={styles.selectChevron}>
-                      <ChevronDownRegular fontSize={12} />
-                    </span>
-                  </span>
-                  <span className={styles.paramLabel} style={{ minWidth: 0 }}>
-                    秒数
-                  </span>
-                  <input
-                    className={styles.paramInput}
-                    style={{ width: 80 }}
-                    value={benchSeconds}
-                    onChange={(e) => setBenchSeconds(e.target.value)}
-                  />
-                  <span className={styles.paramLabel} style={{ minWidth: 0 }}>
-                    目标帧率
-                  </span>
-                  <input
-                    className={styles.paramInput}
-                    style={{ width: 80 }}
-                    value={benchTargetFps}
-                    onChange={(e) => setBenchTargetFps(e.target.value)}
-                  />
-                </div>
-                {benchMode === 'relay' && (
-                  <div className={styles.paramRow}>
-                    <span className={styles.paramLabel}>中继地址</span>
-                    <input
-                      className={styles.pathInput}
-                      style={{ flex: 1 }}
-                      placeholder="relay.example.com:21117"
-                      value={benchRelayAddr}
-                      onChange={(e) => setBenchRelayAddr(e.target.value)}
-                    />
-                  </div>
-                )}
-                <div className={styles.paramRow}>
-                  <span className={styles.paramLabel}>分辨率</span>
-                  <input
-                    className={styles.paramInput}
-                    style={{ width: 80 }}
-                    value={benchTargetW}
-                    onChange={(e) => setBenchTargetW(e.target.value)}
-                  />
-                  <span className={styles.paramLabel} style={{ minWidth: 0 }}>
-                    x
-                  </span>
-                  <input
-                    className={styles.paramInput}
-                    style={{ width: 80 }}
-                    value={benchTargetH}
-                    onChange={(e) => setBenchTargetH(e.target.value)}
-                  />
-                  <span className={styles.paramLabel} style={{ minWidth: 0 }}>
-                    编码
-                  </span>
-                  <span className={styles.selectWrap} style={{ minWidth: 100 }}>
-                    <select
-                      className={styles.select}
-                      value={benchCodec}
-                      onChange={(e) => setBenchCodec(e.target.value as 'jpeg' | 'h264' | 'hevc')}
-                    >
-                      <option value="jpeg">jpeg</option>
-                      <option value="h264">h264(硬件)</option>
-                      <option value="hevc">hevc(硬件)</option>
-                    </select>
-                    <span className={styles.selectChevron}>
-                      <ChevronDownRegular fontSize={12} />
-                    </span>
-                  </span>
-                  <label className={styles.paramCheck}>
-                    <input
-                      type="checkbox"
-                      checked={benchSynthetic}
-                      onChange={(e) => setBenchSynthetic(e.target.checked)}
-                    />
-                    合成帧(跳过真实抓屏)
-                  </label>
-                </div>
-                <button
-                  type="button"
-                  className={styles.grayBtn}
-                  disabled={benchRunning}
-                  style={benchRunning ? { opacity: 0.55, cursor: 'not-allowed' } : undefined}
-                  onClick={() => void runBench()}
-                >
-                  {benchRunning ? '运行中…' : '运行基准'}
-                </button>
-              </div>
-            </div>
-            {benchReport && (
-              <>
-                {benchReport.synthetic && (
-                  <div className={styles.benchWarn}>
-                    注意：本次基准使用合成动画帧（非真实抓屏），结果仅反映编码/传输/渲染链路
-                  </div>
-                )}
-                <pre className={styles.benchResult}>{`模式: ${benchReport.mode}${
-                  benchReport.mode === 'relay' ? ` | 中继: ${benchReport.relay}` : ''
-                } | 时长: ${benchReport.seconds}s | 目标帧率: ${benchReport.targetFps}
-渲染帧数: ${benchReport.framesRendered} | 实时帧率: ${benchReport.realtimeFps.toFixed(1)} fps
-平均抓帧: ${benchReport.avgCaptureMs.toFixed(2)} ms | 平均编码: ${benchReport.avgEncodeMs.toFixed(2)} ms
-平均发送: ${benchReport.avgSendMs.toFixed(2)} ms | 平均解码: ${benchReport.avgDecodeMs.toFixed(2)} ms
-端到端延迟: ${benchReport.avgE2eLatencyMs.toFixed(2)} ms
-传输字节: ${benchReport.totalTransferBytes} | 分辨率: ${benchReport.frameWidth}x${benchReport.frameHeight}`}</pre>
-              </>
-            )}
-          </div>
-
-          {/* 音频公网回环基准：真实 WASAPI 回环采集 → 经公网中继回传 → 校验落盘 */}
-          <div className={styles.card}>
-            <div className={styles.row}>
-              <span className={styles.rowIcon}>
-                <HeadsetRegular fontSize={16} />
-              </span>
-              <div className={styles.rowBody}>
-                <div className={styles.rowTitle}>音频公网回环基准</div>
-                <div className={styles.rowDesc}>
-                  真实系统回环采集 → WAV 经公网中继回传本机 → 校验一致后落盘，需系统正在播放音频
-                </div>
-              </div>
-            </div>
-            <div className={styles.rowDivider} />
-            <div className={styles.row}>
-              <div className={styles.rowBody}>
-                <div className={styles.paramRow}>
-                  <span className={styles.paramLabel}>中继地址</span>
-                  <input
-                    className={styles.pathInput}
-                    style={{ flex: 1 }}
-                    placeholder="relay.example.com:21117"
-                    value={audioRelayAddr}
-                    onChange={(e) => setAudioRelayAddr(e.target.value)}
-                  />
-                  <span className={styles.paramLabel} style={{ minWidth: 0 }}>
-                    秒数
-                  </span>
-                  <input
-                    className={styles.paramInput}
-                    style={{ width: 80 }}
-                    value={audioSeconds}
-                    onChange={(e) => setAudioSeconds(e.target.value)}
-                  />
-                </div>
-                <div className={styles.paramRow}>
-                  <span className={styles.paramLabel}>落盘路径</span>
-                  <input
-                    className={styles.pathInput}
-                    style={{ flex: 1 }}
-                    placeholder="回传音频保存位置(.wav)"
-                    value={audioOutPath}
-                    onChange={(e) => setAudioOutPath(e.target.value)}
-                  />
-                </div>
-                <button
-                  type="button"
-                  className={styles.grayBtn}
-                  disabled={audioRunning}
-                  style={audioRunning ? { opacity: 0.55, cursor: 'not-allowed' } : undefined}
-                  onClick={() => void runAudioBench()}
-                >
-                  {audioRunning ? '运行中…' : '运行基准'}
-                </button>
-              </div>
-            </div>
-            {audioReport && (
-              <pre className={styles.benchResult}>{`中继: ${audioReport.relay} | 采集: ${audioReport.audioSeconds}s ${audioReport.sampleRate}Hz/${audioReport.channels}ch
-采集 PCM: ${audioReport.capturedBytes} B | WAV: ${audioReport.wavBytes} B
-平均 RTT: ${audioReport.avgRttMs.toFixed(2)} ms
-上行: ${audioReport.sendRateMbps.toFixed(2)} Mbps | 下行: ${audioReport.recvRateMbps.toFixed(2)} Mbps | 双向: ${audioReport.roundtripRateMbps.toFixed(2)} Mbps
-总传输: ${audioReport.totalTransferBytes} B | 耗时: ${audioReport.transferElapsedMs} ms
-落盘: ${audioReport.outPath}`}</pre>
-            )}
-          </div>
-        </>
       )}
 
       {notice && <div className={styles.noticeText}>{notice}</div>}
