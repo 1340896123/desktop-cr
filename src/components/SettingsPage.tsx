@@ -44,6 +44,14 @@ const useStyles = makeStyles({
     flexDirection: 'column',
     gap: `${spacing.md}px`,
     maxWidth: '840px',
+
+    // 窄窗口:收窄页边距,给设置项留出横向空间
+    '@media (max-width: 760px)': {
+      padding: `${spacing.md}px ${spacing.lg}px`,
+    },
+    '@media (max-width: 560px)': {
+      padding: `${spacing.sm}px ${spacing.md}px`,
+    },
   },
   title: {
     fontFamily,
@@ -53,12 +61,24 @@ const useStyles = makeStyles({
     letterSpacing: '-0.02em',
     margin: 0,
     marginBottom: '4px',
+
+    '@media (max-width: 560px)': {
+      fontSize: '20px',
+    },
   },
   tabs: {
     display: 'flex',
     gap: '24px',
+    // 窄窗口:标签自动换行,避免横向溢出(gap 简写会重置 rowGap,故后置声明)
+    rowGap: '0px',
+    flexWrap: 'wrap',
     borderBottom: `1px solid ${palette.borderLight}`,
     marginBottom: '8px',
+
+    '@media (max-width: 560px)': {
+      gap: '16px',
+      rowGap: '0px',
+    },
   },
   tab: {
     position: 'relative',
@@ -101,6 +121,13 @@ const useStyles = makeStyles({
     gap: '12px',
     padding: '12px 16px',
     minHeight: '48px',
+
+    // 窄窗口:标题与控件改为上下堆叠,开关/按钮换到下一行右对齐
+    '@media (max-width: 640px)': {
+      flexWrap: 'wrap',
+      alignItems: 'flex-start',
+      rowGap: '8px',
+    },
   },
   rowDivider: {
     height: '1px',
@@ -115,6 +142,11 @@ const useStyles = makeStyles({
   rowBody: {
     flex: 1,
     minWidth: 0,
+
+    // 窄窗口行内换行后,文本占满整行,控件独占下一行
+    '@media (max-width: 640px)': {
+      flexBasis: '100%',
+    },
   },
   rowTitle: {
     fontFamily,
@@ -144,6 +176,11 @@ const useStyles = makeStyles({
     alignItems: 'center',
     gap: '4px',
     minWidth: 0,
+
+    // 窄窗口:路径框占满换行后的整行,长路径靠省略号截断
+    '@media (max-width: 640px)': {
+      flexBasis: '100%',
+    },
   },
   pathInput: {
     flex: 1,
@@ -180,12 +217,23 @@ const useStyles = makeStyles({
       backgroundColor: palette.muted,
       color: palette.textPrimary,
     },
+
+    // 窄窗口行内换行后,操作按钮右对齐到下一行
+    '@media (max-width: 640px)': {
+      marginLeft: 'auto',
+    },
   },
   selectWrap: {
     position: 'relative',
     display: 'flex',
     alignItems: 'center',
     minWidth: '200px',
+
+    // 窄窗口:下拉占满换行后的整行,并放宽最小宽度限制
+    '@media (max-width: 640px)': {
+      minWidth: 0,
+      flexBasis: '100%',
+    },
   },
   select: {
     width: '100%',
@@ -228,12 +276,22 @@ const useStyles = makeStyles({
     '&:hover': {
       backgroundColor: palette.primaryHover,
     },
+
+    // 窄窗口行内换行后,启停按钮右对齐到下一行
+    '@media (max-width: 640px)': {
+      marginLeft: 'auto',
+    },
   },
   peerFields: {
     display: 'flex',
     gap: '8px',
     marginTop: '8px',
     alignItems: 'center',
+
+    // 窄窗口:名称/地址输入框上下堆叠,添加按钮跟随最后一行
+    '@media (max-width: 560px)': {
+      flexWrap: 'wrap',
+    },
   },
   peerInput: {
     flex: 1,
@@ -313,6 +371,11 @@ const useStyles = makeStyles({
     '&:hover': {
       backgroundColor: '#E5E7EB',
     },
+
+    // 窄窗口行内换行后,灰按钮右对齐到下一行
+    '@media (max-width: 640px)': {
+      marginLeft: 'auto',
+    },
   },
   macGrid: {
     display: 'grid',
@@ -320,6 +383,11 @@ const useStyles = makeStyles({
     gap: '8px',
     color: '#4B5563',
     fontSize: '12px',
+
+    // 窄窗口:mac 键位映射表退化为单列
+    '@media (max-width: 560px)': {
+      gridTemplateColumns: '1fr',
+    },
   },
   macRow: {
     display: 'flex',
@@ -404,6 +472,11 @@ const useSwitchStyles = makeStyles({
     alignItems: 'center',
     gap: '8px',
     flexShrink: 0,
+
+    // 窄窗口行内换行后,开关右对齐到下一行
+    '@media (max-width: 640px)': {
+      marginLeft: 'auto',
+    },
   },
   track: {
     width: '40px',
@@ -732,7 +805,7 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
           hostId: id,
         }
       : {
-          hostEnabled: false,
+          hostEnabled: true,
           hostPort: Number(portInput) || 21118,
           peers: [],
           keepRunningOnExit: false,
@@ -1027,7 +1100,7 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
               </div>
               <input
                 className={styles.pathInput}
-                style={{ width: 220 }}
+                style={{ width: 220, maxWidth: "100%" }}
                 placeholder="signal.example.com:21116"
                 value={signalServerInput}
                 onChange={(e) => setSignalServerInput(e.target.value)}
@@ -1044,7 +1117,7 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
               </div>
               <input
                 className={styles.pathInput}
-                style={{ width: 220 }}
+                style={{ width: 220, maxWidth: "100%" }}
                 placeholder="relay.example.com:21117"
                 value={relayServerInput}
                 onChange={(e) => setRelayServerInput(e.target.value)}
@@ -1061,7 +1134,7 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
               </div>
               <input
                 className={styles.pathInput}
-                style={{ width: 220 }}
+                style={{ width: 220, maxWidth: "100%" }}
                 placeholder="dcr-主机名"
                 value={hostIdInput}
                 onChange={(e) => setHostIdInput(e.target.value)}
@@ -1098,7 +1171,7 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
               <input
                 type="number"
                 className={styles.pathInput}
-                style={{ width: 120 }}
+                style={{ width: 120, maxWidth: "100%" }}
                 value={portInput}
                 min={1}
                 max={65535}

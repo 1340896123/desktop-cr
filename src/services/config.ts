@@ -37,7 +37,7 @@ export interface AppConfig {
 
 /** 浏览器模式降级时的默认配置 */
 const DEFAULT_CONFIG: AppConfig = {
-  hostEnabled: false,
+  hostEnabled: true,
   hostPort: 21118,
   peers: [],
   keepRunningOnExit: false,
