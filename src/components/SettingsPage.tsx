@@ -26,6 +26,7 @@ import { startHost, stopHost, isHostRunning, onHostStateChange, type HostState }
 import { getAppConfig, saveAppConfig, genPeerId, type AppConfig } from '../services/config';
 import { getOperationLogs, type OperationLogEntry } from '../services/logs';
 import { getIncomingDir } from '../services/fileTransfer';
+import DxgiLoopbackCard from './DxgiLoopbackCard';
 
 const useStyles = makeStyles({
   page: {
@@ -474,7 +475,7 @@ export const ToggleSwitch: React.FC<ToggleSwitchProps> = ({ on, onChange, disabl
   );
 };
 
-type TabKey = '常规' | '安全' | '键盘' | '网络' | '账号' | '日志';
+type TabKey = '常规' | '安全' | '键盘' | '网络' | '账号' | '日志' | '诊断';
 
 /** 校验对端地址格式 host:port（IPv4 / hostname，端口 1..65535） */
 function isValidPeerAddr(addr: string): boolean {
@@ -690,7 +691,7 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
       <h1 className={styles.title}>设置</h1>
 
       <div className={styles.tabs}>
-        {(['常规', '安全', '键盘', '网络', '账号', '日志'] as TabKey[]).map((t) => (
+        {(['常规', '安全', '键盘', '网络', '账号', '日志', '诊断'] as TabKey[]).map((t) => (
           <button
             key={t}
             type="button"
@@ -1173,6 +1174,8 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
           )}
         </div>
       )}
+
+      {tab === '诊断' && <DxgiLoopbackCard />}
 
       {notice && <div className={styles.noticeText}>{notice}</div>}
     </div>

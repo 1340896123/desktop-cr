@@ -5,6 +5,8 @@ mod audio;
 mod auth;
 mod capture;
 #[cfg(target_os = "windows")]
+mod diagnostics;
+#[cfg(target_os = "windows")]
 mod ffmpeg_hw;
 mod hbb_client;
 mod input_injector;
@@ -100,6 +102,8 @@ fn main() {
             capture::start_capture,
             capture::stop_capture,
             capture::get_frame,
+            // 诊断:DXGI 回传自检(真实采集 + H.264 标准编解码回环)
+            diagnostics::run_dxgi_loopback,
             // 操作日志
             operation_log::get_operation_logs,
         ])

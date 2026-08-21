@@ -59,7 +59,7 @@
 
 ### 2.1 Cargo 依赖
 
-> 注记(项目收尾后现状):RustDesk 的 `hbb_common`/`scrap` 是 git submodule 形态的重依赖链(多个 rustdesk-org fork 依赖、sodiumoxide C 编译、bindgen 等),在 Windows 上构建脆弱且需要 libclang;`hbb_common` 作为 git 依赖无法拉取 submodule 内容。当前网络层改为**自研直连 TCP 协议**(`network.rs`,长度前缀 JSON 帧 + base64 JPEG),真实实现了 LAN 远程控制的全部能力;抓屏直接用 windows crate 的 DXGI API(与 scrap 底层同一技术),已隔离在 `capture.rs`,未来可平滑替换为 RustDesk 生态。
+> 注记(项目收尾后现状):RustDesk 的 `hbb_common`/`scrap` 是 git submodule 形态的重依赖链(多个 rustdesk-org fork 依赖、sodiumoxide C 编译、bindgen 等),在 Windows 上构建脆弱且需要 libclang;`hbb_common` 作为 git 依赖无法拉取 submodule 内容。当前网络层改为**自研直连 TCP 协议**(`network.rs`,长度前缀 JSON 帧 + base64 H.264 Annex-B,标准视频编解码、禁止 JPEG),真实实现了 LAN 远程控制的全部能力;抓屏直接用 windows crate 的 DXGI API(与 scrap 底层同一技术),已隔离在 `capture.rs`,未来可平滑替换为 RustDesk 生态。
 
 实际依赖(`src-tauri/Cargo.toml`):
 
@@ -110,29 +110,37 @@ windows = { version = "0.58", features = [
 
 ## 3. 画面传输与渲染管道
 
-画面传输采用 **真实 DXGI 抓屏 + JPEG 编码 + LAN TCP / Tauri IPC 事件** 双通道:
+画面传输采用 **真实 DXGI 抓屏 + H.264 标准视频编解码(硬编/硬解优先)+ LAN TCP / Tauri IPC 事件** 双通道。**编码规范:音视频链路一律标准编解码(H.264/HEVC 视频、WAV/PCM 音频),禁止 JPEG 上协议**:
 
 ```
-+------------------+         +-------------------+         +---------------------+
-| 远程主机采集端   |         | Rust 编码层        |         | 前端渲染层 (Canvas)  |
-| (DXGI Output     | ------> | (JPEG 编码,       | ------> | createImageBitmap +  |
-|  Duplication)    |         |  base64/TCP 帧)   |         | drawImage)           |
-+------------------+         +-------------------+         +---------------------+
++------------------+         +---------------------+         +------------------------+
+| 远程主机采集端   |         | Rust 编码层          |         | 解码/渲染层              |
+| (DXGI Output     | ------> | (FFmpeg H.264 硬编,  | ------> | 控制端 FFmpeg D3D11VA  |
+|  Duplication)    |         |  base64/TCP 帧)      |         | 硬解 / WebCodecs 预览)  |
++------------------+         +---------------------+         +------------------------+
 ```
 
 ### 3.1 视频传输两条路线
 
 **远程模式 (已实现 - LAN TCP 帧流)：**
 
-- 被控端 `capture.rs` 用 IDXGIOutputDuplication 抓帧 → jpeg-encoder 编码 → `network.rs` 以 4 字节长度前缀 JSON 帧(`frame` 消息,base64 JPEG)推送到控制端
-- 控制端 `remote-frame` 事件携带 JPEG 字节 → 前端 `<canvas>` `createImageBitmap` + `drawImage` 渲染
+- 被控端 `capture.rs` 用 IDXGIOutputDuplication 抓帧 → `ffmpeg_hw.rs` H.264 编码(NVENC/QSV/AMF 按 GPU 优选,软件回退)→ `network.rs` 以 4 字节长度前缀 JSON 帧(`frame` 消息,base64 Annex-B)推送到控制端
+- 控制端 FFmpeg 解码(D3D11VA 硬解优先)→ `remote-frame` 事件携带解码后帧 → 前端 `<canvas>` 渲染
 - 流参数(画质/分辨率/帧率)经 `stream` 消息实时下发被控端并即时生效
 
 **本机预览模式 (已实现 - IPC 事件)：**
 
-- 同一套 DXGI 抓帧循环,`capture-frame` 事件推送 JPEG 到前端 `<canvas>` 预览
+- 同一套 DXGI 抓帧循环,FFmpeg 视频激活时附带小尺寸 JPEG 预览图(480x270,仅本机 `capture-frame` 面板,不上协议)
 
-> WebRTC `<video>` 高帧率路线(H.264/AV1 硬件编码)依赖 RustDesk 官方信令服务器基础设施,为远期蓝图;当前 JPEG-over-TCP 已满足 LAN 场景。
+### 3.2 诊断:DXGI 回传自检(设置页「诊断」tab)
+
+一键验证真实本机采集全链路,与生产会话同管线、**全程 H.264 标准编解码、禁止 JPEG**:
+
+真实 DXGI 抓屏 → H.264 硬编 → 生产协议帧 → 本机 TCP 回环 → D3D11VA 硬解,
+输出各阶段耗时、实时帧率与端到端延迟;回环到达的 H.264 帧经 `dxgi-loop-frame`
+事件回传前端,WebCodecs 解码后实时预览。抓屏失败显式报错,不回退合成帧。
+
+> WebRTC `<video>` 高帧率路线(AV1 等)依赖 RustDesk 官方信令服务器基础设施,为远期蓝图;当前 H.264-over-TCP 硬编硬解已满足 LAN 场景。
 
 ## 4. 控制事件管线
 
@@ -244,9 +252,11 @@ my-tauri-remote-desktop/
 │   ├── resources/
 │   │   └── idd_driver/             # usbmmidd 签名驱动 + deviceinstaller + RustDesk dylib
 │   ├── src/
-│   │   ├── capture.rs              # 真实 DXGI 抓屏 + JPEG 编码 + 显示器枚举
+│   │   ├── capture.rs              # 真实 DXGI 抓屏 + 显示器枚举
 │   │   ├── network.rs              # 真实 LAN TCP 协议(host/peer 会话)
 │   │   ├── hbb_client.rs           # 会话管理/配置持久化/被控端/剪贴板/流参数
+│   │   ├── ffmpeg_hw.rs            # H.264/H.265 硬编(NVENC/QSV/AMF)+ D3D11VA 硬解
+│   │   ├── diagnostics.rs          # DXGI 回传自检(H.264 全链路回环,设置页「诊断」)
 │   │   ├── virtual_display.rs      # 真实 IDD 虚拟屏(usbmmidd + dylib)
 │   │   ├── input_injector.rs       # Win32 SendInput 鼠标键盘注入
 │   │   └── main.rs                 # Tauri 注册与 Commands 绑定
@@ -262,13 +272,14 @@ my-tauri-remote-desktop/
 - [x] **阶段二：虚拟屏驱动集成**
       真实 IDD 驱动接入:`resources/idd_driver/` 内置 usbmmidd 签名驱动 + 官方 `deviceinstaller64` + RustDesk `dylib_virtual_display.dll`;驱动安装 / 注册表分辨率写入 / `enableidd 1|0` 增删虚拟屏 / 真实显示器枚举均已在 Windows 落地。前端「虚拟屏管理」面板支持一键增加 1080P/2K/4K。
 - [x] **阶段三：画面抓取与传输**
-      真实 DXGI 抓屏(IDXGIOutputDuplication + D3D11)逐帧 JPEG 编码;本地预览经 `capture-frame` 事件推送到 `<canvas>`;远程画面经自研 TCP 协议(`network.rs`)以 base64 JPEG 帧流传输,前端 `remote-frame` 事件 + `createImageBitmap` 渲染。WebRTC `<video>` 高帧率路线留待对接官方 HBBS/HBBR 时启用。
+      真实 DXGI 抓屏(IDXGIOutputDuplication + D3D11);远程画面经 `ffmpeg_hw.rs` H.264 硬编(NVENC/QSV/AMF 优选)→ 自研 TCP 协议(`network.rs`)base64 Annex-B 帧流 → 控制端 D3D11VA 硬解(软件回退)后渲染;本机预览经 `capture-frame` 事件推送。WebRTC `<video>` 高帧率路线留待对接官方 HBBS/HBBR 时启用。
 - [x] **阶段四：控制注入与细节优化**
       Windows 真实 SendInput 注入(鼠标绝对坐标 + 键盘 code→VK 全映射,含修饰键/扩展键);远程会话内鼠标/键盘/滚轮事件经协议实时注入被控端;控制中心全屏/画质/分辨率/剪贴板同步真实生效;流参数经 `stream` 消息实时下发被控端。
 
 ## 8. 已交付能力清单
 
-- **本机预览**:选择任意显示器,实时 DXGI 抓帧 + JPEG 预览。
+- **本机预览**:选择任意显示器,实时 DXGI 抓帧预览。
+- **诊断自检**:设置页「诊断」tab 一键运行 DXGI 回传链路(真实本机采集 → H.264 硬编 → 协议帧 → TCP 回环 → 硬解),实时预览 + 各阶段耗时/帧率/端到端延迟报告。
 - **LAN 远程控制**:一台机器以「被控端」运行(设置页配置端口并启动),另一台通过「设备列表」添加 `ip:port` 后一键进入会话——真实画面流 + 真实鼠标键盘注入 + 剪贴板双向同步 + 画质/分辨率实时调节。
 - **虚拟显示器**:管理员权限下安装 usbmmidd IDD 驱动,一键添加 1080P/2K/4K 虚拟屏(最多 4 个),支持枚举/移除。
 - **配置持久化**:对端设备列表、被控端口、被控自启开关持久化到 `%APPDATA%/com.example.winui-remote-desktop/config.json`。

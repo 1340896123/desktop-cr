@@ -289,6 +289,143 @@ pub(crate) fn rgb_to_jpeg(
     Ok((jw, jh, jpeg_buf))
 }
 
+/// 一次性真实 DXGI 抓屏,返回 (宽, 高, RGB 字节)。
+///
+/// 与 `dxgi_capture_loop` 同管线,但独立创建桌面复制并只抓一帧即释放:
+/// CreateDXGIFactory1 → EnumAdapters1(0) → EnumOutputs(monitor_id) →
+/// D3D11CreateDevice → IDXGIOutput1::DuplicateOutput → AcquireNextFrame(0)
+/// (DXGI_ERROR_WAIT_TIMEOUT 重试最多 3 次)→ 拷贝 staging → Map 读 BGRA →
+/// bgra_to_rgb → ReleaseFrame;COM 资源随作用域结束自动释放。
+/// 复制建立后的首次 AcquireNextFrame 会交付当前桌面内容,因此静止桌面也能取到首帧。
+#[cfg(target_os = "windows")]
+pub fn grab_frame_once(monitor_id: u32) -> Result<(u32, u32, Vec<u8>), String> {
+    use windows::core::Interface;
+    use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+        D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+        D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    };
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+        DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
+    };
+
+    // 1) DXGI 工厂 → 适配器(0) → 指定输出(显示器)
+    let factory: IDXGIFactory1 =
+        unsafe { CreateDXGIFactory1() }.map_err(|e| format!("CreateDXGIFactory1 失败: {e}"))?;
+    let adapter = unsafe { factory.EnumAdapters1(0) }
+        .map_err(|e| format!("EnumAdapters1(0) 失败(可能无 GPU): {e}"))?;
+    let output = unsafe { adapter.EnumOutputs(monitor_id) }
+        .map_err(|e| format!("EnumOutputs({monitor_id}) 失败(显示器不存在或不可捕获): {e}"))?;
+
+    // 2) 基于该适配器创建 D3D11 设备与立即上下文
+    let mut device: Option<ID3D11Device> = None;
+    let mut ctx: Option<ID3D11DeviceContext> = None;
+    unsafe {
+        D3D11CreateDevice(
+            &adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
+            None,
+            D3D11_CREATE_DEVICE_FLAG(0),
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut ctx),
+        )
+    }
+    .map_err(|e| format!("D3D11CreateDevice 失败: {e}"))?;
+    let device = device.ok_or("D3D11CreateDevice 未返回设备")?;
+    let ctx = ctx.ok_or("D3D11CreateDevice 未返回设备上下文")?;
+
+    // 3) 桌面复制输出(DuplicateOutput 定义于 IDXGIOutput1)
+    let output1: IDXGIOutput1 = output
+        .cast()
+        .map_err(|e| format!("IDXGIOutput → IDXGIOutput1 转换失败: {e}"))?;
+    let dup: IDXGIOutputDuplication = unsafe { output1.DuplicateOutput(&device) }
+        .map_err(|e| format!("DuplicateOutput 失败(桌面捕获不可用): {e}"))?;
+
+    // 4) 抓取一帧:WAIT_TIMEOUT 重试最多 3 次,仍超时返回 Err
+    let result: Result<(u32, u32, Vec<u8>), String> = (|| {
+        let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+        let mut resource: Option<IDXGIResource> = None;
+        let mut acquired = false;
+        for _attempt in 0..3 {
+            match unsafe { dup.AcquireNextFrame(0, &mut frame_info, &mut resource) } {
+                Ok(()) => {
+                    acquired = true;
+                    break;
+                }
+                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => continue,
+                Err(e) => return Err(format!("AcquireNextFrame 失败: {e}")),
+            }
+        }
+        if !acquired {
+            return Err("AcquireNextFrame 连续超时(3 次): 桌面无新帧".to_string());
+        }
+        let resource = resource.ok_or("AcquireNextFrame 未返回资源")?;
+        let tex: ID3D11Texture2D = resource
+            .cast()
+            .map_err(|e| format!("桌面资源转换 ID3D11Texture2D 失败: {e}"))?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { tex.GetDesc(&mut desc) };
+        let src_w = desc.Width;
+        let src_h = desc.Height;
+
+        // 5) 拷贝到 CPU 可读的 staging 纹理
+        let mut staging_desc = desc;
+        staging_desc.Usage = D3D11_USAGE_STAGING;
+        staging_desc.BindFlags = 0;
+        staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+        staging_desc.MiscFlags = 0;
+        staging_desc.MipLevels = 1;
+        staging_desc.ArraySize = 1;
+        staging_desc.SampleDesc = DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        };
+        let mut staging: Option<ID3D11Texture2D> = None;
+        unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) }
+            .map_err(|e| format!("创建 staging 纹理失败: {e}"))?;
+        let staging = staging.ok_or("创建 staging 纹理未返回纹理")?;
+        unsafe { ctx.CopyResource(&staging, &tex) };
+        drop(tex);
+
+        // 6) Map 读出像素(注意 RowPitch 可能大于 width*4)
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe { ctx.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
+            .map_err(|e| format!("Map 失败: {e}"))?;
+        let row_pitch = mapped.RowPitch as usize;
+        let mut bgra = vec![0u8; (src_w as usize) * (src_h as usize) * 4];
+        for y in 0..src_h as usize {
+            // SAFETY: 指针指向已 Map 的 staging 纹理数据,行偏移不超过分配范围
+            let src_row = unsafe { (mapped.pData as *const u8).add(y * row_pitch) };
+            let dst_row = &mut bgra[y * (src_w as usize) * 4..(y + 1) * (src_w as usize) * 4];
+            unsafe {
+                std::ptr::copy_nonoverlapping(src_row, dst_row.as_mut_ptr(), (src_w as usize) * 4);
+            }
+        }
+        unsafe { ctx.Unmap(&staging, 0) };
+        drop(staging);
+
+        // 7) BGRA → RGB
+        let rgb = bgra_to_rgb(&bgra, src_w, src_h);
+        Ok((src_w, src_h, rgb))
+    })();
+
+    // 无论成败都释放桌面复制帧
+    let _ = unsafe { dup.ReleaseFrame() };
+    result
+}
+
+/// 非 Windows:编译占位,真实抓屏仅 Windows 支持。
+#[cfg(not(target_os = "windows"))]
+pub fn grab_frame_once(_monitor_id: u32) -> Result<(u32, u32, Vec<u8>), String> {
+    Err("仅 Windows 支持".to_string())
+}
+
 #[cfg(target_os = "windows")]
 fn list_monitors_windows() -> Result<Vec<MonitorInfo>, String> {
     use windows::core::PCWSTR;
