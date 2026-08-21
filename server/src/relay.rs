@@ -20,6 +20,7 @@ use tokio::sync::watch;
 
 use crate::framing::{read_msg, write_msg};
 use crate::message::RelayMsg;
+use crate::operation_log::op_log;
 
 /// client 等待 host 接入的最长时间。
 const HOST_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -201,6 +202,7 @@ pub async fn handle_relay_conn(manager: RelayManager, mut stream: TcpStream, add
         }
     };
     log::info!("[relay] allocate: id={id}, role={role}, from={addr}");
+    op_log("relay", "allocate", &format!("id={id}, role={role}, from={addr}"));
 
     if role == "host" {
         // 先回 ack,再把读写半段存入管理器(连接保持存活)
@@ -249,12 +251,14 @@ pub async fn handle_relay_conn(manager: RelayManager, mut stream: TcpStream, add
     let (cr, cw) = stream.into_split();
     let client_addr = addr.to_string();
     log::info!("[relay] 配对成功: id={id}");
+    op_log("relay", "paired", &format!("id={id}, host={host_addr}, client={client_addr}"));
     // 上报会话开始给信令(监控用)
     manager.report_session_start(&id, &host_addr, &client_addr).await;
     pipe(host_parts, cw, cr).await;
     // 会话结束
     manager.report_session_end(&id).await;
     log::info!("[relay] 会话结束: id={id}");
+    op_log("relay", "session_end", &format!("id={id}"));
 }
 
 /// UDP 中继消息(JSON 字符串,`t` 字段区分)。
@@ -285,6 +289,7 @@ pub async fn handle_udp_packet(
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(id.clone(), src);
             log::info!("[relay-udp] 宿主 {id} 登记于 {src}");
+            op_log("relay", "udp_alloc", &format!("id={id}, src={src}"));
             let _ = sock.send_to(format!("{{\"t\":\"allocated\"}}").as_bytes(), src).await;
         }
         RelayUdpMsg::Data { id, payload } => {

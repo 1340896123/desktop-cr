@@ -333,7 +333,11 @@ async fn signal_list_filters_by_account() {
                 os: "Windows 11".into(),
                 version: "0.1.0".into(),
                 user: user.into(),
-                token: String::new(),
+                token: if user == "alice" {
+                    "client-local-token".into()
+                } else {
+                    String::new()
+                },
             },
         )
         .await
@@ -357,6 +361,27 @@ async fn signal_list_filters_by_account() {
     match ack {
         SignalMsg::ListAck { peers, .. } => {
             assert_eq!(peers.len(), 1, "alice 应只见自己的设备: {peers:?}");
+            assert_eq!(peers[0].id, "pc-alice");
+        }
+        other => panic!("期望 ListAck,得到 {other:?}"),
+    }
+
+    // 开放认证模式没有 JWT 密钥,即使客户端仍携带本地登录令牌,
+    // 也应按 user 字段过滤,不能被错误降级成匿名用户。
+    write_msg(
+        &mut q,
+        &SignalMsg::List {
+            user: "alice".into(),
+            token: "client-local-token".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let ack: SignalMsg = read_msg(&mut q).await.unwrap();
+    match ack {
+        SignalMsg::ListAck { peers, auth_error } => {
+            assert!(!auth_error, "开放模式不应把客户端令牌判为认证错误");
+            assert_eq!(peers.len(), 1, "开放模式带令牌仍应看到 alice 设备: {peers:?}");
             assert_eq!(peers[0].id, "pc-alice");
         }
         other => panic!("期望 ListAck,得到 {other:?}"),

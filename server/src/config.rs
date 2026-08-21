@@ -9,6 +9,8 @@ use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
+use crate::operation_log::op_log;
+
 /// 服务策略配置(全部字段可被管理后台修改)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -116,10 +118,20 @@ impl ConfigStore {
 
     /// 用新配置整体替换并落盘(管理后台 PUT 使用)。
     pub fn update(&self, cfg: ServerConfig) {
+        let summary = format!(
+            "open_register={}, maintenance={}, min_password_len={}, max_devices_per_user={}, max_concurrent_sessions={}, min_client_version={}",
+            cfg.open_register,
+            cfg.maintenance_mode,
+            cfg.min_password_len,
+            cfg.max_devices_per_user,
+            cfg.max_concurrent_sessions,
+            cfg.min_client_version,
+        );
         let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         *guard = cfg;
         drop(guard);
         self.save();
+        op_log("config", "update", &summary);
     }
 
     /// 读取单项:维护模式。

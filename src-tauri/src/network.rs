@@ -1096,7 +1096,9 @@ pub(crate) async fn signal_register_loop(
         os,
         version,
         current_auth,
-        std::time::Duration::from_secs(20),
+        // 账号登录/退出后需要尽快重新注册并刷新设备归属;5 秒仍远低于
+        // 服务端 60 秒在线超时,同时避免列表长期显示旧的离线状态。
+        std::time::Duration::from_secs(5),
         std::time::Duration::from_secs(3),
     )
     .await;
@@ -2081,4 +2083,3 @@ mod tests {
         serve.abort();
     }
 }
-

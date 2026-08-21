@@ -134,6 +134,9 @@ async fn main() {
     };
     let _ = ARGS.set(args);
 
+    // 操作日志根目录(文件审计日志落于 <data-dir>/logs/operations-YYYYMMDD.log)
+    dcr_server::operation_log::register_log_dir(ARGS.get().unwrap().data_dir.clone());
+
     let bind = ARGS.get().unwrap();
     let tcp_addr: SocketAddr = format!("{}:{}", bind.bind, bind.tcp_port)
         .parse::<SocketAddr>()

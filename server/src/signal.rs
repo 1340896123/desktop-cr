@@ -21,9 +21,11 @@ use crate::framing::{read_msg, write_msg};
 use crate::message::{PeerEntry, SignalMsg};
 use crate::sessions::SessionCore;
 
+use crate::operation_log::op_log;
+
 /// 在线判定超时(超过该时长未心跳视为离线)。
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(60);
-/// 连接读循环空闲超时(客户端心跳间隔 20s,留足余量)。
+/// 连接读循环空闲超时(客户端心跳间隔 5s,留足余量)。
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 一个已注册对端的记录。
@@ -368,15 +370,18 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                 user,
                 token,
             } => {
-                // 认证:令牌非空时以其解析出的用户名为准(忽略客户端自报的 user);
-                // 令牌无效直接拒绝。未启用认证(无密钥)时信任客户端上报的 user。
-                let mut effective_user = user.clone();
-                if !token.is_empty() {
+                // 认证开启时以令牌解析出的用户名为准(忽略客户端自报的 user);
+                // 令牌无效直接拒绝。开放模式没有 JWT 密钥,此时信任 user 字段,
+                // 即使客户端仍携带登录令牌也不能被错误降级为匿名设备。
+                let effective_user = if !core.auth_enabled() {
+                    user.clone()
+                } else if !token.is_empty() {
                     match core.authenticate(&token) {
-                        Some(u) => effective_user = u,
+                        Some(u) => u,
                         None => {
                             let msg = "登录令牌无效或已过期,请重新登录".to_string();
                             log::warn!("[signal] 注册被拒(令牌无效): id={id}");
+                            op_log("signal", "register_rejected", &format!("id={id}, reason=token_invalid"));
                             let _ = write_msg(
                                 &mut stream,
                                 &SignalMsg::RegisterAck {
@@ -389,10 +394,10 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                             break;
                         }
                     }
-                } else if core.auth_enabled() {
+                } else {
                     // 服务端启用了账号认证:无令牌一律视为未登录,不得冒用他人账号
-                    effective_user = String::new();
-                }
+                    String::new()
+                };
                 // 归属冲突检查仅在启用认证时执行:此时 effective_user 来自受
                 // 校验的令牌,可防止他账号强占设备。开放模式(无认证)信任客户端
                 // 上报的 user,允许同设备归属随登录账号切换(否则换号后设备被锁死)。
@@ -404,6 +409,7 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                                 dev.owner
                             );
                             log::warn!("[signal] 注册被拒(归属冲突): id={id}, 归属={}, 请求={effective_user}", dev.owner);
+                            op_log("signal", "register_rejected", &format!("id={id}, reason=owner_conflict, owner={}", dev.owner));
                             let _ = write_msg(
                                 &mut stream,
                                 &SignalMsg::RegisterAck {
@@ -420,6 +426,7 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                 // 策略校验:维护模式 / 版本下限 / 设备禁用 / 设备数上限
                 if let Err(e) = core.check_register_policy(&effective_user, &version, &id) {
                     log::warn!("[signal] 注册被拒: id={id}, 原因={e}");
+                    op_log("signal", "register_rejected", &format!("id={id}, reason={e}"));
                     let _ = write_msg(
                         &mut stream,
                         &SignalMsg::RegisterAck {
@@ -450,6 +457,11 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                 conn = Some((id.clone(), generation));
                 log::info!(
                     "[signal] 注册: id={id}, lan={lan}, external={addr}, user={effective_user}, os={os}, v={version}"
+                );
+                op_log(
+                    "signal",
+                    "register",
+                    &format!("id={id}, user={effective_user}, external={addr}"),
                 );
                 let _ = write_msg(
                     &mut stream,
@@ -526,7 +538,11 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                 // 令牌无效且服务端启用了认证时置 auth_error,客户端据此提示重新登录
                 // (否则令牌过期后设备列表静默为空,用户无从知晓需重新登录)。
                 let mut auth_error = false;
-                let effective_user = if !token.is_empty() {
+                let effective_user = if !core.auth_enabled() {
+                    // 自托管开放模式没有 JWT 密钥,兼容旧客户端及带有本地
+                    // 登录令牌的客户端,按 user 字段进行设备归属过滤。
+                    user
+                } else if !token.is_empty() {
                     match core.authenticate(&token) {
                         Some(u) => u,
                         None => {

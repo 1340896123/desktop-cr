@@ -33,6 +33,8 @@ use crate::message::PeerEntry;
 use crate::sessions::{SessionCore, SessionRecord};
 use crate::signal::SignalCore;
 
+use crate::operation_log::op_log;
+
 /// 管理后台共享状态。
 #[derive(Clone)]
 pub struct AdminState {
@@ -152,12 +154,18 @@ async fn register(
         ));
     }
     check_password_len(&state, &req.password)?;
+    let username = req.username.trim().to_lowercase();
     state
         .auth
         .store
-        .create_user(&req.username, &req.password)
-        .map_err(ApiError::bad_request)?;
-    log::info!("[admin] 自助注册成功: {}", req.username.trim().to_lowercase());
+        .create_user(&username, &req.password)
+        .map_err(|e| {
+            log::warn!("[admin] 自助注册失败: {username}, 原因={e}");
+            op_log("admin", "self_register_failed", &format!("{username}, reason={e}"));
+            ApiError::bad_request(e)
+        })?;
+    log::info!("[admin] 自助注册成功: {username}");
+    op_log("admin", "self_register", &username);
     let token = state
         .auth
         .login(&req.username, &req.password)
@@ -213,11 +221,16 @@ async fn create_user(
 ) -> Result<impl IntoResponse, ApiError> {
     bearer_user(&state, &headers)?;
     check_password_len(&state, &req.password)?;
+    let username = req.username.trim().to_lowercase();
     state
         .auth
         .store
-        .create_user(&req.username, &req.password)
-        .map_err(|e| ApiError::bad_request(e))?;
+        .create_user(&username, &req.password)
+        .map_err(|e| {
+            op_log("admin", "create_user_failed", &format!("{username}, reason={e}"));
+            ApiError::bad_request(e)
+        })?;
+    op_log("admin", "create_user", &username);
     Ok((StatusCode::CREATED, Json(json!({ "ok": true }))))
 }
 
@@ -227,11 +240,16 @@ async fn delete_user(
     Path(username): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     bearer_user(&state, &headers)?;
+    let username = username.trim().to_lowercase();
     state
         .auth
         .store
         .delete_user(&username)
-        .map_err(|e| ApiError::bad_request(e))?;
+        .map_err(|e| {
+            op_log("admin", "delete_user_failed", &format!("{username}, reason={e}"));
+            ApiError::bad_request(e)
+        })?;
+    op_log("admin", "delete_user", &username);
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -243,11 +261,16 @@ async fn reset_password(
 ) -> Result<Json<Value>, ApiError> {
     bearer_user(&state, &headers)?;
     check_password_len(&state, &req.password)?;
+    let username = username.trim().to_lowercase();
     state
         .auth
         .store
         .reset_password(&username, &req.password)
-        .map_err(|e| ApiError::bad_request(e))?;
+        .map_err(|e| {
+            op_log("admin", "reset_password_failed", &format!("{username}, reason={e}"));
+            ApiError::bad_request(e)
+        })?;
+    op_log("admin", "reset_password", &username);
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -264,11 +287,20 @@ async fn set_user_disabled(
     Json(req): Json<DisableUserReq>,
 ) -> Result<Json<Value>, ApiError> {
     bearer_user(&state, &headers)?;
+    let username = username.trim().to_lowercase();
     state
         .auth
         .store
         .set_disabled(&username, req.disabled)
-        .map_err(|e| ApiError::bad_request(e))?;
+        .map_err(|e| {
+            op_log("admin", "set_user_disabled_failed", &format!("{username}, reason={e}"));
+            ApiError::bad_request(e)
+        })?;
+    op_log(
+        "admin",
+        "set_user_disabled",
+        &format!("{username} {}", if req.disabled { "disabled" } else { "enabled" }),
+    );
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -290,10 +322,15 @@ async fn delete_device(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     bearer_user(&state, &headers)?;
+    let id = id.trim().to_string();
     state
         .devices
         .delete(&id)
-        .map_err(|e| ApiError::bad_request(e))?;
+        .map_err(|e| {
+            op_log("admin", "delete_device_failed", &format!("{id}, reason={e}"));
+            ApiError::bad_request(e)
+        })?;
+    op_log("admin", "delete_device", &id);
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -310,10 +347,15 @@ async fn set_device_enabled(
     Json(req): Json<DeviceEnabledReq>,
 ) -> Result<Json<Value>, ApiError> {
     bearer_user(&state, &headers)?;
+    let id = id.trim().to_string();
     state
         .devices
         .set_enabled(&id, req.enabled)
-        .map_err(|e| ApiError::bad_request(e))?;
+        .map_err(|e| {
+            op_log("admin", "set_device_enabled_failed", &format!("{id}, reason={e}"));
+            ApiError::bad_request(e)
+        })?;
+    op_log("admin", "set_device_enabled", &format!("{id} {}", if req.enabled { "enabled" } else { "disabled" }));
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -386,6 +428,22 @@ async fn peers(
     Ok(Json(state.core.list_online()))
 }
 
+/// 操作日志请求(可选 limit 查询参数)。
+#[derive(Debug, Deserialize)]
+pub struct OperationLogsQuery {
+    limit: Option<usize>,
+}
+
+async fn operation_logs(
+    State(_state): State<AdminState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<OperationLogsQuery>,
+) -> Result<Json<Vec<crate::operation_log::OperationLogEntry>>, ApiError> {
+    bearer_user(&_state, &headers)?;
+    let limit = q.limit.unwrap_or(200).max(1);
+    Ok(Json(crate::operation_log::read_operation_logs(limit)))
+}
+
 async fn stats(
     State(state): State<AdminState>,
     headers: HeaderMap,
@@ -425,6 +483,7 @@ let api = Router::new()
         .route("/api/admin/sessions", get(list_sessions))
         .route("/api/admin/config", get(get_config).put(put_config))
         .route("/api/admin/peers", get(peers))
+        .route("/api/admin/operation-logs", get(operation_logs))
         .route("/api/admin/stats", get(stats))
         .with_state(state);
 

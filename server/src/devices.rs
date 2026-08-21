@@ -11,6 +11,8 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+use crate::operation_log::op_log;
+
 /// 单个设备档案。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceRecord {
@@ -139,6 +141,13 @@ impl DeviceStore {
         rec.online = online;
         drop(map);
         self.save();
+        if is_new {
+            op_log(
+                "devices",
+                "register",
+                &format!("id={id}, owner={owner}, name={name}"),
+            );
+        }
         is_new
     }
 
@@ -170,6 +179,11 @@ impl DeviceStore {
         drop(map);
         self.save();
         log::info!("[devices] 设备 {id} 已{}", if enabled { "启用" } else { "禁用" });
+        op_log(
+            "devices",
+            "set_enabled",
+            &format!("id={id} {}", if enabled { "enabled" } else { "disabled" }),
+        );
         Ok(())
     }
 
@@ -192,6 +206,7 @@ impl DeviceStore {
         drop(map);
         self.save();
         log::info!("[devices] 已删除设备: {id}");
+        op_log("devices", "delete", &format!("id={id}"));
         Ok(())
     }
 

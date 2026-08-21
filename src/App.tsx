@@ -163,6 +163,12 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (!authChecked || !account) return;
     void load();
+    // 信令注册/心跳会在登录状态变化后异步更新设备归属;定时刷新保证
+    // 两台同账号客户端无需手动点击刷新即可看到最新在线状态。
+    const timer = window.setInterval(() => {
+      void load();
+    }, 5000);
+    return () => window.clearInterval(timer);
   }, [account, authChecked, load]);
 
   useEffect(() => {

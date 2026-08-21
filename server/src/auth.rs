@@ -15,6 +15,8 @@ use argon2::Argon2;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
+use crate::operation_log::op_log;
+
 /// 令牌有效期(秒)。
 const TOKEN_TTL_SECS: u64 = 7 * 24 * 3600;
 /// 初始管理员账号名。
@@ -163,6 +165,7 @@ impl UserStore {
         drop(map);
         self.save();
         log::info!("[auth] 已创建账号: {username}");
+        op_log("auth", "create_user", &username);
         Ok(())
     }
 
@@ -180,6 +183,7 @@ impl UserStore {
         drop(map);
         self.save();
         log::info!("[auth] 已删除账号: {username}");
+        op_log("auth", "delete_user", &username);
         Ok(())
     }
 
@@ -195,6 +199,7 @@ impl UserStore {
         drop(map);
         self.save();
         log::info!("[auth] 已重置账号密码: {username}");
+        op_log("auth", "reset_password", &username);
         Ok(())
     }
 
@@ -223,6 +228,11 @@ impl UserStore {
         drop(map);
         self.save();
         log::info!("[auth] 账号 {username} 已{}", if disabled { "禁用" } else { "启用" });
+        op_log(
+            "auth",
+            "set_disabled",
+            &format!("{username} {}", if disabled { "disabled" } else { "enabled" }),
+        );
         Ok(())
     }
 
@@ -265,13 +275,16 @@ impl AuthState {
 
     /// 校验登录并签发 JWT,成功返回令牌。
     pub fn login(&self, username: &str, password: &str) -> Result<String, String> {
-        if !self.store.verify_login(username, password) {
+        let username = username.trim().to_lowercase();
+        if !self.store.verify_login(username.as_str(), password) {
+            log::warn!("[auth] 登录失败: {username}");
+            op_log("auth", "login_failed", &username);
             return Err("用户名或密码错误".into());
         }
-        let username = username.trim().to_lowercase();
         let token = issue_token(&self.secret, &username)
             .map_err(|e| format!("令牌签发失败: {e}"))?;
         log::info!("[auth] 登录成功: {username}");
+        op_log("auth", "login", &username);
         Ok(token)
     }
 

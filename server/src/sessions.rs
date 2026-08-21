@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::operation_log::op_log;
+
 /// 单个活跃会话。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
@@ -64,6 +66,11 @@ impl SessionCore {
             .unwrap_or_else(|e| e.into_inner())
             .insert(id.to_string(), Instant::now());
         log::info!("[sessions] 会话开始: id={id}, host={host}, client={client}");
+        op_log(
+            "sessions",
+            "start",
+            &format!("id={id}, host={host}, client={client}"),
+        );
         Ok(())
     }
 
@@ -81,6 +88,7 @@ impl SessionCore {
             .remove(id);
         if removed {
             log::info!("[sessions] 会话结束: id={id}");
+            op_log("sessions", "end", &format!("id={id}"));
         }
     }
 

@@ -291,22 +291,57 @@ pub(crate) fn load_app_config() -> AppConfig {
     // 信令/中继地址缺失时回填默认公网服务器:前端保存设置时若输入框为空会把
     // signalServer 写成 undefined,导致信令设备发现静默失效(设备列表只剩本机)
     if cfg.signal_server.is_none() {
-        cfg.signal_server = Some("120.78.77.248:21116".into());
+        cfg.signal_server = Some(DEFAULT_SIGNAL_SERVER.into());
     }
     if cfg.relay_server.is_none() {
-        cfg.relay_server = Some("120.78.77.248:21117".into());
+        cfg.relay_server = Some(DEFAULT_RELAY_SERVER.into());
     }
     cfg
 }
 
-/// 生效的信令服务器地址。账号服务与信令服务可以分离,登录不参与地址推导。
+const DEFAULT_SIGNAL_SERVER: &str = "120.78.77.248:21116";
+const DEFAULT_RELAY_SERVER: &str = "120.78.77.248:21117";
+
+/// 从账号服务地址解析主机名("http://host:21120" → "host")。
+fn account_server_host(server: &str) -> Option<String> {
+    let s = server.trim().trim_end_matches('/');
+    let rest = s
+        .strip_prefix("http://")
+        .or_else(|| s.strip_prefix("https://"))
+        .unwrap_or(s);
+    let host = match rest.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => host,
+        _ => rest,
+    }
+    .trim()
+    .trim_start_matches('[')
+    .trim_end_matches(']');
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+/// 生效的信令服务器地址。
+///
+/// 账号服务与信令服务通常同机部署。首次登录或旧配置仍为内置公网默认值时,
+/// 自动将信令切到登录账号所在主机；用户明确填写的自定义信令地址保持不变。
 pub(crate) fn effective_signal_server(cfg: &AppConfig) -> Option<String> {
-    cfg.signal_server.clone()
+    let configured = cfg.signal_server.as_deref().filter(|s| !s.trim().is_empty());
+    if let Some(host) = cfg.account.as_ref().and_then(|a| account_server_host(&a.server)) {
+        if configured.is_none() || configured == Some(DEFAULT_SIGNAL_SERVER) {
+            return Some(format!("{host}:21116"));
+        }
+    }
+    configured.map(str::to_string)
 }
 
 /// 生效的中继服务器地址。账号服务与中继服务可以分离,登录不参与地址推导。
 pub(crate) fn effective_relay_server(cfg: &AppConfig) -> Option<String> {
-    cfg.relay_server.clone()
+    let configured = cfg.relay_server.as_deref().filter(|s| !s.trim().is_empty());
+    if let Some(host) = cfg.account.as_ref().and_then(|a| account_server_host(&a.server)) {
+        if configured.is_none() || configured == Some(DEFAULT_RELAY_SERVER) {
+            return Some(format!("{host}:21117"));
+        }
+    }
+    configured.map(str::to_string)
 }
 
 /// 登录令牌失效处理:通知前端重新登录(广播 `auth-expired`)并清除本地会话。
@@ -1319,7 +1354,7 @@ mod tests {
         assert_eq!(effective_signal_server(&cfg).as_deref(), Some("sig.example.com:21116"));
         assert_eq!(effective_relay_server(&cfg).as_deref(), Some("relay.example.com:21117"));
 
-        // 已登录:仍使用配置值,允许信令/中继独立部署或使用自定义端口
+        // 已登录:明确配置的独立信令/中继地址优先保留
         let cfg = AppConfig {
             signal_server: Some("sig.example.com:21116".into()),
             relay_server: Some("relay.example.com:21117".into()),
@@ -1333,10 +1368,10 @@ mod tests {
         assert_eq!(effective_signal_server(&cfg).as_deref(), Some("sig.example.com:21116"));
         assert_eq!(effective_relay_server(&cfg).as_deref(), Some("relay.example.com:21117"));
 
-        // 配置缺失时不从账号服务地址推导,避免误连分离部署的服务
+        // 配置仍为内置默认值时,登录账号主机提供同部署信令/中继
         let cfg = AppConfig {
-            signal_server: None,
-            relay_server: None,
+            signal_server: Some(DEFAULT_SIGNAL_SERVER.into()),
+            relay_server: Some(DEFAULT_RELAY_SERVER.into()),
             account: Some(AccountSession {
                 server: "http://account.example.com:21120".into(),
                 username: "alice".into(),
@@ -1344,8 +1379,16 @@ mod tests {
             }),
             ..AppConfig::default()
         };
-        assert!(effective_signal_server(&cfg).is_none());
-        assert!(effective_relay_server(&cfg).is_none());
+        assert_eq!(effective_signal_server(&cfg).as_deref(), Some("account.example.com:21116"));
+        assert_eq!(effective_relay_server(&cfg).as_deref(), Some("account.example.com:21117"));
+    }
+
+    #[test]
+    fn account_server_host_parses() {
+        assert_eq!(account_server_host("http://120.78.77.248:21120").as_deref(), Some("120.78.77.248"));
+        assert_eq!(account_server_host("https://svc.example.com").as_deref(), Some("svc.example.com"));
+        assert_eq!(account_server_host("myhost:1234").as_deref(), Some("myhost"));
+        assert_eq!(account_server_host("").as_deref(), None);
     }
 
     #[test]

@@ -83,6 +83,9 @@ async fn main() {
     };
     let _ = ARGS.set(args);
 
+    // 操作日志根目录(文件审计日志落于 <临时目录>/dcr-relay-logs/logs/operations-YYYYMMDD.log)
+    dcr_server::operation_log::register_log_dir(std::env::temp_dir().join("dcr-relay-logs"));
+
     let bind = ARGS.get().unwrap();
     let tcp_addr: SocketAddr = format!("{}:{}", bind.bind, bind.tcp_port)
         .parse()
