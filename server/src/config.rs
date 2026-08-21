@@ -94,10 +94,7 @@ impl ConfigStore {
 
     /// 保存当前配置到磁盘。
     pub fn save(&self) {
-        let cfg = self
-            .inner
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let cfg = self.inner.read().unwrap_or_else(|e| e.into_inner());
         match serde_json::to_string_pretty(&*cfg) {
             Ok(json) => {
                 if let Err(e) = std::fs::write(&self.path, json) {
@@ -110,10 +107,7 @@ impl ConfigStore {
 
     /// 读取当前配置(克隆)。
     pub fn get(&self) -> ServerConfig {
-        self.inner
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// 用新配置整体替换并落盘(管理后台 PUT 使用)。
@@ -155,7 +149,8 @@ mod tests {
     use super::*;
 
     fn tmp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("dcr-config-test-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("dcr-config-test-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -168,7 +163,8 @@ mod tests {
         // 配置文件应已落盘
         let path = dir.join("config.json");
         assert!(path.exists(), "配置应落盘");
-        let back: ServerConfig = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let back: ServerConfig =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(back.open_register);
         assert_eq!(back.min_client_version, "0.1.0");
         std::fs::remove_dir_all(&dir).ok();

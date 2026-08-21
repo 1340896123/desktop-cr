@@ -52,16 +52,37 @@ const AV_PIX_FMT_NV12: c_int = 23;
 
 /// FFmpeg 各主版本 DLL 文件名候选(新版本优先)。
 const AVCODEC_NAMES: &[&str] = &[
-    "avcodec-63", "avcodec-62", "avcodec-61", "avcodec-60", "avcodec-59", "avcodec-58", "avcodec",
+    "avcodec-63",
+    "avcodec-62",
+    "avcodec-61",
+    "avcodec-60",
+    "avcodec-59",
+    "avcodec-58",
+    "avcodec",
 ];
 const AVUTIL_NAMES: &[&str] = &[
-    "avutil-61", "avutil-60", "avutil-59", "avutil-58", "avutil-57", "avutil-56", "avutil",
+    "avutil-61",
+    "avutil-60",
+    "avutil-59",
+    "avutil-58",
+    "avutil-57",
+    "avutil-56",
+    "avutil",
 ];
 const SWSCALE_NAMES: &[&str] = &[
-    "swscale-10", "swscale-8", "swscale-7", "swscale-6", "swscale-5", "swscale",
+    "swscale-10",
+    "swscale-8",
+    "swscale-7",
+    "swscale-6",
+    "swscale-5",
+    "swscale",
 ];
 const SWRESAMPLE_NAMES: &[&str] = &[
-    "swresample-7", "swresample-5", "swresample-4", "swresample-3", "swresample",
+    "swresample-7",
+    "swresample-5",
+    "swresample-4",
+    "swresample-3",
+    "swresample",
 ];
 
 // ---------------------------------------------------------------------------
@@ -317,8 +338,18 @@ type StrError = unsafe extern "C" fn(c_int, *mut c_char, usize) -> c_int;
 type ParametersAlloc = unsafe extern "C" fn() -> *mut AvCodecParameters;
 type ParametersFree = unsafe extern "C" fn(*mut *mut AvCodecParameters);
 type ParametersToContext = unsafe extern "C" fn(*mut c_void, *const AvCodecParameters) -> c_int;
-type SwsGetCtx =
-    unsafe extern "C" fn(c_int, c_int, c_int, c_int, c_int, c_int, c_int, *mut c_void, *mut c_void, *const f64) -> *mut c_void;
+type SwsGetCtx = unsafe extern "C" fn(
+    c_int,
+    c_int,
+    c_int,
+    c_int,
+    c_int,
+    c_int,
+    c_int,
+    *mut c_void,
+    *mut c_void,
+    *const f64,
+) -> *mut c_void;
 type SwsScale = unsafe extern "C" fn(
     *mut c_void,
     *const *const u8,
@@ -331,7 +362,8 @@ type SwsScale = unsafe extern "C" fn(
 type SwsFree = unsafe extern "C" fn(*mut c_void);
 // 硬件解码(D3D11VA,RustDesk hwcodec 技术路线)
 type CodecVersion = unsafe extern "C" fn() -> u32;
-type HwDeviceCtxCreate = unsafe extern "C" fn(*mut *mut c_void, c_int, *const c_char, *mut c_void, c_int) -> c_int;
+type HwDeviceCtxCreate =
+    unsafe extern "C" fn(*mut *mut c_void, c_int, *const c_char, *mut c_void, c_int) -> c_int;
 type HwFrameTransferData = unsafe extern "C" fn(*mut AvFrame, *const AvFrame, c_int) -> c_int;
 type BufferRef = unsafe extern "C" fn(*const c_void) -> *mut c_void;
 type BufferUnref = unsafe extern "C" fn(*mut *mut c_void);
@@ -426,7 +458,10 @@ fn build_fns() -> Option<&'static Fns> {
             av_strerror: libs.avutil.get(b"av_strerror").ok()?,
             avcodec_parameters_alloc: libs.avcodec.get(b"avcodec_parameters_alloc").ok()?,
             avcodec_parameters_free: libs.avcodec.get(b"avcodec_parameters_free").ok()?,
-            avcodec_parameters_to_context: libs.avcodec.get(b"avcodec_parameters_to_context").ok()?,
+            avcodec_parameters_to_context: libs
+                .avcodec
+                .get(b"avcodec_parameters_to_context")
+                .ok()?,
             sws_get_context: libs.swscale.get(b"sws_getContext").ok()?,
             sws_scale: libs.swscale.get(b"sws_scale").ok()?,
             sws_free_context: libs.swscale.get(b"sws_freeContext").ok()?,
@@ -449,8 +484,7 @@ fn load_libs() -> Option<&'static Libs> {
             return Some(Box::leak(Box::new(l)) as &'static Libs);
         }
     }
-    try_load_system()
-        .map(|l| Box::leak(Box::new(l)) as &'static Libs)
+    try_load_system().map(|l| Box::leak(Box::new(l)) as &'static Libs)
 }
 
 /// 搜索路径:资源目录 → 可执行文件旁 → CARGO_MANIFEST_DIR/resources → FFMPEG_HOME。
@@ -467,7 +501,11 @@ fn candidate_dirs() -> Vec<std::path::PathBuf> {
         }
     }
     if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        dirs.push(std::path::PathBuf::from(manifest).join("resources").join("ffmpeg"));
+        dirs.push(
+            std::path::PathBuf::from(manifest)
+                .join("resources")
+                .join("ffmpeg"),
+        );
     }
     if let Ok(home) = std::env::var("FFMPEG_HOME") {
         let home = std::path::PathBuf::from(home);
@@ -565,7 +603,11 @@ pub fn detect_gpus() -> Vec<GpuInfo> {
             break;
         };
         if let Ok(desc) = unsafe { adapter.GetDesc1() } {
-            let end = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
+            let end = desc
+                .Description
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(desc.Description.len());
             let name = String::from_utf16_lossy(&desc.Description[..end]);
             out.push(GpuInfo {
                 vendor_id: desc.VendorId,
@@ -671,7 +713,10 @@ pub fn preferred_encoder(family: &str) -> Option<String> {
 /// 汇总报告(供日志 / 操作日志展示)。
 pub fn capability_report() -> String {
     let mut lines = Vec::new();
-    lines.push(format!("ffmpeg_dll={}", if available() { "loaded" } else { "missing" }));
+    lines.push(format!(
+        "ffmpeg_dll={}",
+        if available() { "loaded" } else { "missing" }
+    ));
     let gpus = detect_gpus();
     if gpus.is_empty() {
         lines.push("gpu=无".to_string());
@@ -739,7 +784,8 @@ impl HwEncoder {
         let bitrate = bitrate_for(dst_w, dst_h, fps);
 
         unsafe {
-            let codec_c = std::ffi::CString::new(codec_name).map_err(|_| "编码器名含 NUL".to_string())?;
+            let codec_c =
+                std::ffi::CString::new(codec_name).map_err(|_| "编码器名含 NUL".to_string())?;
             let codec = (f.avcodec_find_encoder_by_name)(codec_c.as_ptr());
             if codec.is_null() {
                 return Err(format!("编码器不可用: {codec_name}"));
@@ -761,7 +807,10 @@ impl HwEncoder {
             (*par).height = dst_h as c_int;
             (*par).bit_rate = bitrate as i64;
             (*par).sample_aspect_ratio = AvRational { num: 1, den: 1 };
-            (*par).framerate = AvRational { num: fps as c_int, den: 1 };
+            (*par).framerate = AvRational {
+                num: fps as c_int,
+                den: 1,
+            };
             let rc = (f.avcodec_parameters_to_context)(ctx, par);
             (f.avcodec_parameters_free)(&mut par);
             if rc < 0 {
@@ -781,7 +830,10 @@ impl HwEncoder {
             (f.av_opt_set_q)(
                 ctx,
                 opt("time_base").as_ptr(),
-                AvRational { num: 1, den: fps as c_int },
+                AvRational {
+                    num: 1,
+                    den: fps as c_int,
+                },
                 0,
             );
 
@@ -903,7 +955,12 @@ impl HwEncoder {
             }
 
             // RGB → YUV420P(swscale 内部缩放)
-            let src: [*const u8; 4] = [rgb.as_ptr(), std::ptr::null(), std::ptr::null(), std::ptr::null()];
+            let src: [*const u8; 4] = [
+                rgb.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+            ];
             let src_stride: [c_int; 4] = [(self.src_w * 3) as c_int, 0, 0, 0];
             let dst = (*self.yuv).data.as_ptr();
             let dst_stride = (*self.yuv).linesize.as_ptr();
@@ -1153,7 +1210,11 @@ impl HwDecoder {
                         self.frame
                     };
                     let fmt = (*src_frame).format;
-                    if self.sws.is_null() || self.sws_w != w || self.sws_h != h || self.sws_fmt != fmt {
+                    if self.sws.is_null()
+                        || self.sws_w != w
+                        || self.sws_h != h
+                        || self.sws_fmt != fmt
+                    {
                         if !self.sws.is_null() {
                             (f.sws_free_context)(self.sws);
                         }
@@ -1236,7 +1297,9 @@ fn try_open_hwdecoder(
             0,
         );
         if ret < 0 || device.is_null() {
-            return Err(format!("av_hwdevice_ctx_create 失败: {ret}(显卡不支持 D3D11VA?)"));
+            return Err(format!(
+                "av_hwdevice_ctx_create 失败: {ret}(显卡不支持 D3D11VA?)"
+            ));
         }
         // 3) 把设备引用挂到 codec_ctx->hw_device_ctx(偏移 0x230,编译期已断言)
         let ctx_ref = avcodec_ctx_ref(ctx);
@@ -1313,7 +1376,12 @@ pub fn count_nalus(data: &[u8]) -> usize {
             i += 3;
             continue;
         }
-        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && i + 3 < data.len() && data[i + 3] == 1 {
+        if data[i] == 0
+            && data[i + 1] == 0
+            && data[i + 2] == 0
+            && i + 3 < data.len()
+            && data[i + 3] == 1
+        {
             n += 1;
             i += 4;
             continue;
@@ -1343,7 +1411,9 @@ mod tests {
     #[test]
     fn nalu_counting() {
         // 3 字节 + 4 字节起始码混排
-        let data = [0, 0, 0, 1, 0x67, 0, 0, 1, 0x68, 0, 0, 0, 1, 0x65, 0, 0, 0, 0];
+        let data = [
+            0, 0, 0, 1, 0x67, 0, 0, 1, 0x68, 0, 0, 0, 1, 0x65, 0, 0, 0, 0,
+        ];
         assert_eq!(count_nalus(&data), 3);
         assert_eq!(count_nalus(&[]), 0);
         // 内部 00 00 00 00 不应误判(最后一个 0 非 1)
@@ -1357,7 +1427,10 @@ mod tests {
         println!("[ffmpeg] {}", crate::ffmpeg_hw::capability_report());
         let encs = detect_encoders();
         for (n, ok) in &encs {
-            println!("[ffmpeg] 编码器 {n}: {}", if *ok { "可用" } else { "不可用" });
+            println!(
+                "[ffmpeg] 编码器 {n}: {}",
+                if *ok { "可用" } else { "不可用" }
+            );
         }
         println!(
             "[ffmpeg] 首选 h264: {:?}; 首选 hevc: {:?}",
@@ -1378,10 +1451,30 @@ mod tests {
             let mut ctx = (f.avcodec_alloc_context3)(codec);
             assert!(!ctx.is_null());
             for name in [
-                "width", "height", "pix_fmt", "gop_size", "max_b_frames", "threads", "flags",
-                "bit_rate", "time_base", "frame_rate", "preset",
-                "bf", "gop", "g", "forced_idr", "zerolatency", "tune", "rc", "rc-lookahead",
-                "maxrate", "bufsize", "cq", "cq-level", "qp",
+                "width",
+                "height",
+                "pix_fmt",
+                "gop_size",
+                "max_b_frames",
+                "threads",
+                "flags",
+                "bit_rate",
+                "time_base",
+                "frame_rate",
+                "preset",
+                "bf",
+                "gop",
+                "g",
+                "forced_idr",
+                "zerolatency",
+                "tune",
+                "rc",
+                "rc-lookahead",
+                "maxrate",
+                "bufsize",
+                "cq",
+                "cq-level",
+                "qp",
             ] {
                 let n = std::ffi::CString::new(name).unwrap();
                 let rc = (f.av_opt_set_int)(ctx, n.as_ptr(), 1, 0);
@@ -1390,12 +1483,7 @@ mod tests {
                 println!("[probe] int-children {name}: rc={rc2}");
             }
             let tb = std::ffi::CString::new("time_base").unwrap();
-            let rc = (f.av_opt_set_q)(
-                ctx,
-                tb.as_ptr(),
-                AvRational { num: 1, den: 30 },
-                0,
-            );
+            let rc = (f.av_opt_set_q)(ctx, tb.as_ptr(), AvRational { num: 1, den: 30 }, 0);
             println!("[probe] q time_base: rc={rc}");
             let p = std::ffi::CString::new("preset").unwrap();
             let v = std::ffi::CString::new("p4").unwrap();
@@ -1432,11 +1520,7 @@ mod tests {
             for i in 0..(w * h) {
                 let x = i % w;
                 let y = i / w;
-                rgb.extend_from_slice(&[
-                    (x % 256) as u8,
-                    (y % 256) as u8,
-                    ((x ^ y) % 256) as u8,
-                ]);
+                rgb.extend_from_slice(&[(x % 256) as u8, (y % 256) as u8, ((x ^ y) % 256) as u8]);
             }
             let mut enc = HwEncoder::open(&codec, codec_family_id(family), w, h, 1920, 1080, 60)
                 .expect("打开编码器失败");
@@ -1471,7 +1555,13 @@ mod tests {
     fn ffmpeg_probe_hevc() {
         let f = fns().expect("FFmpeg 未加载");
         for name in [
-            "hevc_nvenc", "hevc_qsv", "hevc_amf", "libx265", "hevc", "hevc_cuvid", "hevc_d3d11va",
+            "hevc_nvenc",
+            "hevc_qsv",
+            "hevc_amf",
+            "libx265",
+            "hevc",
+            "hevc_cuvid",
+            "hevc_d3d11va",
         ] {
             let c = std::ffi::CString::new(name).unwrap();
             unsafe {
@@ -1557,13 +1647,20 @@ mod tests {
             }
             assert!(!all.is_empty(), "{family} 编码无输出");
             assert!(has_annexb_prefix(&all), "{family} 输出应含 Annex-B 起始码");
-            assert!(count_nalus(&all) >= 2, "{family} 应包含 SPS/PPS + 帧数据 NAL");
+            assert!(
+                count_nalus(&all) >= 2,
+                "{family} 应包含 SPS/PPS + 帧数据 NAL"
+            );
             assert!(got_key, "{family} 应输出关键帧");
 
             let mut dec = HwDecoder::open(codec_family_id(family)).expect("打开解码器失败");
             println!(
                 "[roundtrip] {family} 解码路径: {}",
-                if dec.using_hwaccel() { "D3D11VA 硬件" } else { "软件" }
+                if dec.using_hwaccel() {
+                    "D3D11VA 硬件"
+                } else {
+                    "软件"
+                }
             );
             let out = dec.decode(&all).expect("解码失败").expect("解码无输出");
             let (dw, dh, rgb_out) = out;

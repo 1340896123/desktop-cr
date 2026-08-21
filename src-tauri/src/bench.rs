@@ -118,7 +118,10 @@ async fn relay_pair(relay_addr: &str) -> Result<(TcpStream, TcpStream), String> 
     )
     .await?;
     match relay_read::<_, RelayMsg>(&mut host).await? {
-        RelayMsg::Allocated { peer_connected: false, .. } => {}
+        RelayMsg::Allocated {
+            peer_connected: false,
+            ..
+        } => {}
         other => return Err(format!("中继 host 应答异常: {other:?}")),
     }
     // 2) client 后连:立即与 host 配对
@@ -198,7 +201,8 @@ async fn sender_loop(
     let mut synthetic_warned = false;
     let mut seq: u64 = 0;
     // H.264 硬件编码器(懒创建,首帧请求关键帧;分辨率变化时重建)
-    let use_video = codec == "h264" || codec == "hevc";    #[cfg(target_os = "windows")]
+    let use_video = codec == "h264" || codec == "hevc";
+    #[cfg(target_os = "windows")]
     let mut hw_enc: Option<crate::ffmpeg_hw::HwEncoder> = None;
     #[cfg(target_os = "windows")]
     let mut hw_key: Option<(u32, u32, u32, u32, u32, String)> = None;
@@ -249,14 +253,7 @@ async fn sender_loop(
         let (jw, jh, jpeg, codec_used) = if use_video {
             #[cfg(target_os = "windows")]
             {
-                let key = (
-                    w,
-                    h,
-                    target_w,
-                    target_h,
-                    target_fps,
-                    codec.to_string(),
-                );
+                let key = (w, h, target_w, target_h, target_fps, codec.to_string());
                 if hw_key.as_ref() != Some(&key) {
                     let family = codec.to_string();
                     let enc_name = crate::ffmpeg_hw::preferred_encoder(&family)
@@ -279,7 +276,10 @@ async fn sender_loop(
                         println!("[bench] FFmpeg 编码启用: {enc_name} ({family})");
                     }
                 }
-                match hw_enc.as_mut().and_then(|e| e.encode_rgb(&rgb).ok().flatten()) {
+                match hw_enc
+                    .as_mut()
+                    .and_then(|e| e.encode_rgb(&rgb).ok().flatten())
+                {
                     Some((ew, eh, data, _is_key)) => (ew, eh, data, codec.to_string()),
                     None => continue,
                 }
@@ -358,10 +358,7 @@ async fn receiver_loop(
             Err(_) => break,
         };
         let Msg::Frame {
-            seq,
-            jpeg,
-            codec,
-            ..
+            seq, jpeg, codec, ..
         } = msg
         else {
             continue;
@@ -379,10 +376,7 @@ async fn receiver_loop(
         let rendered: Option<(u32, u32)> = if is_video {
             #[cfg(target_os = "windows")]
             {
-                let need_rebuild = decoder
-                    .as_ref()
-                    .map(|(c, _)| c != &codec)
-                    .unwrap_or(true);
+                let need_rebuild = decoder.as_ref().map(|(c, _)| c != &codec).unwrap_or(true);
                 if need_rebuild {
                     if let Ok(d) =
                         crate::ffmpeg_hw::HwDecoder::open(crate::ffmpeg_hw::codec_family_id(&codec))
@@ -507,9 +501,7 @@ pub fn run_realtime_bench(
                 seconds,
             ));
 
-            let sender_stats = sender
-                .await
-                .map_err(|e| format!("发送端任务失败: {e}"))??;
+            let sender_stats = sender.await.map_err(|e| format!("发送端任务失败: {e}"))??;
             let _ = receiver.await.map_err(|e| format!("接收端任务失败: {e}"))?;
             let elapsed = started.elapsed().as_secs_f64();
 
@@ -552,7 +544,10 @@ pub fn run_realtime_bench(
     crate::operation_log::op_log(
         "bench",
         "done",
-        &format!("fps={:.1} rendered={}", result.realtime_fps, result.frames_rendered),
+        &format!(
+            "fps={:.1} rendered={}",
+            result.realtime_fps, result.frames_rendered
+        ),
     );
     Ok(result)
 }
@@ -635,10 +630,13 @@ async fn audio_relay_chain_async(
             .await
             .map_err(|e| format!("探测块发送失败: {e}"))?;
         let mut echo = vec![0u8; PROBE_CHUNK];
-        tokio::time::timeout(std::time::Duration::from_secs(10), client.read_exact(&mut echo))
-            .await
-            .map_err(|_| "探测块回传超时(中继不可达或未配对?)")?
-            .map_err(|e| format!("探测块回传读取失败: {e}"))?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.read_exact(&mut echo),
+        )
+        .await
+        .map_err(|_| "探测块回传超时(中继不可达或未配对?)")?
+        .map_err(|e| format!("探测块回传读取失败: {e}"))?;
         rtt_sum += t0.elapsed();
     }
     let avg_rtt_ms = rtt_sum.as_secs_f64() * 1000.0 / PROBES as f64;
@@ -677,7 +675,9 @@ async fn audio_relay_chain_async(
     let elapsed = t0.elapsed().as_secs_f64().max(1e-9);
 
     if recv_bytes != total {
-        return Err(format!("回传数据量不符: 发送 {total} 字节,回传 {recv_bytes} 字节"));
+        return Err(format!(
+            "回传数据量不符: 发送 {total} 字节,回传 {recv_bytes} 字节"
+        ));
     }
 
     // 全双工对称:上行/下行各传 total 字节,耗时相同
@@ -780,8 +780,8 @@ mod tests {
     #[test]
     #[ignore]
     fn realtime_chain_relay() {
-        let relay = std::env::var("DCR_BENCH_RELAY")
-            .unwrap_or_else(|_| "120.78.77.248:21117".to_string());
+        let relay =
+            std::env::var("DCR_BENCH_RELAY").unwrap_or_else(|_| "120.78.77.248:21117".to_string());
         let w = std::env::var("DCR_BENCH_WIDTH")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -791,25 +791,24 @@ mod tests {
             .and_then(|s| s.parse().ok())
             .unwrap_or(720);
         let codec = std::env::var("DCR_BENCH_CODEC").unwrap_or_else(|_| "jpeg".to_string());
-        let report =
-            run_realtime_bench("relay", Some(&relay), 5, 30, true, w, h, &codec).unwrap();
+        let report = run_realtime_bench("relay", Some(&relay), 5, 30, true, w, h, &codec).unwrap();
         assert!(report.frames_rendered > 0, "经公网中继未渲染任何帧");
         assert!(report.synthetic, "synthetic=true 时报告应标记合成帧模式");
         println!("[bench] 公网中继报告({relay}): {report:?}");
     }
 
     /// 真实 WASAPI 系统回环采集 → 经公网中继(120.78.77.248:21117)回传本机的传输速率基准,
-/// 回传落盘供人工查验,禁止合成/伪造。
-///
-/// 采集的是系统真实播放的声音(需系统正在播放音频,否则回环无采样会报错)。
-/// 中继地址取 `DCR_AUDIO_RELAY`,采集秒数取 `DCR_AUDIO_SECONDS`(1..10),
-/// 落盘路径取 `DCR_AUDIO_OUT`。
-/// 运行:`cargo test -- --ignored audio_relay_chain --nocapture`
+    /// 回传落盘供人工查验,禁止合成/伪造。
+    ///
+    /// 采集的是系统真实播放的声音(需系统正在播放音频,否则回环无采样会报错)。
+    /// 中继地址取 `DCR_AUDIO_RELAY`,采集秒数取 `DCR_AUDIO_SECONDS`(1..10),
+    /// 落盘路径取 `DCR_AUDIO_OUT`。
+    /// 运行:`cargo test -- --ignored audio_relay_chain --nocapture`
     #[test]
     #[ignore]
     fn audio_relay_chain() {
-        let relay = std::env::var("DCR_AUDIO_RELAY")
-            .unwrap_or_else(|_| "120.78.77.248:21117".to_string());
+        let relay =
+            std::env::var("DCR_AUDIO_RELAY").unwrap_or_else(|_| "120.78.77.248:21117".to_string());
         let seconds = std::env::var("DCR_AUDIO_SECONDS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -824,10 +823,19 @@ mod tests {
         assert!(report.total_transfer_bytes > 0, "音频回环未传输任何数据");
         assert!(report.avg_rtt_ms > 0.0, "往返延迟异常");
         let meta = std::fs::metadata(&out).expect("回传音频文件不存在");
-        assert_eq!(meta.len() as u64, report.wav_bytes, "落盘文件大小与传输字节不符");
+        assert_eq!(
+            meta.len() as u64,
+            report.wav_bytes,
+            "落盘文件大小与传输字节不符"
+        );
         // 校验回传文件是有效 WAV 且非空采样(真实采集内容,非合成)
-        let reader = hound::WavReader::new(std::io::Cursor::new(std::fs::read(&out).unwrap())).unwrap();
-        let nonzero = reader.into_samples::<i16>().filter_map(Result::ok).filter(|s| *s != 0).count();
+        let reader =
+            hound::WavReader::new(std::io::Cursor::new(std::fs::read(&out).unwrap())).unwrap();
+        let nonzero = reader
+            .into_samples::<i16>()
+            .filter_map(Result::ok)
+            .filter(|s| *s != 0)
+            .count();
         assert!(nonzero > 0, "回传音频全部为静音(无真实音频内容)");
         println!("[bench] 音频公网回环最终报告({relay}): {report:?}");
     }

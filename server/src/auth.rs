@@ -103,11 +103,7 @@ impl UserStore {
     /// 首次启动时创建初始管理员。账号列表为空才创建,返回创建用的密码
     /// (调用方打印到日志;`admin_pass` 缺省则随机生成)。
     pub fn ensure_bootstrap(&self, admin_pass: Option<&str>) -> Option<String> {
-        let empty = self
-            .users
-            .lock()
-            .map(|m| m.is_empty())
-            .unwrap_or(false);
+        let empty = self.users.lock().map(|m| m.is_empty()).unwrap_or(false);
         if !empty {
             return None;
         }
@@ -227,11 +223,17 @@ impl UserStore {
         rec.disabled = disabled;
         drop(map);
         self.save();
-        log::info!("[auth] 账号 {username} 已{}", if disabled { "禁用" } else { "启用" });
+        log::info!(
+            "[auth] 账号 {username} 已{}",
+            if disabled { "禁用" } else { "启用" }
+        );
         op_log(
             "auth",
             "set_disabled",
-            &format!("{username} {}", if disabled { "disabled" } else { "enabled" }),
+            &format!(
+                "{username} {}",
+                if disabled { "disabled" } else { "enabled" }
+            ),
         );
         Ok(())
     }
@@ -251,10 +253,7 @@ impl UserStore {
 
     /// 账号数量。
     pub fn count(&self) -> usize {
-        self.users
-            .lock()
-            .map(|m| m.len())
-            .unwrap_or_default()
+        self.users.lock().map(|m| m.len()).unwrap_or_default()
     }
 }
 
@@ -281,8 +280,8 @@ impl AuthState {
             op_log("auth", "login_failed", &username);
             return Err("用户名或密码错误".into());
         }
-        let token = issue_token(&self.secret, &username)
-            .map_err(|e| format!("令牌签发失败: {e}"))?;
+        let token =
+            issue_token(&self.secret, &username).map_err(|e| format!("令牌签发失败: {e}"))?;
         log::info!("[auth] 登录成功: {username}");
         op_log("auth", "login", &username);
         Ok(token)
@@ -401,7 +400,8 @@ fn random_password() -> String {
 
 /// 从 `data-dir/secret.key` 加载或生成 JWT 密钥(32 字节随机)。
 pub fn load_or_create_secret(data_dir: &Path) -> Vec<u8> {
-    std::fs::create_dir_all(data_dir).unwrap_or_else(|e| log::warn!("[auth] 创建数据目录失败: {e}"));
+    std::fs::create_dir_all(data_dir)
+        .unwrap_or_else(|e| log::warn!("[auth] 创建数据目录失败: {e}"));
     let path = data_dir.join("secret.key");
     if let Ok(bytes) = std::fs::read(&path) {
         if bytes.len() >= 16 {

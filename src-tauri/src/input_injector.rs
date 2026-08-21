@@ -225,7 +225,9 @@ pub(crate) fn inject_mouse_event_windows(
                 } else {
                     0
                 },
-                dwFlags: MOUSE_EVENT_FLAGS(flags.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0),
+                dwFlags: MOUSE_EVENT_FLAGS(
+                    flags.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0,
+                ),
                 time: 0,
                 dwExtraInfo: 0,
             },
@@ -282,7 +284,9 @@ pub(crate) fn inject_key_event_windows(
 
     // DOM KeyboardEvent.code → 虚拟键码(纯函数 code_to_vk,含字母/数字/符号/F 键/小键盘/修饰键);
     // 方向键、右 Control/右 Alt、Win 键、编辑键等扩展键必须带 EXTENDEDKEY 标志(由 is_extended_code 判定)。
-    let code = code.map(|c| c.to_string()).unwrap_or_else(|| key.to_string());
+    let code = code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| key.to_string());
     let vk_num = code_to_vk(&code)
         .or_else(|| code_to_vk(key))
         .unwrap_or_else(|| {
@@ -354,4 +358,3 @@ mod tests {
         assert_eq!(code_to_vk("Foo"), None);
     }
 }
-

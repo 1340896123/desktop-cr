@@ -11,8 +11,8 @@
 //! 编译占位,直接返回 Err("仅 Windows 支持");其余函数(编码/传输/解码/保存/测试)
 //! 跨平台可编译可运行。自动化测试全部使用合成数据,不依赖真实硬件。
 
-use base64::Engine as _;
 use crate::network::{read_msg, write_msg, Msg};
+use base64::Engine as _;
 use serde::Serialize;
 use std::path::Path;
 
@@ -199,8 +199,8 @@ fn decode_jpeg_verify(jpeg: &[u8]) -> Result<(u32, u32), String> {
 
 /// 解码 WAV 校验:返回总采样数(每声道帧数 × 声道数)。
 fn decode_wav_verify(wav: &[u8]) -> Result<usize, String> {
-    let reader =
-        hound::WavReader::new(std::io::Cursor::new(wav)).map_err(|e| format!("WAV 解码失败: {e}"))?;
+    let reader = hound::WavReader::new(std::io::Cursor::new(wav))
+        .map_err(|e| format!("WAV 解码失败: {e}"))?;
     let channels = reader.spec().channels;
     let frames = reader.duration();
     Ok(frames as usize * channels as usize)
@@ -238,8 +238,8 @@ pub(crate) fn pcm_to_wav(sample_rate: u16, channels: u16, samples: &[i16]) -> Ve
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
-    let mut wav = hound::WavWriter::new(MemWavTarget(inner.clone()), spec)
-        .expect("内存 WAV 写入器创建失败");
+    let mut wav =
+        hound::WavWriter::new(MemWavTarget(inner.clone()), spec).expect("内存 WAV 写入器创建失败");
     for s in samples {
         wav.write_sample(*s).expect("WAV 采样写入失败");
     }
@@ -266,8 +266,7 @@ fn save_outputs(
         count += 1;
     }
     if let Some(wav) = audio_wav {
-        std::fs::write(dir.join("audio_out.wav"), wav)
-            .map_err(|e| format!("写入音频失败: {e}"))?;
+        std::fs::write(dir.join("audio_out.wav"), wav).map_err(|e| format!("写入音频失败: {e}"))?;
         count += 1;
     }
     Ok(count)
@@ -285,7 +284,9 @@ pub fn run_pipeline(kind: &str, seconds: u32, out_dir: &Path) -> Result<Pipeline
         let want_video = kind == "video" || kind == "both";
         let want_audio = kind == "audio" || kind == "both";
         if !want_video && !want_audio {
-            return Err(format!("未知的 pipeline kind: {kind}(期望 video/audio/both)"));
+            return Err(format!(
+                "未知的 pipeline kind: {kind}(期望 video/audio/both)"
+            ));
         }
 
         let mut frames: Vec<(u32, u32, Vec<u8>)> = Vec::new();
@@ -336,10 +337,8 @@ pub fn run_pipeline(kind: &str, seconds: u32, out_dir: &Path) -> Result<Pipeline
 
         // ---- 落盘 ----
         let saved = save_outputs(out_dir, &frames, audio.as_deref())?;
-        let (frame_width, frame_height) = frames
-            .first()
-            .map(|(w, h, _)| (*w, *h))
-            .unwrap_or((0, 0));
+        let (frame_width, frame_height) =
+            frames.first().map(|(w, h, _)| (*w, *h)).unwrap_or((0, 0));
         let elapsed_ms = started.elapsed().as_millis() as u64;
         log::info!(
             "[media_pipeline] 全链路完成: kind={kind} frames={} saved={saved} elapsed={elapsed_ms}ms",
@@ -375,19 +374,19 @@ pub fn grab_frame_once(monitor_id: u32) -> Result<(u32, u32, Vec<u8>), String> {
     use windows::core::Interface;
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
     use windows::Win32::Graphics::Direct3D11::{
-        D3D11CreateDevice, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAP_READ,
-        D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
-        ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+        D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+        D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+        D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
     };
     use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIFactory1,
-        IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+        CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+        DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
     };
 
     // 1) DXGI 工厂 → 适配器(0) → 指定输出(显示器)
-    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }
-        .map_err(|e| format!("CreateDXGIFactory1 失败: {e}"))?;
+    let factory: IDXGIFactory1 =
+        unsafe { CreateDXGIFactory1() }.map_err(|e| format!("CreateDXGIFactory1 失败: {e}"))?;
     let adapter = unsafe { factory.EnumAdapters1(0) }
         .map_err(|e| format!("EnumAdapters1(0) 失败(可能无 GPU): {e}"))?;
     let output = unsafe { adapter.EnumOutputs(monitor_id) }
@@ -455,7 +454,10 @@ pub fn grab_frame_once(monitor_id: u32) -> Result<(u32, u32, Vec<u8>), String> {
         staging_desc.MiscFlags = 0;
         staging_desc.MipLevels = 1;
         staging_desc.ArraySize = 1;
-        staging_desc.SampleDesc = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
+        staging_desc.SampleDesc = DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        };
         let mut staging: Option<ID3D11Texture2D> = None;
         unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) }
             .map_err(|e| format!("创建 staging 纹理失败: {e}"))?;
@@ -692,8 +694,9 @@ fn capture_wasapi_loopback(seconds: u32) -> Result<(u16, u16, Vec<i16>), String>
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED).ok();
 
-        let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-            .map_err(|e| format!("创建 MMDeviceEnumerator 失败: {e}"))?;
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|e| format!("创建 MMDeviceEnumerator 失败: {e}"))?;
         let device = enumerator
             .GetDefaultAudioEndpoint(eRender, eConsole)
             .map_err(|e| format!("获取默认渲染设备(扬声器)失败: {e}"))?;
@@ -701,7 +704,9 @@ fn capture_wasapi_loopback(seconds: u32) -> Result<(u16, u16, Vec<i16>), String>
             .Activate::<IAudioClient>(CLSCTX_ALL, None)
             .map_err(|e| format!("激活 IAudioClient 失败: {e}"))?;
 
-        let mix = client.GetMixFormat().map_err(|e| format!("GetMixFormat 失败: {e}"))?;
+        let mix = client
+            .GetMixFormat()
+            .map_err(|e| format!("GetMixFormat 失败: {e}"))?;
         let fmt = &*mix;
         let sample_rate = fmt.nSamplesPerSec as u16;
         let channels = fmt.nChannels as u16;
@@ -723,7 +728,8 @@ fn capture_wasapi_loopback(seconds: u32) -> Result<(u16, u16, Vec<i16>), String>
             .map_err(|e| format!("获取 IAudioCaptureClient 失败: {e}"))?;
         client.Start().map_err(|e| format!("启动回环流失败: {e}"))?;
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(u64::from(seconds));
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(u64::from(seconds));
         let mut samples: Vec<i16> = Vec::new();
         let mut last_err: Option<String> = None;
         while std::time::Instant::now() < deadline {
@@ -761,7 +767,9 @@ fn capture_wasapi_loopback(seconds: u32) -> Result<(u16, u16, Vec<i16>), String>
                         samples.extend(std::iter::repeat_n(0i16, total));
                     }
                 }
-                capture.ReleaseBuffer(frames).map_err(|e| format!("ReleaseBuffer: {e}"))?;
+                capture
+                    .ReleaseBuffer(frames)
+                    .map_err(|e| format!("ReleaseBuffer: {e}"))?;
                 packet = capture
                     .GetNextPacketSize()
                     .map_err(|e| format!("GetNextPacketSize: {e}"))?;
@@ -774,7 +782,9 @@ fn capture_wasapi_loopback(seconds: u32) -> Result<(u16, u16, Vec<i16>), String>
         if samples.is_empty() {
             return Err(format!(
                 "WASAPI 回环无任何采样(系统未渲染音频?请播放声音){}",
-                last_err.map(|e| format!("; 最近错误: {e}")).unwrap_or_default()
+                last_err
+                    .map(|e| format!("; 最近错误: {e}"))
+                    .unwrap_or_default()
             ));
         }
         log::info!(
@@ -986,7 +996,12 @@ mod tests {
             Some(d) => {
                 println!("默认输出设备: {:?}", d.name().unwrap_or_default());
                 match d.default_output_config() {
-                    Ok(cfg) => println!("  默认输出配置: {}Hz {}ch {:?}", cfg.sample_rate().0, cfg.channels(), cfg.sample_format()),
+                    Ok(cfg) => println!(
+                        "  默认输出配置: {}Hz {}ch {:?}",
+                        cfg.sample_rate().0,
+                        cfg.channels(),
+                        cfg.sample_format()
+                    ),
                     Err(e) => println!("  默认输出配置获取失败: {e}"),
                 }
             }
@@ -1002,7 +1017,12 @@ mod tests {
             let name = d.name().unwrap_or_default();
             match d.default_input_config() {
                 Ok(cfg) => {
-                    println!("[可用] {name} | 默认格式: {}Hz {}ch {:?}", cfg.sample_rate().0, cfg.channels(), cfg.sample_format());
+                    println!(
+                        "[可用] {name} | 默认格式: {}Hz {}ch {:?}",
+                        cfg.sample_rate().0,
+                        cfg.channels(),
+                        cfg.sample_format()
+                    );
                     let (config, fmt) = pick_input_config(d).unwrap();
                     println!("  采集配置: {:?} {fmt:?}", config);
                     let r = match fmt {
@@ -1033,7 +1053,12 @@ mod tests {
             let name = d.name().unwrap_or_default();
             match d.default_output_config() {
                 Ok(cfg) => {
-                    println!("[可用] {name} | 默认格式: {}Hz {}ch {:?}", cfg.sample_rate().0, cfg.channels(), cfg.sample_format());
+                    println!(
+                        "[可用] {name} | 默认格式: {}Hz {}ch {:?}",
+                        cfg.sample_rate().0,
+                        cfg.channels(),
+                        cfg.sample_format()
+                    );
                     let config: cpal::StreamConfig = cfg.clone().into();
                     let r = match cfg.sample_format() {
                         cpal::SampleFormat::F32 => collect_audio::<f32>(d, config, 2),
@@ -1049,7 +1074,11 @@ mod tests {
                     match r {
                         Ok((rate, ch, samples)) => {
                             let nonzero = samples.iter().filter(|s| **s != 0).count();
-                            println!("  -> 采集成功: {rate}Hz/{ch}ch {} 采样,非零 {} 个", samples.len(), nonzero);
+                            println!(
+                                "  -> 采集成功: {rate}Hz/{ch}ch {} 采样,非零 {} 个",
+                                samples.len(),
+                                nonzero
+                            );
                         }
                         Err(e) => println!("  -> 采集失败: {e}"),
                     }
@@ -1072,7 +1101,11 @@ mod tests {
             }
         };
         let nonzero = samples.iter().filter(|s| **s != 0).count();
-        println!("[diag] 原生 WASAPI 回环采集成功: {rate}Hz/{ch}ch {} 采样,非零 {} 个", samples.len(), nonzero);
+        println!(
+            "[diag] 原生 WASAPI 回环采集成功: {rate}Hz/{ch}ch {} 采样,非零 {} 个",
+            samples.len(),
+            nonzero
+        );
         assert!(nonzero > 0, "采集到全零音频(系统静音或驱动问题)");
     }
 
@@ -1083,8 +1116,7 @@ mod tests {
         let channels = 1u16;
         let mut samples = Vec::with_capacity(32000);
         for i in 0..32000i32 {
-            let v =
-                ((f64::from(i)) * 2.0 * std::f64::consts::PI * 440.0 / f64::from(rate)).sin();
+            let v = ((f64::from(i)) * 2.0 * std::f64::consts::PI * 440.0 / f64::from(rate)).sin();
             samples.push((v * 0.5 * f64::from(i16::MAX)) as i16);
         }
 

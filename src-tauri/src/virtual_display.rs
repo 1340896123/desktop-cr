@@ -109,9 +109,7 @@ pub fn add_virtual_monitor(
         }
 
         emit_monitors_changed(&app)?;
-        log::info!(
-            "[virtual_display] 新增虚拟屏 {width}x{height} @ {fps}fps -> id={new_id}"
-        );
+        log::info!("[virtual_display] 新增虚拟屏 {width}x{height} @ {fps}fps -> id={new_id}");
         crate::operation_log::op_log(
             "virtual_display",
             "add_monitor",
@@ -149,11 +147,7 @@ pub fn list_virtual_monitors() -> Result<Vec<VirtualMonitor>, String> {
     #[cfg(not(target_os = "windows"))]
     {
         log::info!("[virtual_display] (非 Windows) 返回空虚拟屏列表");
-        crate::operation_log::op_log(
-            "virtual_display",
-            "list_monitors",
-            "count=0 (非 Windows)",
-        );
+        crate::operation_log::op_log("virtual_display", "list_monitors", "count=0 (非 Windows)");
         Ok(Vec::new())
     }
 }
@@ -287,7 +281,8 @@ fn install_virtual_display_driver_windows(app: &AppHandle) -> Result<String, Str
     let stderr = String::from_utf8_lossy(&output.stderr);
     // usbmmidd 成功输出通常含 "success";退出码 0 且无 "failed" 亦视为成功
     let ok = output.status.success()
-        && (stdout.contains("success") || (!stdout.contains("failed") && !stderr.contains("failed")));
+        && (stdout.contains("success")
+            || (!stdout.contains("failed") && !stderr.contains("failed")));
     if ok {
         log::info!("[virtual_display] 驱动安装成功: {}", stdout.trim());
         Ok("虚拟显示器驱动安装成功(usbmmidd)".into())
@@ -333,7 +328,10 @@ fn write_monitor_resolutions(width: u32, height: u32) -> Result<(), String> {
         if ret.0 == ERROR_ACCESS_DENIED.0 {
             return Err("写入注册表失败: 需要以管理员身份运行".into());
         }
-        return Err(format!("打开注册表键失败(错误码 {}): 需要管理员权限", ret.0));
+        return Err(format!(
+            "打开注册表键失败(错误码 {}): 需要管理员权限",
+            ret.0
+        ));
     }
 
     // 目标分辨率放首位(值名 "0"),其余用 usbmmidd 默认分辨率(共 10 项)
@@ -350,7 +348,12 @@ fn write_monitor_resolutions(width: u32, height: u32) -> Result<(), String> {
     ];
     let target = monitor_registry_value(width, height);
     let values: Vec<(String, String)> = std::iter::once(target.clone())
-        .chain(defaults.iter().map(|s| s.to_string()).filter(|s| *s != target))
+        .chain(
+            defaults
+                .iter()
+                .map(|s| s.to_string())
+                .filter(|s| *s != target),
+        )
         .take(10)
         .enumerate()
         .map(|(i, v)| (i.to_string(), v))
@@ -466,9 +469,7 @@ fn try_dylib_plug(driver_dir: &Path, plug_in: bool, id: u32) -> bool {
     })();
     match handled {
         Some(true) => {
-            log::info!(
-                "[virtual_display] dylib 控制 DLL 处理成功(plug_in={plug_in}, id={id})"
-            );
+            log::info!("[virtual_display] dylib 控制 DLL 处理成功(plug_in={plug_in}, id={id})");
             true
         }
         _ => false,
@@ -485,4 +486,3 @@ mod tests {
         assert_eq!(monitor_registry_value(2560, 1440), "2560x1440");
     }
 }
-

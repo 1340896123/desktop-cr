@@ -43,7 +43,13 @@ impl SessionCore {
 
     /// 记录会话开始;同 id 已存在则替换(视为旧会话被新会话覆盖)。
     /// `max_concurrent` 非 0 且当前会话数已达上限时返回 Err(不写入)。
-    pub fn start(&self, id: &str, host: &str, client: &str, max_concurrent: usize) -> Result<(), String> {
+    pub fn start(
+        &self,
+        id: &str,
+        host: &str,
+        client: &str,
+        max_concurrent: usize,
+    ) -> Result<(), String> {
         {
             let map = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             if max_concurrent > 0 && map.len() >= max_concurrent && !map.contains_key(id) {
@@ -107,10 +113,7 @@ impl SessionCore {
 
     /// 当前活跃会话数。
     pub fn count(&self) -> usize {
-        self.sessions
-            .lock()
-            .map(|m| m.len())
-            .unwrap_or_default()
+        self.sessions.lock().map(|m| m.len()).unwrap_or_default()
     }
 
     /// 清理超过 `max_idle` 未活动的会话(定时调用)。
@@ -137,7 +140,8 @@ mod tests {
     #[test]
     fn start_end_list_cycle() {
         let core = SessionCore::new();
-        core.start("peer-1", "10.0.0.1:21118", "10.0.0.2:21117", 0).unwrap();
+        core.start("peer-1", "10.0.0.1:21118", "10.0.0.2:21117", 0)
+            .unwrap();
         assert_eq!(core.count(), 1);
         let rec = core.list().remove(0);
         assert_eq!(rec.id, "peer-1");

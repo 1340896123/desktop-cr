@@ -161,7 +161,11 @@ mod tests {
         ];
         for (msg, expect) in cases {
             let v = serde_json::to_value(&msg).unwrap();
-            assert_eq!(v["t"].as_str().unwrap(), expect, "消息 {v} 的 t 标签应为 {expect}");
+            assert_eq!(
+                v["t"].as_str().unwrap(),
+                expect,
+                "消息 {v} 的 t 标签应为 {expect}"
+            );
         }
     }
 
@@ -192,7 +196,8 @@ mod tests {
             peer_connected: true,
         };
         assert_eq!(serde_json::to_value(&allocated).unwrap()["t"], "allocated");
-        let back: RelayMsg = serde_json::from_str(&serde_json::to_string(&allocated).unwrap()).unwrap();
+        let back: RelayMsg =
+            serde_json::from_str(&serde_json::to_string(&allocated).unwrap()).unwrap();
         assert_eq!(allocated, back);
     }
 }

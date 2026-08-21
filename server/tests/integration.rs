@@ -246,17 +246,28 @@ async fn signal_persistent_connection_keeps_online() {
     let mut q = TcpStream::connect(addr).await.unwrap();
     // 注册应答后连接不关闭:多次心跳后设备持续在线
     for i in 0..3 {
-        write_msg(&mut host, &SignalMsg::Heartbeat { id: "pc-long".into() })
-            .await
-            .unwrap();
+        write_msg(
+            &mut host,
+            &SignalMsg::Heartbeat {
+                id: "pc-long".into(),
+            },
+        )
+        .await
+        .unwrap();
         let ack: SignalMsg = read_msg(&mut host).await.unwrap();
         assert!(
             matches!(ack, SignalMsg::RegisterAck { ok: true, .. }),
             "第 {i} 次心跳应成功"
         );
-        write_msg(&mut q, &SignalMsg::Lookup { id: "pc-long".into(), token: String::new() })
-            .await
-            .unwrap();
+        write_msg(
+            &mut q,
+            &SignalMsg::Lookup {
+                id: "pc-long".into(),
+                token: String::new(),
+            },
+        )
+        .await
+        .unwrap();
         let ack: SignalMsg = read_msg(&mut q).await.unwrap();
         match ack {
             SignalMsg::LookupAck { online, .. } => assert!(online, "长连接心跳后应在线"),
@@ -267,9 +278,15 @@ async fn signal_persistent_connection_keeps_online() {
     // 断开长连接 → 注销
     drop(host);
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    write_msg(&mut q, &SignalMsg::Lookup { id: "pc-long".into(), token: String::new() })
-        .await
-        .unwrap();
+    write_msg(
+        &mut q,
+        &SignalMsg::Lookup {
+            id: "pc-long".into(),
+            token: String::new(),
+        },
+    )
+    .await
+    .unwrap();
     let ack: SignalMsg = read_msg(&mut q).await.unwrap();
     match ack {
         SignalMsg::LookupAck { online, .. } => assert!(!online, "长连接断开后应注销"),
@@ -293,9 +310,15 @@ async fn signal_persistent_connection_keeps_online() {
     .await
     .unwrap();
     let _: SignalMsg = read_msg(&mut host2).await.unwrap();
-    write_msg(&mut q, &SignalMsg::Lookup { id: "pc-long".into(), token: String::new() })
-        .await
-        .unwrap();
+    write_msg(
+        &mut q,
+        &SignalMsg::Lookup {
+            id: "pc-long".into(),
+            token: String::new(),
+        },
+    )
+    .await
+    .unwrap();
     let ack: SignalMsg = read_msg(&mut q).await.unwrap();
     match ack {
         SignalMsg::LookupAck { online, .. } => assert!(online, "重连注册后应恢复在线"),
@@ -318,11 +341,7 @@ async fn signal_list_filters_by_account() {
 
     // 三个设备分属 alice / bob / 未归属(各占一条长连接,保持不断开)
     let mut conns: Vec<TcpStream> = Vec::new();
-    for (id, user) in [
-        ("pc-alice", "alice"),
-        ("pc-bob", "bob"),
-        ("pc-free", ""),
-    ] {
+    for (id, user) in [("pc-alice", "alice"), ("pc-bob", "bob"), ("pc-free", "")] {
         let mut c = TcpStream::connect(addr).await.unwrap();
         write_msg(
             &mut c,
@@ -381,7 +400,11 @@ async fn signal_list_filters_by_account() {
     match ack {
         SignalMsg::ListAck { peers, auth_error } => {
             assert!(!auth_error, "开放模式不应把客户端令牌判为认证错误");
-            assert_eq!(peers.len(), 1, "开放模式带令牌仍应看到 alice 设备: {peers:?}");
+            assert_eq!(
+                peers.len(),
+                1,
+                "开放模式带令牌仍应看到 alice 设备: {peers:?}"
+            );
             assert_eq!(peers[0].id, "pc-alice");
         }
         other => panic!("期望 ListAck,得到 {other:?}"),
@@ -426,7 +449,9 @@ async fn signal_list_filters_by_account() {
 
     // 旧客户端兼容:`{"t":"list"}`(无 user 字段)等价于未登录语义
     let json = br#"{"t":"list"}"#;
-    q.write_all(&(json.len() as u32).to_le_bytes()).await.unwrap();
+    q.write_all(&(json.len() as u32).to_le_bytes())
+        .await
+        .unwrap();
     q.write_all(json).await.unwrap();
     let ack: SignalMsg = read_msg(&mut q).await.unwrap();
     match ack {
@@ -555,21 +580,35 @@ async fn signal_old_connection_disconnect_does_not_kill_new() {
     drop(c1);
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     let mut q = TcpStream::connect(addr).await.unwrap();
-    write_msg(&mut q, &SignalMsg::Lookup { id: "pc-race".into(), token: String::new() })
-        .await
-        .unwrap();
+    write_msg(
+        &mut q,
+        &SignalMsg::Lookup {
+            id: "pc-race".into(),
+            token: String::new(),
+        },
+    )
+    .await
+    .unwrap();
     let ack: SignalMsg = read_msg(&mut q).await.unwrap();
     match ack {
-        SignalMsg::LookupAck { online, .. } => assert!(online, "旧连接断开后不应误删新连接持有的设备"),
+        SignalMsg::LookupAck { online, .. } => {
+            assert!(online, "旧连接断开后不应误删新连接持有的设备")
+        }
         other => panic!("期望 LookupAck,得到 {other:?}"),
     }
 
     // 新连接也断开:此时才真正注销
     drop(c2);
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    write_msg(&mut q, &SignalMsg::Lookup { id: "pc-race".into(), token: String::new() })
-        .await
-        .unwrap();
+    write_msg(
+        &mut q,
+        &SignalMsg::Lookup {
+            id: "pc-race".into(),
+            token: String::new(),
+        },
+    )
+    .await
+    .unwrap();
     let ack: SignalMsg = read_msg(&mut q).await.unwrap();
     match ack {
         SignalMsg::LookupAck { online, .. } => assert!(!online, "最后一个连接断开后才应注销"),
@@ -581,10 +620,10 @@ async fn signal_old_connection_disconnect_does_not_kill_new() {
 /// 设备数上限:已登记设备重连不占新名额;新设备达到上限后被拒绝。
 #[tokio::test]
 async fn signal_reconnect_allowed_at_device_limit() {
-    use std::sync::{Arc, RwLock};
     use dcr_server::config::{ConfigStore, ServerConfig};
     use dcr_server::devices::DeviceStore;
     use dcr_server::sessions::SessionCore;
+    use std::sync::{Arc, RwLock};
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -678,11 +717,11 @@ async fn signal_reconnect_allowed_at_device_limit() {
 /// 不信任客户端自报的 user;无效令牌拒绝注册、列表按未登录处理。
 #[tokio::test]
 async fn signal_auth_token_validation() {
-    use std::sync::{Arc, RwLock};
     use dcr_server::auth::{AuthState, UserStore};
     use dcr_server::config::{ConfigStore, ServerConfig};
     use dcr_server::devices::DeviceStore;
     use dcr_server::sessions::SessionCore;
+    use std::sync::{Arc, RwLock};
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -698,7 +737,9 @@ async fn signal_auth_token_validation() {
     let devices = Arc::new(DeviceStore::new(&dir));
     let sessions = Arc::new(SessionCore::new());
     let cfg = Arc::new(RwLock::new(ConfigStore::new(&dir, ServerConfig::default())));
-    let core = Arc::new(signal::SignalCore::with_stores("", devices, sessions, cfg, secret));
+    let core = Arc::new(signal::SignalCore::with_stores(
+        "", devices, sessions, cfg, secret,
+    ));
     let serve = tokio::spawn(async move {
         let _ = signal::serve(listener, udp, core).await;
     });
@@ -955,11 +996,11 @@ async fn signal_heartbeat_requires_connection_ownership() {
 /// 其他账号/匿名即使知道设备 ID 也拿不到 lan/external。
 #[tokio::test]
 async fn signal_lookup_requires_account_ownership() {
-    use std::sync::{Arc, RwLock};
     use dcr_server::auth::{AuthState, UserStore};
     use dcr_server::config::{ConfigStore, ServerConfig};
     use dcr_server::devices::DeviceStore;
     use dcr_server::sessions::SessionCore;
+    use std::sync::{Arc, RwLock};
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -976,7 +1017,9 @@ async fn signal_lookup_requires_account_ownership() {
     let devices = Arc::new(DeviceStore::new(&dir));
     let sessions = Arc::new(SessionCore::new());
     let cfg = Arc::new(RwLock::new(ConfigStore::new(&dir, ServerConfig::default())));
-    let core = Arc::new(signal::SignalCore::with_stores("", devices, sessions, cfg, secret));
+    let core = Arc::new(signal::SignalCore::with_stores(
+        "", devices, sessions, cfg, secret,
+    ));
     let serve = tokio::spawn(async move {
         let _ = signal::serve(listener, udp, core).await;
     });
@@ -1029,10 +1072,16 @@ async fn signal_lookup_requires_account_ownership() {
     let ack: SignalMsg = read_msg(&mut q).await.unwrap();
     match ack {
         SignalMsg::LookupAck {
-            online, lan, external, ..
+            online,
+            lan,
+            external,
+            ..
         } => {
             assert!(!online, "他账号不得查到 alice 设备");
-            assert!(lan.is_empty() && external.is_empty(), "地址不得泄露: {lan}/{external}");
+            assert!(
+                lan.is_empty() && external.is_empty(),
+                "地址不得泄露: {lan}/{external}"
+            );
         }
         other => panic!("期望 LookupAck,得到 {other:?}"),
     }
@@ -1063,11 +1112,11 @@ async fn signal_lookup_requires_account_ownership() {
 /// 避免令牌过期后「我的设备」静默为空。
 #[tokio::test]
 async fn signal_list_reports_auth_error() {
-    use std::sync::{Arc, RwLock};
     use dcr_server::auth::{AuthState, UserStore};
     use dcr_server::config::{ConfigStore, ServerConfig};
     use dcr_server::devices::DeviceStore;
     use dcr_server::sessions::SessionCore;
+    use std::sync::{Arc, RwLock};
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -1082,7 +1131,9 @@ async fn signal_list_reports_auth_error() {
     let devices = Arc::new(DeviceStore::new(&dir));
     let sessions = Arc::new(SessionCore::new());
     let cfg = Arc::new(RwLock::new(ConfigStore::new(&dir, ServerConfig::default())));
-    let core = Arc::new(signal::SignalCore::with_stores("", devices, sessions, cfg, secret));
+    let core = Arc::new(signal::SignalCore::with_stores(
+        "", devices, sessions, cfg, secret,
+    ));
     let serve = tokio::spawn(async move {
         let _ = signal::serve(listener, udp, core).await;
     });
@@ -1197,10 +1248,13 @@ async fn stun_binding_udp() {
 
     client.send_to(&req, server_addr).await.unwrap();
     let mut buf = [0u8; 2048];
-    let (n, _) = tokio::time::timeout(std::time::Duration::from_secs(3), client.recv_from(&mut buf))
-        .await
-        .expect("STUN 响应超时")
-        .unwrap();
+    let (n, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        client.recv_from(&mut buf),
+    )
+    .await
+    .expect("STUN 响应超时")
+    .unwrap();
     let (port, ip) = stun::parse_binding_response(&buf[..n]).unwrap();
     assert_eq!(port, client_addr.port(), "端口应还原为客户端端口");
     assert_eq!(ip, client_addr.ip(), "地址应还原为客户端地址");
@@ -1307,7 +1361,13 @@ async fn relay_pipe_client_first_waits_host() {
 
     let ack: RelayMsg = read_msg(&mut client).await.unwrap();
     assert!(
-        matches!(ack, RelayMsg::Allocated { peer_connected: true, .. }),
+        matches!(
+            ack,
+            RelayMsg::Allocated {
+                peer_connected: true,
+                ..
+            }
+        ),
         "等待后 client 应配对成功"
     );
 
@@ -1427,7 +1487,13 @@ async fn relay_reports_session_to_signal() {
     .await
     .unwrap();
     let ack: RelayMsg = read_msg(&mut client).await.unwrap();
-    assert!(matches!(ack, RelayMsg::Allocated { peer_connected: true, .. }));
+    assert!(matches!(
+        ack,
+        RelayMsg::Allocated {
+            peer_connected: true,
+            ..
+        }
+    ));
 
     // 等待 UDP 事件到达信令
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);

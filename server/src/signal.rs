@@ -82,7 +82,9 @@ impl SignalCore {
         Self {
             peers: Arc::new(Mutex::new(HashMap::new())),
             relay_hint: Arc::new(relay_hint.to_string()),
-            devices: Arc::new(DeviceStore::new(&std::env::temp_dir().join("dcr-signal-devices-default"))),
+            devices: Arc::new(DeviceStore::new(
+                &std::env::temp_dir().join("dcr-signal-devices-default"),
+            )),
             sessions: Arc::new(SessionCore::new()),
             cfg,
             next_gen: Arc::new(AtomicU64::new(1)),
@@ -135,7 +137,8 @@ impl SignalCore {
         if cfg.maintenance_mode {
             return Err("服务器维护中,请稍后再试".into());
         }
-        if !version.is_empty() && !cfg.min_client_version.is_empty()
+        if !version.is_empty()
+            && !cfg.min_client_version.is_empty()
             && version_cmp(version, &cfg.min_client_version) < 0
         {
             return Err(format!(
@@ -212,7 +215,11 @@ impl SignalCore {
     pub fn owns_generation(&self, id: &str, generation: u64) -> bool {
         self.peers
             .lock()
-            .map(|m| m.get(id).map(|r| r.generation == generation).unwrap_or(false))
+            .map(|m| {
+                m.get(id)
+                    .map(|r| r.generation == generation)
+                    .unwrap_or(false)
+            })
             .unwrap_or(false)
     }
 
@@ -374,7 +381,10 @@ fn version_cmp(a: &str, b: &str) -> i32 {
 
 /// 处理单个信令 TCP 连接:循环读消息、按类型处理,断开时注销该连接登记的 id。
 pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
-    let addr = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+    let addr = stream
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_default();
     // 本连接登记的对端(id, 注册代次);代次用于断开时判定记录所有权
     let mut conn: Option<(String, u64)> = None;
     let disconnect_reason = loop {
@@ -410,7 +420,11 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                         None => {
                             let msg = "登录令牌无效或已过期,请重新登录".to_string();
                             log::warn!("[signal] 注册被拒(令牌无效): id={id}");
-                            op_log("signal", "register_rejected", &format!("id={id}, reason=token_invalid"));
+                            op_log(
+                                "signal",
+                                "register_rejected",
+                                &format!("id={id}, reason=token_invalid"),
+                            );
                             let _ = write_msg(
                                 &mut stream,
                                 &SignalMsg::RegisterAck {
@@ -437,28 +451,30 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                 // 上报的 user,允许同设备归属随登录账号切换(否则换号后设备被锁死)。
                 if core.auth_enabled() {
                     if !previous_owner.is_empty() && previous_owner != effective_user {
-                            let msg = format!(
-                                "设备已归属账号 {}(请使用该账号登录后注册)",
-                                previous_owner
-                            );
-                            log::warn!("[signal] 注册被拒(归属冲突): id={id}, 归属={previous_owner}, 请求={effective_user}");
-                            op_log("signal", "register_rejected", &format!("id={id}, reason=owner_conflict, owner={previous_owner}, requested_owner={effective_user}"));
-                            let _ = write_msg(
-                                &mut stream,
-                                &SignalMsg::RegisterAck {
-                                    ok: false,
-                                    msg,
-                                    auth_error: false,
-                                },
-                            )
-                            .await;
-                            break "注册被拒: 设备归属冲突".to_string();
+                        let msg =
+                            format!("设备已归属账号 {}(请使用该账号登录后注册)", previous_owner);
+                        log::warn!("[signal] 注册被拒(归属冲突): id={id}, 归属={previous_owner}, 请求={effective_user}");
+                        op_log("signal", "register_rejected", &format!("id={id}, reason=owner_conflict, owner={previous_owner}, requested_owner={effective_user}"));
+                        let _ = write_msg(
+                            &mut stream,
+                            &SignalMsg::RegisterAck {
+                                ok: false,
+                                msg,
+                                auth_error: false,
+                            },
+                        )
+                        .await;
+                        break "注册被拒: 设备归属冲突".to_string();
                     }
                 }
                 // 策略校验:维护模式 / 版本下限 / 设备禁用 / 设备数上限
                 if let Err(e) = core.check_register_policy(&effective_user, &version, &id) {
                     log::warn!("[signal] 注册被拒: id={id}, 原因={e}");
-                    op_log("signal", "register_rejected", &format!("id={id}, reason={e}"));
+                    op_log(
+                        "signal",
+                        "register_rejected",
+                        &format!("id={id}, reason={e}"),
+                    );
                     let reason = e.clone();
                     let _ = write_msg(
                         &mut stream,
@@ -621,7 +637,10 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                     op_log(
                         "signal",
                         "discovery_auth_failed",
-                        &format!("source={addr}, requested_user={requested_user}, online_total={}", stats.online_total),
+                        &format!(
+                            "source={addr}, requested_user={requested_user}, online_total={}",
+                            stats.online_total
+                        ),
                     );
                 }
                 let _ = write_msg(&mut stream, &SignalMsg::ListAck { peers, auth_error }).await;
@@ -639,10 +658,18 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                 }
                 log::info!(
                     "[signal] 注销: id={id},{}",
-                    if removed { "已注销" } else { "非本连接持有,忽略" }
+                    if removed {
+                        "已注销"
+                    } else {
+                        "非本连接持有,忽略"
+                    }
                 );
                 if removed {
-                    op_log("signal", "unregister", &format!("id={id}, source={addr}, reason=客户端请求"));
+                    op_log(
+                        "signal",
+                        "unregister",
+                        &format!("id={id}, source={addr}, reason=客户端请求"),
+                    );
                 }
                 let _ = write_msg(
                     &mut stream,
@@ -666,7 +693,9 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
             op_log(
                 "signal",
                 "unregister_disconnect",
-                &format!("id={id}, source={addr}, generation={generation}, reason={disconnect_reason}"),
+                &format!(
+                    "id={id}, source={addr}, generation={generation}, reason={disconnect_reason}"
+                ),
             );
         } else {
             log::info!("[signal] 连接断开({addr}),id={id} 已被新连接接管,跳过注销");
@@ -790,9 +819,7 @@ pub async fn serve(
                 .unwrap_or_else(|e| e.into_inner())
                 .get()
                 .session_idle_timeout_secs;
-            prune_core
-                .sessions
-                .prune(Duration::from_secs(idle));
+            prune_core.sessions.prune(Duration::from_secs(idle));
         }
     });
 
@@ -856,10 +883,26 @@ mod tests {
         core.register("a", "10.0.0.1:1", "1.1.1.1:1");
         core.register("b", "10.0.0.2:1", "2.2.2.2:1");
         core.register("c", "10.0.0.3:1", "3.3.3.3:1");
-        core.devices
-            .touch("a", "alice", "A", "Windows", "0.1.0", "10.0.0.1:1", "1.1.1.1:1", true);
-        core.devices
-            .touch("b", "bob", "B", "Windows", "0.1.0", "10.0.0.2:1", "2.2.2.2:1", true);
+        core.devices.touch(
+            "a",
+            "alice",
+            "A",
+            "Windows",
+            "0.1.0",
+            "10.0.0.1:1",
+            "1.1.1.1:1",
+            true,
+        );
+        core.devices.touch(
+            "b",
+            "bob",
+            "B",
+            "Windows",
+            "0.1.0",
+            "10.0.0.2:1",
+            "2.2.2.2:1",
+            true,
+        );
         // c 未建档 → owner 为空(未归属设备)
 
         // 登录用户只见自己账号设备
@@ -908,7 +951,8 @@ mod tests {
     #[test]
     fn device_limit_excludes_current_device() {
         // 隔离存储,避免与其它测试共享默认目录造成数据串扰
-        let dir = std::env::temp_dir().join(format!("dcr-signal-limit-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("dcr-signal-limit-test-{}", std::process::id()));
         let cfg = Arc::new(RwLock::new(ConfigStore::new(
             &dir,
             crate::config::ServerConfig {
@@ -930,7 +974,9 @@ mod tests {
             .touch("pc-a", "alice", "A", "Windows", "0.1.0", "l", "e", true);
 
         // 新设备 pc-b:已达上限,拒绝
-        assert!(core.check_register_policy("alice", "0.1.0", "pc-b").is_err());
+        assert!(core
+            .check_register_policy("alice", "0.1.0", "pc-b")
+            .is_err());
         // 已登记设备 pc-a 重连:不占新名额,允许
         assert!(core.check_register_policy("alice", "0.1.0", "pc-a").is_ok());
         std::fs::remove_dir_all(&dir).ok();
@@ -969,11 +1015,9 @@ mod tests {
         use crate::auth::AuthState;
         use crate::auth::UserStore;
         let secret = b"test-secret-lookup-0123456789abc".to_vec();
-        let dir = std::env::temp_dir().join(format!("dcr-signal-lookup-test-{}", std::process::id()));
-        let auth = AuthState::new(
-            std::sync::Arc::new(UserStore::new(&dir)),
-            secret.clone(),
-        );
+        let dir =
+            std::env::temp_dir().join(format!("dcr-signal-lookup-test-{}", std::process::id()));
+        let auth = AuthState::new(std::sync::Arc::new(UserStore::new(&dir)), secret.clone());
         auth.store.create_user("alice", "pass123").unwrap();
         auth.store.create_user("bob", "pass123").unwrap();
         let alice_token = auth.login("alice", "pass123").unwrap();
@@ -997,7 +1041,10 @@ mod tests {
 
         // 归属账号本人可查;其他账号/匿名不可查他人设备
         assert!(core.lookup_allowed("pc-a", &alice_token));
-        assert!(!core.lookup_allowed("pc-a", &bob_token), "他账号不可查 alice 的设备");
+        assert!(
+            !core.lookup_allowed("pc-a", &bob_token),
+            "他账号不可查 alice 的设备"
+        );
         assert!(!core.lookup_allowed("pc-a", ""), "匿名不可查已归属设备");
         assert!(!core.lookup_allowed("pc-a", "forged"), "无效令牌按匿名处理");
         // 未归属设备:登录用户与匿名均可查(与列表语义一致)

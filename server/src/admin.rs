@@ -63,7 +63,7 @@ impl ApiError {
             message: msg,
         }
     }
-fn bad_request(msg: String) -> Self {
+    fn bad_request(msg: String) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: msg,
@@ -89,7 +89,9 @@ fn bearer_user(state: &AdminState, headers: &HeaderMap) -> Result<String, ApiErr
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(|| ApiError::unauthorized("缺少认证令牌(Authorization: Bearer <token>)".into()))?;
+        .ok_or_else(|| {
+            ApiError::unauthorized("缺少认证令牌(Authorization: Bearer <token>)".into())
+        })?;
     state
         .auth
         .validate(token)
@@ -126,10 +128,7 @@ async fn login(
     }))
 }
 
-async fn me(
-    State(state): State<AdminState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
+async fn me(State(state): State<AdminState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
     let username = bearer_user(&state, &headers)?;
     Ok(Json(json!({ "username": username })))
 }
@@ -161,7 +160,11 @@ async fn register(
         .create_user(&username, &req.password)
         .map_err(|e| {
             log::warn!("[admin] 自助注册失败: {username}, 原因={e}");
-            op_log("admin", "self_register_failed", &format!("{username}, reason={e}"));
+            op_log(
+                "admin",
+                "self_register_failed",
+                &format!("{username}, reason={e}"),
+            );
             ApiError::bad_request(e)
         })?;
     log::info!("[admin] 自助注册成功: {username}");
@@ -227,7 +230,11 @@ async fn create_user(
         .store
         .create_user(&username, &req.password)
         .map_err(|e| {
-            op_log("admin", "create_user_failed", &format!("{username}, reason={e}"));
+            op_log(
+                "admin",
+                "create_user_failed",
+                &format!("{username}, reason={e}"),
+            );
             ApiError::bad_request(e)
         })?;
     op_log("admin", "create_user", &username);
@@ -241,14 +248,14 @@ async fn delete_user(
 ) -> Result<Json<Value>, ApiError> {
     bearer_user(&state, &headers)?;
     let username = username.trim().to_lowercase();
-    state
-        .auth
-        .store
-        .delete_user(&username)
-        .map_err(|e| {
-            op_log("admin", "delete_user_failed", &format!("{username}, reason={e}"));
-            ApiError::bad_request(e)
-        })?;
+    state.auth.store.delete_user(&username).map_err(|e| {
+        op_log(
+            "admin",
+            "delete_user_failed",
+            &format!("{username}, reason={e}"),
+        );
+        ApiError::bad_request(e)
+    })?;
     op_log("admin", "delete_user", &username);
     Ok(Json(json!({ "ok": true })))
 }
@@ -267,7 +274,11 @@ async fn reset_password(
         .store
         .reset_password(&username, &req.password)
         .map_err(|e| {
-            op_log("admin", "reset_password_failed", &format!("{username}, reason={e}"));
+            op_log(
+                "admin",
+                "reset_password_failed",
+                &format!("{username}, reason={e}"),
+            );
             ApiError::bad_request(e)
         })?;
     op_log("admin", "reset_password", &username);
@@ -293,13 +304,20 @@ async fn set_user_disabled(
         .store
         .set_disabled(&username, req.disabled)
         .map_err(|e| {
-            op_log("admin", "set_user_disabled_failed", &format!("{username}, reason={e}"));
+            op_log(
+                "admin",
+                "set_user_disabled_failed",
+                &format!("{username}, reason={e}"),
+            );
             ApiError::bad_request(e)
         })?;
     op_log(
         "admin",
         "set_user_disabled",
-        &format!("{username} {}", if req.disabled { "disabled" } else { "enabled" }),
+        &format!(
+            "{username} {}",
+            if req.disabled { "disabled" } else { "enabled" }
+        ),
     );
     Ok(Json(json!({ "ok": true })))
 }
@@ -323,13 +341,14 @@ async fn delete_device(
 ) -> Result<Json<Value>, ApiError> {
     bearer_user(&state, &headers)?;
     let id = id.trim().to_string();
-    state
-        .devices
-        .delete(&id)
-        .map_err(|e| {
-            op_log("admin", "delete_device_failed", &format!("{id}, reason={e}"));
-            ApiError::bad_request(e)
-        })?;
+    state.devices.delete(&id).map_err(|e| {
+        op_log(
+            "admin",
+            "delete_device_failed",
+            &format!("{id}, reason={e}"),
+        );
+        ApiError::bad_request(e)
+    })?;
     op_log("admin", "delete_device", &id);
     Ok(Json(json!({ "ok": true })))
 }
@@ -348,14 +367,19 @@ async fn set_device_enabled(
 ) -> Result<Json<Value>, ApiError> {
     bearer_user(&state, &headers)?;
     let id = id.trim().to_string();
-    state
-        .devices
-        .set_enabled(&id, req.enabled)
-        .map_err(|e| {
-            op_log("admin", "set_device_enabled_failed", &format!("{id}, reason={e}"));
-            ApiError::bad_request(e)
-        })?;
-    op_log("admin", "set_device_enabled", &format!("{id} {}", if req.enabled { "enabled" } else { "disabled" }));
+    state.devices.set_enabled(&id, req.enabled).map_err(|e| {
+        op_log(
+            "admin",
+            "set_device_enabled_failed",
+            &format!("{id}, reason={e}"),
+        );
+        ApiError::bad_request(e)
+    })?;
+    op_log(
+        "admin",
+        "set_device_enabled",
+        &format!("{id} {}", if req.enabled { "enabled" } else { "disabled" }),
+    );
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -400,7 +424,9 @@ async fn get_config(
     headers: HeaderMap,
 ) -> Result<Json<ServerConfig>, ApiError> {
     bearer_user(&state, &headers)?;
-    Ok(Json(state.cfg.read().unwrap_or_else(|e| e.into_inner()).get()))
+    Ok(Json(
+        state.cfg.read().unwrap_or_else(|e| e.into_inner()).get(),
+    ))
 }
 
 async fn put_config(
@@ -467,16 +493,25 @@ async fn stats(
 
 /// 构建管理路由:API + 静态界面。
 pub fn router(state: AdminState, ui_dir: Option<PathBuf>) -> Router {
-let api = Router::new()
+    let api = Router::new()
         .route("/api/auth/login", post(login))
         .route("/api/auth/register", post(register))
         .route("/api/auth/me", get(me))
         .route("/api/admin/users", get(list_users).post(create_user))
-.route("/api/admin/users/:username", axum::routing::delete(delete_user))
+        .route(
+            "/api/admin/users/:username",
+            axum::routing::delete(delete_user),
+        )
         .route("/api/admin/users/:username/password", post(reset_password))
-        .route("/api/admin/users/:username/disable", post(set_user_disabled))
+        .route(
+            "/api/admin/users/:username/disable",
+            post(set_user_disabled),
+        )
         .route("/api/admin/devices", get(list_devices))
-        .route("/api/admin/devices/:id", axum::routing::delete(delete_device))
+        .route(
+            "/api/admin/devices/:id",
+            axum::routing::delete(delete_device),
+        )
         .route("/api/admin/devices/:id/enabled", post(set_device_enabled))
         .route("/api/admin/devices/:id/enable", post(enable_device))
         .route("/api/admin/devices/:id/disable", post(disable_device))
@@ -504,11 +539,8 @@ let api = Router::new()
 /// 内置回退管理页:说明如何启用完整后台,并附带可直接使用的极简管理(登录+用户+在线设备)。
 async fn embedded_ui() -> Response {
     Response::builder()
-        .header(
-            axum::http::header::CONTENT_TYPE,
-            "text/html; charset=utf-8",
-        )
-.body(axum::body::Body::from(EMBEDDED_INDEX))
+        .header(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(axum::body::Body::from(EMBEDDED_INDEX))
         .unwrap_or_else(|e| {
             log::error!("[admin] 内置页面构造失败: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
@@ -671,10 +703,7 @@ mod tests {
     use crate::auth::{AuthState, UserStore};
 
     fn test_state() -> (AdminState, String) {
-        let dir = std::env::temp_dir().join(format!(
-            "dcr-admin-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("dcr-admin-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Arc::new(UserStore::new(&dir));
         let pw = store.ensure_bootstrap(Some("bootpass")).unwrap();
@@ -800,7 +829,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
 
-let resp = app
+        let resp = app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
@@ -846,7 +875,7 @@ let resp = app
         assert_eq!(stats["users"], 1);
         assert_eq!(stats["peersOnline"], 0);
 
-// 界面回退页(无 ui_dir)可访问
+        // 界面回退页(无 ui_dir)可访问
         let resp = app
             .oneshot(
                 axum::http::Request::builder()

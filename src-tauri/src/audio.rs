@@ -78,7 +78,10 @@ static AUDIO_TASK: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None)
 
 /// 取最新音频块(无则 None);host_write_loop 发送后可用 seq 判断是否消费过。
 pub fn latest_audio() -> Option<AudioBlock> {
-    LATEST_AUDIO.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    LATEST_AUDIO
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 /// 启动被控端音频采集(幂等;已运行则返回)。

@@ -52,7 +52,9 @@ pub fn register_log_dir(dir: PathBuf) {
         // 仅在首次注册(进程启动)时回填;OnceLock 保证仅执行一次
         let (secs, _) = utc_now();
         for day in [secs, secs - 86400] {
-            let path = log_root().join("logs").join(format!("operations-{}.log", date_stamp(day)));
+            let path = log_root()
+                .join("logs")
+                .join(format!("operations-{}.log", date_stamp(day)));
             if let Ok(content) = std::fs::read_to_string(&path) {
                 let mut mem = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
                 for line in content.lines() {
@@ -156,7 +158,11 @@ pub fn op_log(module: &str, action: &str, detail: &str) {
     }
     let path = dir.join(format!("operations-{}.log", date_stamp(secs)));
     use std::io::Write;
-    match std::fs::OpenOptions::new().append(true).create(true).open(&path) {
+    match std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)
+    {
         Ok(mut f) => {
             if let Err(e) = writeln!(f, "{line}") {
                 log::warn!("[operation_log] 写入日志失败({}): {e}", path.display());

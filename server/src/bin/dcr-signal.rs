@@ -96,7 +96,9 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--admin-port 解析失败: {e}"))?
             }
-            "--admin-ui" => admin_ui = Some(PathBuf::from(args.next().ok_or("--admin-ui 缺少参数")?)),
+            "--admin-ui" => {
+                admin_ui = Some(PathBuf::from(args.next().ok_or("--admin-ui 缺少参数")?))
+            }
             "--data-dir" => data_dir = PathBuf::from(args.next().ok_or("--data-dir 缺少参数")?),
             "--admin-pass" => admin_pass = Some(args.next().ok_or("--admin-pass 缺少参数")?),
             "--min-client-version" => {

@@ -58,7 +58,10 @@ fn parse_args() -> Result<Args, String> {
             }
             "--report-to" => {
                 let addr = args.next().ok_or("--report-to 缺少参数")?;
-                report_to = Some(addr.parse().map_err(|e| format!("--report-to 解析失败: {e}"))?);
+                report_to = Some(
+                    addr.parse()
+                        .map_err(|e| format!("--report-to 解析失败: {e}"))?,
+                );
             }
             other => return Err(format!("未知参数: {other}")),
         }
@@ -114,7 +117,9 @@ async fn main() {
         "dcr-relay 启动: TCP {} (字节中继) / UDP {} (数据报中继) / 会话上报: {}",
         listener.local_addr().unwrap(),
         udp_socket.local_addr().unwrap(),
-        report_to.map(|a| a.to_string()).unwrap_or_else(|| "(无)".into())
+        report_to
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "(无)".into())
     );
 
     // UDP 与 TCP 中继并行

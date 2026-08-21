@@ -127,7 +127,9 @@ pub async fn start_capture(
         *CAPTURE_TASK
             .lock()
             .map_err(|e| format!("failed to lock capture task: {e}"))? = Some(handle);
-        log::info!("[capture] 模拟抓屏启动(非 Windows): monitor {monitor_id}, {width}x{height} @ {fps}fps");
+        log::info!(
+            "[capture] 模拟抓屏启动(非 Windows): monitor {monitor_id}, {width}x{height} @ {fps}fps"
+        );
         crate::operation_log::op_log(
             "capture",
             "start_capture",
@@ -291,8 +293,8 @@ pub(crate) fn rgb_to_jpeg(
 fn list_monitors_windows() -> Result<Vec<MonitorInfo>, String> {
     use windows::core::PCWSTR;
     use windows::Win32::Graphics::Gdi::{
-        EnumDisplayDevicesW, EnumDisplaySettingsW, DEVMODEW, DISPLAY_DEVICE_PRIMARY_DEVICE,
-        DISPLAY_DEVICEW, ENUM_CURRENT_SETTINGS,
+        EnumDisplayDevicesW, EnumDisplaySettingsW, DEVMODEW, DISPLAY_DEVICEW,
+        DISPLAY_DEVICE_PRIMARY_DEVICE, ENUM_CURRENT_SETTINGS,
     };
 
     /// 将 [u16] 宽字符数组(以 0 结尾)转换为 String。
@@ -321,8 +323,14 @@ fn list_monitors_windows() -> Result<Vec<MonitorInfo>, String> {
         // 取当前分辨率
         let mut dm = DEVMODEW::default();
         let (mut width, mut height) = (0u32, 0u32);
-        if unsafe { EnumDisplaySettingsW(PCWSTR::from_raw(dd.DeviceName.as_ptr()), ENUM_CURRENT_SETTINGS, &mut dm) }
-            .as_bool()
+        if unsafe {
+            EnumDisplaySettingsW(
+                PCWSTR::from_raw(dd.DeviceName.as_ptr()),
+                ENUM_CURRENT_SETTINGS,
+                &mut dm,
+            )
+        }
+        .as_bool()
         {
             width = dm.dmPelsWidth;
             height = dm.dmPelsHeight;
@@ -353,19 +361,19 @@ async fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String
     use windows::core::Interface;
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
     use windows::Win32::Graphics::Direct3D11::{
-        D3D11CreateDevice, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAP_READ,
-        D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
-        ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+        D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+        D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+        D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
     };
     use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIFactory1,
-        IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+        CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+        DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
     };
 
     // 1) DXGI 工厂 → 适配器(0) → 指定输出(显示器)
-    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }
-        .map_err(|e| format!("CreateDXGIFactory1 失败: {e}"))?;
+    let factory: IDXGIFactory1 =
+        unsafe { CreateDXGIFactory1() }.map_err(|e| format!("CreateDXGIFactory1 失败: {e}"))?;
     let adapter = unsafe { factory.EnumAdapters1(0) }
         .map_err(|e| format!("EnumAdapters1(0) 失败(可能无 GPU): {e}"))?;
     let output = unsafe { adapter.EnumOutputs(monitor_id) }
@@ -447,7 +455,10 @@ async fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String
         staging_desc.MiscFlags = 0;
         staging_desc.MipLevels = 1;
         staging_desc.ArraySize = 1;
-        staging_desc.SampleDesc = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
+        staging_desc.SampleDesc = DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        };
         let mut staging: Option<ID3D11Texture2D> = None;
         if let Err(e) = unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) } {
             log::error!("[capture] 创建 staging 纹理失败: {e}");
@@ -500,8 +511,8 @@ async fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String
             if hw_key.as_ref() != Some(&key) {
                 // 分辨率/帧率/编码器变化 → 重建编码器(首帧请求关键帧)
                 let family = cfg.codec.clone();
-                let enc_name = crate::ffmpeg_hw::preferred_encoder(&family)
-                    .unwrap_or_else(|| family.clone());
+                let enc_name =
+                    crate::ffmpeg_hw::preferred_encoder(&family).unwrap_or_else(|| family.clone());
                 hw_enc = crate::ffmpeg_hw::HwEncoder::open(
                     &enc_name,
                     crate::ffmpeg_hw::codec_family_id(&family),
@@ -684,7 +695,8 @@ async fn mock_capture_loop(app: AppHandle, monitor_id: u32, width: u32, height: 
                 frame_idx = frame_idx.wrapping_add(1);
                 continue;
             }
-        };        let payload = CapturedFrameEvent {
+        };
+        let payload = CapturedFrameEvent {
             monitor_id,
             width: w,
             height: h,
@@ -724,10 +736,8 @@ mod tests {
     fn bgra_to_rgb_order_and_length() {
         // 2x2 = 4 像素 BGRA 输入(B,G,R,A)
         let data: Vec<u8> = vec![
-            0x11, 0x22, 0x33, 0xFF,
-            0x44, 0x55, 0x66, 0xFF,
-            0x77, 0x88, 0x99, 0xFF,
-            0xAA, 0xBB, 0xCC, 0xFF,
+            0x11, 0x22, 0x33, 0xFF, 0x44, 0x55, 0x66, 0xFF, 0x77, 0x88, 0x99, 0xFF, 0xAA, 0xBB,
+            0xCC, 0xFF,
         ];
         let out = bgra_to_rgb(&data, 2, 2);
         // 长度 = w*h*3
@@ -735,12 +745,7 @@ mod tests {
         // 每像素 BGR → RGB 顺序(丢弃 alpha)
         assert_eq!(
             out,
-            vec![
-                0x33, 0x22, 0x11,
-                0x66, 0x55, 0x44,
-                0x99, 0x88, 0x77,
-                0xCC, 0xBB, 0xAA,
-            ]
+            vec![0x33, 0x22, 0x11, 0x66, 0x55, 0x44, 0x99, 0x88, 0x77, 0xCC, 0xBB, 0xAA,]
         );
     }
 
@@ -758,14 +763,14 @@ mod tests {
         use windows::core::Interface;
         use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
         use windows::Win32::Graphics::Direct3D11::{
-            D3D11CreateDevice, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAP_READ,
-            D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
-            ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+            D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+            D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAPPED_SUBRESOURCE,
+            D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
         };
         use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
         use windows::Win32::Graphics::Dxgi::{
-            CreateDXGIFactory1, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIFactory1,
-            IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+            CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+            DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
         };
 
         let monitors = list_monitors_windows().expect("枚举显示器失败");
@@ -776,8 +781,10 @@ mod tests {
             monitor.id, monitor.name, monitor.width, monitor.height
         );
 
-        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.expect("CreateDXGIFactory1 失败");
-        let adapter = unsafe { factory.EnumAdapters1(0) }.expect("EnumAdapters1(0) 失败(可能无 GPU)");
+        let factory: IDXGIFactory1 =
+            unsafe { CreateDXGIFactory1() }.expect("CreateDXGIFactory1 失败");
+        let adapter =
+            unsafe { factory.EnumAdapters1(0) }.expect("EnumAdapters1(0) 失败(可能无 GPU)");
         let output = unsafe { adapter.EnumOutputs(monitor.id) }
             .expect("EnumOutputs 失败: 显示器不存在或不可捕获");
         let mut device: Option<ID3D11Device> = None;
@@ -842,9 +849,14 @@ mod tests {
             staging_desc.MiscFlags = 0;
             staging_desc.MipLevels = 1;
             staging_desc.ArraySize = 1;
-            staging_desc.SampleDesc = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
+            staging_desc.SampleDesc = DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            };
             let mut staging: Option<ID3D11Texture2D> = None;
-            if let Err(e) = unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) } {
+            if let Err(e) =
+                unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) }
+            {
                 let _ = unsafe { dup.ReleaseFrame() };
                 panic!("创建 staging 纹理失败: {e}");
             }
@@ -864,7 +876,11 @@ mod tests {
                 let src_row = unsafe { (mapped.pData as *const u8).add(y * row_pitch) };
                 let dst_row = &mut bgra[y * (src_w as usize) * 4..(y + 1) * (src_w as usize) * 4];
                 unsafe {
-                    std::ptr::copy_nonoverlapping(src_row, dst_row.as_mut_ptr(), (src_w as usize) * 4);
+                    std::ptr::copy_nonoverlapping(
+                        src_row,
+                        dst_row.as_mut_ptr(),
+                        (src_w as usize) * 4,
+                    );
                 }
             }
             unsafe { ctx.Unmap(&staging, 0) };
@@ -875,8 +891,7 @@ mod tests {
             let proc_start = std::time::Instant::now();
             let rgb = bgra_to_rgb(&bgra, src_w, src_h);
             let encode_start = std::time::Instant::now();
-            let _ = rgb_to_jpeg(&rgb, src_w, src_h, 1920, 1920, 85)
-                .expect("JPEG 编码失败");
+            let _ = rgb_to_jpeg(&rgb, src_w, src_h, 1920, 1920, 85).expect("JPEG 编码失败");
             encode_total += encode_start.elapsed();
             proc_total += proc_start.elapsed();
             frames += 1;
@@ -898,4 +913,3 @@ mod tests {
         assert!(frames > 0, "3 秒内未抓到任何帧");
     }
 }
-

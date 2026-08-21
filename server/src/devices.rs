@@ -172,13 +172,14 @@ impl DeviceStore {
     /// 设置设备启用/禁用(管理后台)。
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), String> {
         let mut map = self.devices.lock().unwrap_or_else(|e| e.into_inner());
-        let rec = map
-            .get_mut(id)
-            .ok_or_else(|| format!("设备不存在: {id}"))?;
+        let rec = map.get_mut(id).ok_or_else(|| format!("设备不存在: {id}"))?;
         rec.enabled = enabled;
         drop(map);
         self.save();
-        log::info!("[devices] 设备 {id} 已{}", if enabled { "启用" } else { "禁用" });
+        log::info!(
+            "[devices] 设备 {id} 已{}",
+            if enabled { "启用" } else { "禁用" }
+        );
         op_log(
             "devices",
             "set_enabled",
@@ -254,10 +255,7 @@ impl DeviceStore {
 
     /// 设备总数(含离线)。
     pub fn count(&self) -> usize {
-        self.devices
-            .lock()
-            .map(|m| m.len())
-            .unwrap_or_default()
+        self.devices.lock().map(|m| m.len()).unwrap_or_default()
     }
 }
 
@@ -266,7 +264,8 @@ mod tests {
     use super::*;
 
     fn tmp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("dcr-devices-test-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("dcr-devices-test-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -275,7 +274,16 @@ mod tests {
     fn register_touch_and_persistence() {
         let dir = tmp_dir("crud");
         let store = DeviceStore::new(&dir);
-        let is_new = store.touch("pc-a", "alice", "办公室PC", "Windows 11", "0.1.0", "192.168.1.5:21118", "203.0.113.9:21118", true);
+        let is_new = store.touch(
+            "pc-a",
+            "alice",
+            "办公室PC",
+            "Windows 11",
+            "0.1.0",
+            "192.168.1.5:21118",
+            "203.0.113.9:21118",
+            true,
+        );
         assert!(is_new, "首次应登记");
         assert_eq!(store.count(), 1);
         let rec = store.list().remove(0);
@@ -284,7 +292,16 @@ mod tests {
         assert!(rec.online);
 
         // 二次 touch 不算新设备,更新在线信息
-        let is_new2 = store.touch("pc-a", "alice", "办公室PC", "Windows 11", "0.1.0", "192.168.1.5:21118", "203.0.113.9:21118", true);
+        let is_new2 = store.touch(
+            "pc-a",
+            "alice",
+            "办公室PC",
+            "Windows 11",
+            "0.1.0",
+            "192.168.1.5:21118",
+            "203.0.113.9:21118",
+            true,
+        );
         assert!(!is_new2);
 
         // 重载持久化

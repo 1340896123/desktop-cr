@@ -27,7 +27,10 @@ const XOR_PORT_MASK: u16 = (STUN_MAGIC_COOKIE >> 16) as u16;
 /// 解析 Binding Request,校验长度、消息类型与 magic cookie,返回 12 字节 transaction id。
 pub fn parse_binding_request(bytes: &[u8]) -> Result<[u8; 12], String> {
     if bytes.len() < HEADER_LEN {
-        return Err(format!("报文过短: {} 字节(至少需要 {HEADER_LEN})", bytes.len()));
+        return Err(format!(
+            "报文过短: {} 字节(至少需要 {HEADER_LEN})",
+            bytes.len()
+        ));
     }
     let mtype = u16::from_be_bytes([bytes[0], bytes[1]]);
     if mtype != BINDING_REQUEST {
@@ -98,7 +101,10 @@ pub fn build_binding_response(txn_id: &[u8; 12], source: SocketAddr) -> Result<V
 /// 解析 Binding Response,返回还原后的真实 `(端口, 地址)`(内部完成 XOR 还原)。
 pub fn parse_binding_response(bytes: &[u8]) -> Result<(u16, IpAddr), String> {
     if bytes.len() < HEADER_LEN {
-        return Err(format!("报文过短: {} 字节(至少需要 {HEADER_LEN})", bytes.len()));
+        return Err(format!(
+            "报文过短: {} 字节(至少需要 {HEADER_LEN})",
+            bytes.len()
+        ));
     }
     let mtype = u16::from_be_bytes([bytes[0], bytes[1]]);
     if mtype != BINDING_RESPONSE {

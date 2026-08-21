@@ -249,6 +249,9 @@ mod tests {
             normalize_server("https://svc.example.com"),
             "https://svc.example.com"
         );
-        assert_eq!(normalize_server("localhost:21120///"), "http://localhost:21120");
+        assert_eq!(
+            normalize_server("localhost:21120///"),
+            "http://localhost:21120"
+        );
     }
 }

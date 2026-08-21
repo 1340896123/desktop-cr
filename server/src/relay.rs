@@ -112,10 +112,7 @@ impl RelayManager {
             let mut inner = slot.inner.lock().unwrap_or_else(|e| e.into_inner());
             *inner = Some(parts);
         }
-        *slot
-            .host_addr
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = addr.to_string();
+        *slot.host_addr.lock().unwrap_or_else(|e| e.into_inner()) = addr.to_string();
         let _ = slot.ready.send(true);
     }
 
@@ -202,7 +199,11 @@ pub async fn handle_relay_conn(manager: RelayManager, mut stream: TcpStream, add
         }
     };
     log::info!("[relay] allocate: id={id}, role={role}, from={addr}");
-    op_log("relay", "allocate", &format!("id={id}, role={role}, from={addr}"));
+    op_log(
+        "relay",
+        "allocate",
+        &format!("id={id}, role={role}, from={addr}"),
+    );
 
     if role == "host" {
         // 先回 ack,再把读写半段存入管理器(连接保持存活)
@@ -251,9 +252,15 @@ pub async fn handle_relay_conn(manager: RelayManager, mut stream: TcpStream, add
     let (cr, cw) = stream.into_split();
     let client_addr = addr.to_string();
     log::info!("[relay] 配对成功: id={id}");
-    op_log("relay", "paired", &format!("id={id}, host={host_addr}, client={client_addr}"));
+    op_log(
+        "relay",
+        "paired",
+        &format!("id={id}, host={host_addr}, client={client_addr}"),
+    );
     // 上报会话开始给信令(监控用)
-    manager.report_session_start(&id, &host_addr, &client_addr).await;
+    manager
+        .report_session_start(&id, &host_addr, &client_addr)
+        .await;
     pipe(host_parts, cw, cr).await;
     // 会话结束
     manager.report_session_end(&id).await;
@@ -290,7 +297,9 @@ pub async fn handle_udp_packet(
                 .insert(id.clone(), src);
             log::info!("[relay-udp] 宿主 {id} 登记于 {src}");
             op_log("relay", "udp_alloc", &format!("id={id}, src={src}"));
-            let _ = sock.send_to(format!("{{\"t\":\"allocated\"}}").as_bytes(), src).await;
+            let _ = sock
+                .send_to(format!("{{\"t\":\"allocated\"}}").as_bytes(), src)
+                .await;
         }
         RelayUdpMsg::Data { id, payload } => {
             let target = {
@@ -361,7 +370,9 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let a = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+            let a = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
             let (s, _) = listener.accept().await.unwrap();
             let (read, write) = s.into_split();
             m.host_register("x", "10.0.0.1:21118", HostParts { read, write });
