@@ -313,7 +313,11 @@ export const DevicePage: React.FC<DevicePageProps> = ({
             <button
               type="button"
               className={styles.enterDesktop}
-              onClick={onEnterDesktop}
+              onClick={(e) => {
+                // 外层 heroPreview 也挂了进入桌面:阻止冒泡,避免一次点击触发两次
+                e.stopPropagation();
+                onEnterDesktop?.();
+              }}
               disabled={disabled}
               style={disabled ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
             >

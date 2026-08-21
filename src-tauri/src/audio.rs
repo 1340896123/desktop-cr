@@ -73,8 +73,12 @@ pub fn get_audio_muted() -> bool {
     AUDIO_MUTED.load(Ordering::Relaxed)
 }
 
-/// 音频采集线程句柄。
+/// 音频采集线程句柄(仅用于 `is_finished` 状态查询;停止不 join,见 `stop_audio_capture`)。
 static AUDIO_TASK: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+
+/// 当前采集代际号:每次 `stop_audio_capture` 递增,旧采集线程发现代际号已变即自行退出。
+/// 单次采集调用阻塞约 `CHUNK_SECS` 秒,退出最多延迟一个采集周期。
+static AUDIO_GEN: AtomicU64 = AtomicU64::new(0);
 
 /// 取最新音频块(无则 None);host_write_loop 发送后可用 seq 判断是否消费过。
 pub fn latest_audio() -> Option<AudioBlock> {
@@ -90,9 +94,10 @@ pub fn start_audio_capture() -> Result<(), String> {
     if slot.as_ref().map_or(false, |h| !h.is_finished()) {
         return Ok(());
     }
+    let gen = AUDIO_GEN.load(Ordering::Acquire);
     let handle = std::thread::Builder::new()
         .name("dcr-audio-capture".into())
-        .spawn(audio_capture_loop)
+        .spawn(move || audio_capture_loop(gen))
         .map_err(|e| format!("创建音频采集线程失败: {e}"))?;
     *slot = Some(handle);
     log::info!("[audio] 被控端音频采集已启动(系统回环,{CHUNK_SECS}s/块)");
@@ -101,26 +106,40 @@ pub fn start_audio_capture() -> Result<(), String> {
 }
 
 /// 停止被控端音频采集。
+///
+/// 不 join 采集线程:单次 WASAPI/cpal 采集调用阻塞约 `CHUNK_SECS` 秒且可能逐设备
+/// 重试,join 会让调用方(可能是主线程)长时间挂起;改为递增代际号通知线程在
+/// 当前采集周期结束后自行退出,立即返回。
 pub fn stop_audio_capture() {
-    let handle = AUDIO_TASK.lock().unwrap_or_else(|e| e.into_inner()).take();
-    if let Some(h) = handle {
-        let _ = h.join();
-    }
+    AUDIO_GEN.fetch_add(1, Ordering::AcqRel);
+    // 丢弃旧线程句柄(drop JoinHandle = 分离线程,不等待):旧线程最多再跑一个
+    // 采集周期即自行退出;若保留句柄,快速重启时 is_finished() 仍为 false,
+    // start_audio_capture 会误判"已运行"而拒绝启动新线程,导致音频丢失
+    let _ = AUDIO_TASK.lock().unwrap_or_else(|e| e.into_inner()).take();
     if let Ok(mut slot) = LATEST_AUDIO.lock() {
         *slot = None;
     }
-    log::info!("[audio] 被控端音频采集已停止");
+    log::info!("[audio] 被控端音频采集已停止(采集线程稍后自行退出)");
     crate::operation_log::op_log("audio", "stop", "");
 }
 
+/// 采集线程是否仍属于当前代际(未被停止)。
+fn audio_gen_current(gen: u64) -> bool {
+    AUDIO_GEN.load(Ordering::Acquire) == gen
+}
+
 /// 音频采集线程循环:周期采集系统回环音频,切块发布到 `LATEST_AUDIO`。
-fn audio_capture_loop() {
+/// `gen` 为启动时的代际号,`stop_audio_capture` 递增全局代际后本循环自行退出。
+fn audio_capture_loop(gen: u64) {
     #[cfg(target_os = "windows")]
     {
         let mut last_log = std::time::Instant::now();
-        loop {
+        while audio_gen_current(gen) {
             match crate::media_pipeline::capture_system_audio(CHUNK_SECS) {
                 Ok((rate, channels, samples)) => {
+                    if !audio_gen_current(gen) {
+                        break;
+                    }
                     if samples.is_empty() {
                         continue;
                     }
@@ -140,18 +159,25 @@ fn audio_capture_loop() {
                     );
                 }
                 Err(e) => {
-                    // 静音/无设备时降频告警,避免刷屏
+                    // 静音/无设备时降频告警,避免刷屏;等待期间分片检查退出标志
                     if last_log.elapsed() > Duration::from_secs(5) {
                         log::warn!("[audio] 采集失败(将重试): {e}");
                         last_log = std::time::Instant::now();
                     }
-                    std::thread::sleep(Duration::from_millis(500));
+                    for _ in 0..10 {
+                        if !audio_gen_current(gen) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
                 }
             }
         }
+        log::info!("[audio] 采集线程退出(gen={gen})");
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = gen;
         log::info!("[audio] (非 Windows) 音频采集线程占位退出");
     }
 }

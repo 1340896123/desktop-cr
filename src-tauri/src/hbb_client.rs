@@ -878,6 +878,10 @@ pub fn get_transfer_device_name() -> Option<String> {
 /// 独立远程会话窗口的目标设备信息(主窗口打开窗口时写入,窗口页面读取)。
 static REMOTE_SESSION_INFO: Mutex<Option<RemoteSessionInfo>> = Mutex::new(None);
 
+/// 建窗互斥:防止并发调用时双双通过"已存在"检查创建出重复窗口
+/// (第二次调用串行化后走已存在分支,语义为切换目标并聚焦)。
+static REMOTE_SESSION_OPEN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// 独立远程会话窗口的目标设备信息。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -901,6 +905,8 @@ pub async fn open_remote_session_window(
     peer_id: String,
     device_name: String,
 ) -> Result<(), String> {
+    // 串行化建窗:并发调用时后者走"已存在"分支,避免创建重复窗口
+    let _guard = REMOTE_SESSION_OPEN_LOCK.lock().await;
     *REMOTE_SESSION_INFO
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = Some(RemoteSessionInfo {
@@ -925,6 +931,8 @@ pub async fn open_remote_session_window(
     .inner_size(1280.0, 800.0)
     .min_inner_size(640.0, 480.0)
     .resizable(true)
+    // 无边框:顶栏由页面自绘(拖拽区 + 窗口控制按钮),与主窗口风格一致
+    .decorations(false)
     .build()
     .map_err(|e| format!("打开远程会话窗口失败: {e}"))?;
     // 关窗即断开:窗口销毁时清理全局会话,避免会话悬挂到下一次连接
@@ -1367,8 +1375,12 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
 }
 
 /// 停止被控端(取消任务、停止抓帧并广播)。
+///
+/// 必须为 async:同步命令在主线程执行,若内部任何停止步骤耗时(如音频采集
+/// 收尾、事件广播背压),连续切换「允许他人协助」会让 UI 卡顿甚至假死;
+/// async 命令运行在 Tokio 运行时上,与 `start_host` 对称。
 #[tauri::command]
-pub fn stop_host(app: AppHandle) -> Result<(), String> {
+pub async fn stop_host(app: AppHandle) -> Result<(), String> {
     if let Ok(mut slot) = HOST_TASK.lock() {
         if let Some(handle) = slot.take() {
             handle.abort();

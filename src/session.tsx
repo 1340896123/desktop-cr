@@ -11,7 +11,8 @@ import {
   type ConnectionState,
 } from './services/connection';
 import { invoke } from '@tauri-apps/api/core';
-import { fontFamily } from './theme/tokens';
+import { fontFamily, palette, radius, shadow } from './theme/tokens';
+import WindowControls from './components/shared/WindowControls';
 import './styles/global.css';
 
 interface RemoteSessionInfo {
@@ -28,20 +29,53 @@ const boxStyle: React.CSSProperties = {
   height: '100vh',
   display: 'flex',
   flexDirection: 'column',
+  backgroundColor: palette.background,
+  color: palette.textPrimary,
+  fontFamily,
+};
+
+/** 无边框窗口自绘标题栏:整条可拖拽,右侧窗口控制按钮 */
+const dragBarStyle: React.CSSProperties = {
+  height: '40px',
+  flexShrink: 0,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'flex-end',
+  backgroundColor: palette.backgroundElevated,
+  borderBottom: `1px solid ${palette.borderLight}`,
+  userSelect: 'none',
+};
+
+const boxBodyStyle: React.CSSProperties = {
+  flex: 1,
+  display: 'flex',
+  flexDirection: 'column',
   alignItems: 'center',
   justifyContent: 'center',
   gap: '14px',
-  backgroundColor: '#0f172a',
-  color: '#F8FAFC',
-  fontFamily,
+  padding: '24px',
+};
+
+const panelStyle: React.CSSProperties = {
+  width: 'min(520px, calc(100% - 48px))',
+  backgroundColor: palette.backgroundElevated,
+  border: `1px solid ${palette.borderLight}`,
+  borderRadius: radius.card,
+  boxShadow: shadow.card,
+  padding: '22px 24px',
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  gap: '12px',
+  textAlign: 'center',
 };
 
 const btnStyle: React.CSSProperties = {
   padding: '6px 18px',
-  borderRadius: '6px',
+  borderRadius: radius.control,
   border: 'none',
-  backgroundColor: '#2563EB',
-  color: '#ffffff',
+  backgroundColor: palette.primary,
+  color: palette.textOnPrimary,
   fontFamily,
   fontSize: '13px',
   cursor: 'pointer',
@@ -49,9 +83,9 @@ const btnStyle: React.CSSProperties = {
 
 const ghostBtnStyle: React.CSSProperties = {
   ...btnStyle,
-  backgroundColor: 'transparent',
-  border: '1px solid rgba(148, 163, 184, 0.5)',
-  color: '#CBD5E1',
+  backgroundColor: palette.backgroundElevated,
+  border: `1px solid ${palette.border}`,
+  color: palette.textSecondary,
 };
 
 /**
@@ -157,18 +191,25 @@ const SessionApp: React.FC = () => {
   if (!connected && error && wasConnected) {
     return (
       <div style={boxStyle}>
-        <div style={{ fontSize: '18px', fontWeight: 600 }}>连接已断开</div>
-        <div style={{ fontSize: '13px', color: '#FCA5A5', maxWidth: '480px', textAlign: 'center', lineHeight: '22px' }}>
-          {error}
+        <div style={dragBarStyle} data-tauri-drag-region="deep">
+          <WindowControls />
         </div>
-        {info && (
-          <button type="button" style={btnStyle} onClick={() => void connect(info)}>
-            重新连接
+        <div style={boxBodyStyle}>
+          <div style={panelStyle}>
+            <div style={{ fontSize: '18px', fontWeight: 600 }}>连接已断开</div>
+            <div style={{ fontSize: '13px', color: palette.destructive, maxWidth: '480px', lineHeight: '22px' }}>
+            {error}
+          </div>
+          {info && (
+            <button type="button" style={btnStyle} onClick={() => void connect(info)}>
+              重新连接
+            </button>
+          )}
+          <button type="button" style={ghostBtnStyle} onClick={() => void getCurrentWindow().close()}>
+            关闭窗口
           </button>
-        )}
-        <button type="button" style={ghostBtnStyle} onClick={() => void getCurrentWindow().close()}>
-          关闭窗口
-        </button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -176,18 +217,25 @@ const SessionApp: React.FC = () => {
   if (!connected && error) {
     return (
       <div style={boxStyle}>
-        <div style={{ fontSize: '18px', fontWeight: 600 }}>连接失败</div>
-        <div style={{ fontSize: '13px', color: '#FCA5A5', maxWidth: '480px', textAlign: 'center', lineHeight: '22px' }}>
-          {error}
+        <div style={dragBarStyle} data-tauri-drag-region="deep">
+          <WindowControls />
         </div>
-        {info && (
-          <button type="button" style={btnStyle} onClick={() => void connect(info)}>
-            重试连接
-          </button>
-        )}
-        <button type="button" style={ghostBtnStyle} onClick={() => void getCurrentWindow().close()}>
-          关闭窗口
-        </button>
+        <div style={boxBodyStyle}>
+          <div style={panelStyle}>
+            <div style={{ fontSize: '18px', fontWeight: 600 }}>连接失败</div>
+            <div style={{ fontSize: '13px', color: palette.destructive, maxWidth: '480px', lineHeight: '22px' }}>
+              {error}
+            </div>
+            {info && (
+              <button type="button" style={btnStyle} onClick={() => void connect(info)}>
+                重试连接
+              </button>
+            )}
+            <button type="button" style={ghostBtnStyle} onClick={() => void getCurrentWindow().close()}>
+              关闭窗口
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -195,7 +243,16 @@ const SessionApp: React.FC = () => {
   if (!info || !connected) {
     return (
       <div style={boxStyle}>
-        <div style={{ fontSize: '15px' }}>正在连接 {info?.deviceName ?? '远程设备'}…</div>
+        <div style={dragBarStyle} data-tauri-drag-region="deep">
+          <WindowControls />
+        </div>
+        <div style={boxBodyStyle}>
+          <div style={panelStyle}>
+            <div style={{ fontSize: '15px', color: palette.textSecondary }}>
+              正在连接 {info?.deviceName ?? '远程设备'}…
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
@@ -204,6 +261,7 @@ const SessionApp: React.FC = () => {
     <RemoteSessionView
       deviceName={info.deviceName}
       connected
+      standalone
       onExit={() => void handleExit()}
     />
   );

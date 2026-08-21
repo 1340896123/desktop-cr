@@ -275,6 +275,8 @@ export const RemoteAssistPage: React.FC<RemoteAssistPageProps> = ({ onConnectDev
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [hostState, setHostState] = useState<HostState>({ running: false, port: 0 });
   const [hostError, setHostError] = useState<string | null>(null);
+  // 被控端开关切换防抖:启停是异步过程,进行中时忽略新的切换,避免停止/启动交错
+  const hostTogglingRef = React.useRef(false);
   const [showCode, setShowCode] = useState(false);
   const [code] = useState(generateCode);
   const [partnerId, setPartnerId] = useState('');
@@ -289,7 +291,8 @@ export const RemoteAssistPage: React.FC<RemoteAssistPageProps> = ({ onConnectDev
   }, []);
 
   const toggleHostEnabled = async () => {
-    if (!config) return;
+    if (!config || hostTogglingRef.current) return;
+    hostTogglingRef.current = true;
     const next: AppConfig = { ...config, hostEnabled: !config.hostEnabled };
     setConfig(next);
     setHostError(null);
@@ -305,6 +308,8 @@ export const RemoteAssistPage: React.FC<RemoteAssistPageProps> = ({ onConnectDev
     } catch (error) {
       setHostError(String(error));
       onShowToast?.(`操作失败: ${String(error)}`);
+    } finally {
+      hostTogglingRef.current = false;
     }
   };
 

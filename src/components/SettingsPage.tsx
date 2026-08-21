@@ -576,6 +576,9 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [hostState, setHostState] = useState<HostState>({ running: false, port: 0 });
   const [hostError, setHostError] = useState<string | null>(null);
+  // 「允许他人协助」切换防抖:启停是异步过程,连续快速切换会让停止/启动交错
+  // (端口占用、状态事件乱序),进行中时忽略新的切换
+  const hostTogglingRef = React.useRef(false);
   const [portInput, setPortInput] = useState('21118');
   const [signalServerInput, setSignalServerInput] = useState('');
   const [relayServerInput, setRelayServerInput] = useState('');
@@ -752,7 +755,8 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
 
   // 允许他人远程协助：持久化 hostEnabled 并真实启停被控端（与远程协助页同一接线）
   const toggleAllowAssist = async () => {
-    if (!config) return;
+    if (!config || hostTogglingRef.current) return;
+    hostTogglingRef.current = true;
     const next: AppConfig = { ...config, hostEnabled: !config.hostEnabled };
     setConfig(next);
     setHostError(null);
@@ -768,6 +772,8 @@ export const SettingsPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) 
     } catch (error) {
       setHostError(String(error));
       setNotice(`操作失败: ${String(error)}`);
+    } finally {
+      hostTogglingRef.current = false;
     }
   };
 

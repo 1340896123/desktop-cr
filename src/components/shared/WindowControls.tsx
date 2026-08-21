@@ -39,20 +39,31 @@ const useStyles = makeStyles({
       color: '#ffffff',
     },
   },
+  dark: {
+    color: '#C9D2DD',
+
+    '&:hover': {
+      backgroundColor: 'rgba(255, 255, 255, 0.1)',
+      color: '#F2F5F8',
+    },
+  },
 });
 
 interface WindowControlsProps {
   /** 浏览器模式点击最大化/还原时的回退行为 */
   onToggleMaximize?: () => void;
+  /** 深色变体:适配深色顶栏(如远程会话窗口) */
+  dark?: boolean;
 }
 
 /**
  * 无边框窗口的自绘窗口控制按钮组：最小化 / 最大化还原 / 关闭（hover 变红）。
  * 内部自行订阅窗口最大化状态；Tauri 环境真实调用窗口 API，浏览器模式为 noop。
  */
-export const WindowControls: React.FC<WindowControlsProps> = ({ onToggleMaximize }) => {
+export const WindowControls: React.FC<WindowControlsProps> = ({ onToggleMaximize, dark = false }) => {
   const styles = useStyles();
   const [maximized, setMaximized] = useState(false);
+  const btnCls = dark ? `${styles.btn} ${styles.dark}` : styles.btn;
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -74,7 +85,7 @@ export const WindowControls: React.FC<WindowControlsProps> = ({ onToggleMaximize
     <div className={styles.controls}>
       <button
         type="button"
-        className={styles.btn}
+        className={btnCls}
         onClick={() => void minimizeWindow()}
         aria-label="最小化"
         title="最小化"
@@ -84,7 +95,7 @@ export const WindowControls: React.FC<WindowControlsProps> = ({ onToggleMaximize
       </button>
       <button
         type="button"
-        className={styles.btn}
+        className={btnCls}
         onClick={handleToggleMaximize}
         aria-label={maximized ? '还原窗口' : '最大化'}
         title={maximized ? '还原窗口' : '最大化'}
@@ -94,7 +105,7 @@ export const WindowControls: React.FC<WindowControlsProps> = ({ onToggleMaximize
       </button>
       <button
         type="button"
-        className={`${styles.btn} ${styles.close}`}
+        className={`${btnCls} ${styles.close}`}
         onClick={() => void closeWindow()}
         aria-label="关闭"
         title="关闭"

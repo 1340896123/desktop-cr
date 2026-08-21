@@ -15,7 +15,7 @@ import {
   PlayRegular,
   DismissRegular,
 } from '@fluentui/react-icons';
-import { fontFamily, spacing, radius } from '../theme/tokens';
+import { fontFamily, palette, radius, shadow, spacing } from '../theme/tokens';
 import {
   listDirectory,
   getIncomingDir,
@@ -31,8 +31,6 @@ import {
   onConnectionStateChange,
 } from '../services/connection';
 
-const UU_BLUE = '#0066ff';
-
 const useStyles = makeStyles({
   page: {
     flex: 1,
@@ -42,6 +40,7 @@ const useStyles = makeStyles({
     display: 'flex',
     flexDirection: 'column',
     gap: `${spacing.sm}px`,
+    backgroundColor: palette.background,
 
     '@media (max-width: 560px)': {
       padding: `${spacing.sm}px ${spacing.md}px`,
@@ -63,21 +62,21 @@ const useStyles = makeStyles({
     fontFamily,
     fontSize: '20px',
     fontWeight: 700,
-    color: '#111827',
+    color: palette.textPrimary,
     letterSpacing: '-0.02em',
     margin: 0,
   },
   connectHint: {
     fontFamily,
     fontSize: '12px',
-    color: '#8A94A6',
-    background: '#F1F3F5',
+    color: palette.textMuted,
+    background: palette.muted,
     borderRadius: radius.pill,
     padding: '5px 12px',
   },
   connectHintActive: {
-    color: '#1E7D43',
-    background: '#E7F7EC',
+    color: palette.online,
+    background: `rgba(52, 199, 89, 0.12)`,
   },
   transferPanel: {
     display: 'grid',
@@ -96,12 +95,12 @@ const useStyles = makeStyles({
   pane: {
     display: 'flex',
     flexDirection: 'column',
-    backgroundColor: '#ffffff',
-    border: '1px solid #E5E7EB',
-    borderRadius: '12px',
+    backgroundColor: palette.backgroundElevated,
+    border: `1px solid ${palette.borderLight}`,
+    borderRadius: radius.card,
     overflow: 'hidden',
     minWidth: 0,
-    boxShadow: '0 1px 2px rgba(16,24,40,0.04), 0 1px 3px rgba(16,24,40,0.06)',
+    boxShadow: shadow.card,
 
     '@media (max-width: 920px)': {
       height: '48vh',
@@ -113,15 +112,15 @@ const useStyles = makeStyles({
     alignItems: 'center',
     gap: '8px',
     padding: '10px 12px',
-    backgroundColor: '#F9FAFB',
-    borderBottom: '1px solid #E5E7EB',
+    backgroundColor: palette.background,
+    borderBottom: `1px solid ${palette.borderLight}`,
     flexShrink: 0,
   },
   paneTitle: {
     fontFamily,
     fontSize: '13px',
     fontWeight: 700,
-    color: '#1F2937',
+    color: palette.textPrimary,
   },
   tag: {
     fontFamily,
@@ -132,17 +131,17 @@ const useStyles = makeStyles({
     fontWeight: 600,
   },
   tagLocal: {
-    backgroundColor: '#E5E7EB',
-    color: '#4B5563',
+    backgroundColor: palette.borderLight,
+    color: palette.textSecondary,
   },
   tagRemote: {
-    backgroundColor: '#D1FAE5',
-    color: '#047857',
+    backgroundColor: `rgba(52, 199, 89, 0.12)`,
+    color: palette.online,
   },
   countText: {
     fontFamily,
     fontSize: '11px',
-    color: '#8A94A6',
+    color: palette.textMuted,
     marginLeft: 'auto',
     whiteSpace: 'nowrap',
   },
@@ -153,20 +152,20 @@ const useStyles = makeStyles({
     padding: '5px 10px',
     borderRadius: radius.control,
     border: 'none',
-    backgroundColor: '#E5E7EB',
-    color: '#374151',
+    backgroundColor: palette.borderLight,
+    color: palette.textSecondary,
     fontFamily,
     fontSize: '12px',
     cursor: 'not-allowed',
     whiteSpace: 'nowrap',
   },
   headSendBtnActive: {
-    backgroundColor: UU_BLUE,
-    color: '#ffffff',
+    backgroundColor: palette.primary,
+    color: palette.textOnPrimary,
     cursor: 'pointer',
 
     '&:hover': {
-      backgroundColor: '#0052cc',
+      backgroundColor: palette.primaryHover,
     },
   },
   headGroup: {
@@ -180,7 +179,7 @@ const useStyles = makeStyles({
     alignItems: 'center',
     gap: '2px',
     padding: '6px 8px',
-    borderBottom: '1px solid #F3F4F6',
+    borderBottom: `1px solid ${palette.borderLight}`,
     flexShrink: 0,
   },
   pathIconBtn: {
@@ -192,18 +191,18 @@ const useStyles = makeStyles({
     border: 'none',
     background: 'transparent',
     borderRadius: radius.control,
-    color: '#9CA3AF',
+    color: palette.textMuted,
     cursor: 'pointer',
     transition: 'background-color 150ms ease, color 150ms ease',
     flexShrink: 0,
 
     '&:hover': {
-      backgroundColor: '#F1F3F5',
-      color: '#111827',
+      backgroundColor: palette.muted,
+      color: palette.textPrimary,
     },
 
     '&:disabled': {
-      color: '#D1D5DB',
+      color: palette.border,
       cursor: 'not-allowed',
       opacity: 0.5,
     },
@@ -213,17 +212,17 @@ const useStyles = makeStyles({
     minWidth: 0,
     height: '26px',
     padding: '0 10px',
-    backgroundColor: '#F9FAFB',
-    border: '1px solid #E5E7EB',
+    backgroundColor: palette.background,
+    border: `1px solid ${palette.borderLight}`,
     borderRadius: radius.control,
     fontFamily,
     fontSize: '12px',
-    color: '#4B5563',
+    color: palette.textSecondary,
     outline: 'none',
     transition: 'border-color 150ms ease',
 
     '&:focus': {
-      border: `1px solid ${UU_BLUE}`,
+      border: `1px solid ${palette.primary}`,
     },
   },
   fileTableWrap: {
@@ -236,15 +235,15 @@ const useStyles = makeStyles({
     borderCollapse: 'collapse',
     fontFamily,
     fontSize: '12px',
-    color: '#111827',
+    color: palette.textPrimary,
   },
   th: {
     padding: '6px 8px',
     textAlign: 'left',
     fontWeight: 400,
-    color: '#6B7280',
-    backgroundColor: '#F9FAFB',
-    borderBottom: '1px solid #F3F4F6',
+    color: palette.textSecondary,
+    backgroundColor: palette.background,
+    borderBottom: `1px solid ${palette.borderLight}`,
     position: 'sticky',
     top: 0,
     whiteSpace: 'nowrap',
@@ -254,7 +253,7 @@ const useStyles = makeStyles({
   },
   td: {
     padding: '6px 8px',
-    borderBottom: '1px solid rgba(243, 244, 246, 0.7)',
+    borderBottom: `1px solid ${palette.borderLight}`,
     whiteSpace: 'nowrap',
   },
   tr: {
@@ -262,14 +261,14 @@ const useStyles = makeStyles({
     transition: 'background-color 120ms ease',
 
     '&:hover': {
-      backgroundColor: '#EFF6FF',
+      backgroundColor: palette.primarySoft,
     },
   },
   trSelected: {
-    backgroundColor: '#E8F1FF',
+    backgroundColor: palette.primarySoft,
 
     '&:hover': {
-      backgroundColor: '#E8F1FF',
+      backgroundColor: palette.primarySoft,
     },
   },
   fileName: {
@@ -277,7 +276,7 @@ const useStyles = makeStyles({
     alignItems: 'center',
     gap: '6px',
     fontWeight: 500,
-    color: '#1F2937',
+    color: palette.textPrimary,
     maxWidth: '220px',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
@@ -288,10 +287,10 @@ const useStyles = makeStyles({
     flexShrink: 0,
   },
   dateCol: {
-    color: '#9CA3AF',
+    color: palette.textMuted,
   },
   typeCol: {
-    color: '#4B5563',
+    color: palette.textSecondary,
   },
   hideSm: {
     '@media (max-width: 760px)': {
@@ -299,15 +298,15 @@ const useStyles = makeStyles({
     },
   },
   sizeCol: {
-    color: '#4B5563',
+    color: palette.textSecondary,
     textAlign: 'right',
   },
   taskSection: {
-    backgroundColor: '#ffffff',
-    border: '1px solid #E5E7EB',
-    borderRadius: '12px',
+    backgroundColor: palette.backgroundElevated,
+    border: `1px solid ${palette.borderLight}`,
+    borderRadius: radius.card,
     padding: '12px',
-    boxShadow: '0 1px 2px rgba(16,24,40,0.04), 0 1px 3px rgba(16,24,40,0.06)',
+    boxShadow: shadow.card,
     flexShrink: 0,
     display: 'flex',
     flexDirection: 'column',
@@ -317,19 +316,19 @@ const useStyles = makeStyles({
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    borderBottom: '1px solid #F3F4F6',
+    borderBottom: `1px solid ${palette.borderLight}`,
     paddingBottom: '8px',
   },
   taskTitle: {
     fontFamily,
     fontSize: '13px',
     fontWeight: 700,
-    color: '#1F2937',
+    color: palette.textPrimary,
   },
   taskCount: {
     fontFamily,
     fontSize: '12px',
-    color: '#9CA3AF',
+    color: palette.textMuted,
     fontWeight: 400,
     marginLeft: '6px',
   },
@@ -337,7 +336,7 @@ const useStyles = makeStyles({
     display: 'flex',
     alignItems: 'center',
     gap: '12px',
-    color: '#6B7280',
+    color: palette.textSecondary,
     fontSize: '11px',
   },
   batchBtn: {
@@ -347,19 +346,19 @@ const useStyles = makeStyles({
     border: 'none',
     background: 'transparent',
     padding: 0,
-    color: '#6B7280',
+    color: palette.textSecondary,
     fontFamily,
     fontSize: '11px',
     cursor: 'pointer',
     transition: 'color 150ms ease',
 
     '&:hover': {
-      color: '#111827',
+      color: palette.textPrimary,
     },
   },
   batchBtnDanger: {
     '&:hover': {
-      color: '#DC2626',
+      color: palette.destructive,
     },
   },
   taskList: {
@@ -373,13 +372,13 @@ const useStyles = makeStyles({
     display: 'flex',
     alignItems: 'center',
     gap: '8px',
-    backgroundColor: '#F9FAFB',
+    backgroundColor: palette.background,
     padding: '8px',
     borderRadius: '8px',
-    border: '1px solid #F3F4F6',
+    border: `1px solid ${palette.borderLight}`,
     fontFamily,
     fontSize: '12px',
-    color: '#4B5563',
+    color: palette.textSecondary,
 
     // 窄窗口:允许换行,避免固定宽度列横向溢出
     '@media (max-width: 920px)': {
@@ -402,27 +401,27 @@ const useStyles = makeStyles({
     flexShrink: 0,
   },
   taskStatusSent: {
-    color: '#059669',
+    color: palette.online,
     fontWeight: 500,
   },
   taskStatusPaused: {
-    color: '#6B7280',
+    color: palette.textSecondary,
   },
   taskStatusFailed: {
-    color: '#DC2626',
+    color: palette.destructive,
   },
   progressTrack: {
     width: '80px',
     height: '4px',
     borderRadius: radius.pill,
-    backgroundColor: '#E5E7EB',
+    backgroundColor: palette.borderLight,
     overflow: 'hidden',
     flexShrink: 0,
   },
   progressBar: {
     height: '100%',
     borderRadius: radius.pill,
-    backgroundColor: UU_BLUE,
+    backgroundColor: palette.primary,
     transition: 'width 120ms linear',
   },
   taskSize: {
@@ -453,15 +452,15 @@ const useStyles = makeStyles({
     flexShrink: 0,
   },
   chipTagLocal: {
-    backgroundColor: '#E5E7EB',
-    color: '#374151',
+    backgroundColor: palette.borderLight,
+    color: palette.textSecondary,
   },
   chipTagRemote: {
-    backgroundColor: '#D1FAE5',
-    color: '#047857',
+    backgroundColor: `rgba(52, 199, 89, 0.12)`,
+    color: palette.online,
   },
   speedBadge: {
-    backgroundColor: '#111827',
+    backgroundColor: palette.textPrimary,
     color: '#FBBF24',
     padding: '2px 6px',
     borderRadius: '4px',
@@ -483,19 +482,19 @@ const useStyles = makeStyles({
     border: 'none',
     background: 'transparent',
     borderRadius: radius.control,
-    color: '#9CA3AF',
+    color: palette.textMuted,
     cursor: 'pointer',
     flexShrink: 0,
 
     '&:hover': {
       backgroundColor: 'rgba(220, 38, 38, 0.1)',
-      color: '#DC2626',
+      color: palette.destructive,
     },
   },
   empty: {
     padding: '24px 16px',
     textAlign: 'center',
-    color: '#8A94A6',
+    color: palette.textMuted,
     fontFamily,
     fontSize: '12px',
   },
@@ -551,24 +550,24 @@ function formatDate(ms: number | null): string {
 const FileIcon: React.FC<{ isDir: boolean; ext: string }> = ({ isDir, ext }) => {
   if (isDir) {
     return (
-      <span style={{ color: '#F5A623', display: 'flex' }}>
+      <span style={{ color: palette.warning, display: 'flex' }}>
         <FolderRegular fontSize={16} />
       </span>
     );
   }
   if (ext === 'png' || ext === 'jpg' || ext === 'jpeg' || ext === 'webp' || ext === 'gif') {
     return (
-      <span style={{ color: '#5DA8FF', display: 'flex' }}>
+      <span style={{ color: palette.primaryActive, display: 'flex' }}>
         <DocumentImageRegular fontSize={16} />
       </span>
     );
   }
   const color =
     ext === 'xlsx' || ext === 'xls'
-      ? '#1E7D43'
+      ? palette.online
       : ext === 'zip' || ext === 'rar' || ext === '7z'
-        ? '#D97706'
-        : '#8A94A6';
+        ? palette.warning
+        : palette.textMuted;
   return (
     <span style={{ color, display: 'flex' }}>
       <DocumentRegular fontSize={16} />

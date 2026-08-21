@@ -76,7 +76,7 @@ fn toggle_host(app: &AppHandle) {
         let result = if next_enabled {
             crate::hbb_client::start_host(port, handle.clone()).await
         } else {
-            crate::hbb_client::stop_host(handle.clone())
+            crate::hbb_client::stop_host(handle.clone()).await
         };
         if let Err(e) = result {
             log::warn!("[tray] 切换被控端失败: {e}");

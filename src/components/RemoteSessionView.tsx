@@ -14,7 +14,7 @@ import {
   KeyboardRegular,
   Wifi3Regular,
 } from '@fluentui/react-icons';
-import { fontFamily, radius, zIndex } from '../theme/tokens';
+import { fontFamily, palette, radius, shadow, spacing, titleBarHeight, zIndex } from '../theme/tokens';
 import {
   setFullscreen as requestFullscreen,
   setQuality,
@@ -26,28 +26,29 @@ import { onRemoteFrame, type MonitorInfo } from '../services/capture';
 import { getSessionMetrics, requestRemoteMonitors, selectSessionMonitor, onRemoteMonitors, type SessionMetrics } from '../services/session';
 import { setAudioMuted, getAudioMuted, onAudioStateChange } from '../services/audio';
 import RemoteCanvas from './RemoteCanvas';
+import WindowControls from './shared/WindowControls';
 
 const useStyles = makeStyles({
   session: {
     height: '100%',
     display: 'flex',
     flexDirection: 'column',
-    backgroundColor: '#0f172a',
+    backgroundColor: palette.background,
+    color: palette.textPrimary,
     position: 'relative',
     overflow: 'hidden',
   },
   bar: {
-    height: '40px',
+    height: `${titleBarHeight}px`,
     display: 'flex',
     alignItems: 'center',
-    gap: '12px',
-    padding: '0 14px',
-    backgroundColor: 'rgba(30, 41, 59, 0.95)',
-    borderBottom: '1px solid rgba(51, 65, 85, 0.5)',
+    gap: `${spacing.md}px`,
+    padding: `0 ${spacing.lg}px`,
+    backgroundColor: palette.backgroundElevated,
+    borderBottom: `1px solid ${palette.borderLight}`,
     userSelect: 'none',
     zIndex: zIndex.titleBar,
     flexShrink: 0,
-    backdropFilter: 'blur(4px)',
   },
   barLeft: {
     display: 'flex',
@@ -60,45 +61,47 @@ const useStyles = makeStyles({
     alignItems: 'center',
     gap: '6px',
     padding: '3px 10px',
-    borderRadius: '6px',
-    backgroundColor: '#334155',
-    color: '#F8FAFC',
+    borderRadius: radius.control,
+    backgroundColor: palette.primarySoft,
+    border: `1px solid ${palette.border}`,
+    color: palette.textPrimary,
     fontFamily,
     fontSize: '12px',
-    fontWeight: 700,
+    fontWeight: 600,
     whiteSpace: 'nowrap',
   },
   devicePillIcon: {
     display: 'flex',
-    color: '#60A5FA',
+    color: palette.primary,
   },
   superScreen: {
     display: 'inline-flex',
     alignItems: 'center',
     padding: '2px 8px',
-    borderRadius: '4px',
-    backgroundColor: 'rgba(37, 99, 235, 0.8)',
-    color: '#ffffff',
+    borderRadius: radius.pill,
+    backgroundColor: palette.onlineBadgeBg,
+    color: palette.onlineBadgeText,
     fontFamily,
-    fontSize: '10px',
+    fontSize: '12px',
+    fontWeight: 600,
     whiteSpace: 'nowrap',
   },
   signalGroup: {
     display: 'flex',
     alignItems: 'center',
     gap: '6px',
-    color: '#34D399',
+    color: palette.textSecondary,
   },
   signalDot: {
     width: '8px',
     height: '8px',
     borderRadius: '50%',
-    backgroundColor: '#34D399',
+    backgroundColor: palette.online,
   },
   timer: {
     fontFamily,
     fontSize: '12px',
-    color: '#CBD5E1',
+    color: palette.textSecondary,
     fontVariantNumeric: 'tabular-nums',
   },
   barCenter: {
@@ -113,9 +116,10 @@ const useStyles = makeStyles({
     gap: '6px',
     height: '26px',
     padding: '0 10px',
-    backgroundColor: '#F2F5F8',
-    color: '#1C2733',
-    borderRadius: '6px',
+    backgroundColor: palette.muted,
+    border: `1px solid ${palette.borderLight}`,
+    color: palette.textPrimary,
+    borderRadius: radius.control,
     fontFamily,
     fontSize: '12px',
     fontWeight: 600,
@@ -130,11 +134,12 @@ const useStyles = makeStyles({
     border: 'none',
     background: 'transparent',
     borderRadius: radius.control,
-    color: '#C9D2DD',
+    color: palette.textSecondary,
     cursor: 'pointer',
 
     '&:hover': {
-      backgroundColor: 'rgba(255,255,255,0.1)',
+      backgroundColor: palette.muted,
+      color: palette.textPrimary,
     },
   },
   barRight: {
@@ -152,12 +157,12 @@ const useStyles = makeStyles({
     border: 'none',
     background: 'transparent',
     borderRadius: radius.control,
-    color: '#C9D2DD',
+    color: palette.textSecondary,
     cursor: 'pointer',
 
     '&:hover': {
-      backgroundColor: 'rgba(255,255,255,0.1)',
-      color: '#F2F5F8',
+      backgroundColor: palette.muted,
+      color: palette.textPrimary,
     },
   },
   centerBtn: {
@@ -169,14 +174,14 @@ const useStyles = makeStyles({
     border: 'none',
     background: 'transparent',
     borderRadius: radius.control,
-    color: '#C9D2DD',
+    color: palette.textSecondary,
     fontFamily,
     fontSize: '12px',
     cursor: 'pointer',
 
     '&:hover': {
-      backgroundColor: 'rgba(255,255,255,0.1)',
-      color: '#F2F5F8',
+      backgroundColor: palette.muted,
+      color: palette.textPrimary,
     },
   },
   disconnectBtn: {
@@ -185,8 +190,8 @@ const useStyles = makeStyles({
     padding: '5px 14px',
     borderRadius: '6px',
     border: 'none',
-    backgroundColor: '#DC2626',
-    color: '#ffffff',
+    backgroundColor: palette.destructive,
+    color: palette.textOnPrimary,
     fontFamily,
     fontSize: '12px',
     fontWeight: 500,
@@ -201,20 +206,22 @@ const useStyles = makeStyles({
     flex: 1,
     position: 'relative',
     minHeight: 0,
+    backgroundColor: '#0B1220',
   },
   perfOverlay: {
     position: 'absolute',
     right: '14px',
     bottom: '14px',
-    backgroundColor: 'rgba(15, 23, 32, 0.9)',
-    borderRadius: '8px',
+    backgroundColor: 'rgba(255, 255, 255, 0.86)',
+    borderRadius: radius.cardInner,
     padding: '10px 14px',
     fontFamily,
     fontSize: '11px',
     lineHeight: '20px',
-    color: '#CBD5E1',
-    backdropFilter: 'blur(4px)',
-    border: '1px solid rgba(51, 65, 85, 0.8)',
+    color: palette.textSecondary,
+    backdropFilter: 'blur(6px)',
+    border: `1px solid ${palette.borderLight}`,
+    boxShadow: shadow.popover,
     zIndex: 5,
     fontVariantNumeric: 'tabular-nums',
     minWidth: '220px',
@@ -222,9 +229,9 @@ const useStyles = makeStyles({
   perfTitle: {
     display: 'flex',
     justifyContent: 'space-between',
-    color: '#34D399',
+    color: palette.primary,
     fontWeight: 700,
-    borderBottom: '1px solid rgba(30, 41, 59, 0.9)',
+    borderBottom: `1px solid ${palette.borderLight}`,
     paddingBottom: '4px',
     marginBottom: '4px',
   },
@@ -234,7 +241,7 @@ const useStyles = makeStyles({
     gap: '16px',
   },
   perfVal: {
-    color: '#FFFFFF',
+    color: palette.textPrimary,
     fontWeight: 500,
     textAlign: 'right',
   },
@@ -242,14 +249,14 @@ const useStyles = makeStyles({
     position: 'absolute',
     right: '14px',
     bottom: '184px',
-    backgroundColor: 'rgba(15, 23, 32, 0.78)',
-    borderRadius: '8px',
+    backgroundColor: 'rgba(17, 24, 39, 0.82)',
+    borderRadius: radius.cardInner,
     padding: '8px 14px',
     fontFamily,
     fontSize: '12px',
     lineHeight: '18px',
     color: '#FFFFFF',
-    backdropFilter: 'blur(4px)',
+    backdropFilter: 'blur(6px)',
     zIndex: 6,
     maxWidth: '320px',
   },
@@ -258,10 +265,10 @@ const useStyles = makeStyles({
     top: '48px',
     right: '12px',
     width: '280px',
-    backgroundColor: '#232B36',
-    borderRadius: '10px',
-    border: '1px solid rgba(255,255,255,0.1)',
-    boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+    backgroundColor: palette.backgroundElevated,
+    borderRadius: radius.card,
+    border: `1px solid ${palette.borderLight}`,
+    boxShadow: shadow.popover,
     padding: '8px',
     zIndex: 20,
   },
@@ -269,9 +276,9 @@ const useStyles = makeStyles({
     fontFamily,
     fontSize: '13px',
     fontWeight: 600,
-    color: '#F2F5F8',
+    color: palette.textPrimary,
     padding: '6px 10px 8px',
-    borderBottom: '1px solid rgba(255,255,255,0.08)',
+    borderBottom: `1px solid ${palette.borderLight}`,
     marginBottom: '6px',
   },
   centerItem: {
@@ -282,12 +289,12 @@ const useStyles = makeStyles({
     borderRadius: '6px',
     fontFamily,
     fontSize: '13px',
-    color: '#C9D2DD',
+    color: palette.textSecondary,
     cursor: 'pointer',
 
     '&:hover': {
-      backgroundColor: 'rgba(255,255,255,0.08)',
-      color: '#F2F5F8',
+      backgroundColor: palette.primarySoft,
+      color: palette.textPrimary,
     },
   },
   centerItemDisabled: {
@@ -298,23 +305,23 @@ const useStyles = makeStyles({
     borderRadius: '6px',
     fontFamily,
     fontSize: '13px',
-    color: '#64748B',
+    color: palette.textMuted,
     opacity: 0.6,
     cursor: 'not-allowed',
   },
   centerItemIcon: {
     display: 'flex',
-    color: '#6BB7FF',
+    color: palette.primary,
   },
   displayMenu: {
     position: 'absolute',
     top: '46px',
     left: '50%',
     transform: 'translateX(-50%)',
-    backgroundColor: '#232B36',
-    borderRadius: '10px',
-    border: '1px solid rgba(255,255,255,0.1)',
-    boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+    backgroundColor: palette.backgroundElevated,
+    borderRadius: radius.card,
+    border: `1px solid ${palette.borderLight}`,
+    boxShadow: shadow.popover,
     padding: '6px',
     zIndex: 20,
     minWidth: '160px',
@@ -324,24 +331,24 @@ const useStyles = makeStyles({
     borderRadius: '6px',
     fontFamily,
     fontSize: '13px',
-    color: '#C9D2DD',
+    color: palette.textSecondary,
     cursor: 'pointer',
 
     '&:hover': {
-      backgroundColor: 'rgba(255,255,255,0.08)',
+      backgroundColor: palette.muted,
     },
   },
   displayMenuItemActive: {
-    color: '#FFFFFF',
+    color: palette.textPrimary,
     fontWeight: 600,
-    backgroundColor: 'rgba(107, 183, 255, 0.15)',
+    backgroundColor: palette.primarySoft,
   },
 displayMenuEmpty: {
     padding: '7px 12px',
     borderRadius: '6px',
     fontFamily,
     fontSize: '13px',
-    color: '#64748B',
+    color: palette.textMuted,
     opacity: 0.7,
     cursor: 'default',
     whiteSpace: 'nowrap',
@@ -381,13 +388,22 @@ interface RemoteSessionViewProps {
   connected: boolean;
   onExit?: () => void;
   onOpenVirtualDisplays?: () => void;
+  /** 独立窗口模式:顶栏变为无边框窗口标题栏(拖拽区 + 自绘最小化/最大化/关闭) */
+  standalone?: boolean;
 }
 
 /**
  * 远程会话窗口：深色顶部栏（设备名胶囊 + 超级屏 + 信号 + 计时 / 显示屏下拉 /
  * 麦克风 + 控制中心 + 断开连接）+ 全屏远程画面 + 右下角性能浮窗。
+ * standalone 模式下顶栏兼任无边框窗口标题栏（可拖拽移动窗口）。
  */
-export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName, connected, onExit, onOpenVirtualDisplays }) => {
+export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({
+  deviceName,
+  connected,
+  onExit,
+  onOpenVirtualDisplays,
+  standalone = false,
+}) => {
   const styles = useStyles();
   const [elapsed, setElapsed] = useState(0);
   const [micMuted, setMicMuted] = useState(false);
@@ -529,9 +545,9 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
 
   return (
     <div className={styles.session}>
-      <div className={styles.bar}>
+      <div className={styles.bar} data-tauri-drag-region={standalone ? 'deep' : undefined}>
         <div className={styles.barLeft}>
-          <span className={styles.devicePill}>
+          <span className={styles.devicePill} data-tauri-drag-region={standalone ? 'false' : undefined}>
             <span className={styles.devicePillIcon}>
               <DesktopRegular fontSize={11} />
             </span>
@@ -545,7 +561,7 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
           </span>
         </div>
 
-        <div className={styles.barCenter}>
+        <div className={styles.barCenter} data-tauri-drag-region={standalone ? 'false' : undefined}>
           <div
             className={styles.displayTab}
             onClick={() => {
@@ -566,12 +582,14 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
               <AddRegular fontSize={16} />
             </button>
           )}
+          {!onOpenVirtualDisplays && standalone && <span style={{ width: '26px' }} />}
         </div>
 
         <div className={styles.barRight}>
           <button
             type="button"
             className={styles.iconBtn}
+            data-tauri-drag-region={standalone ? 'false' : undefined}
             onClick={() => {
               // 控制端静音远程回传的系统声音（真实调用 set_audio_muted 命令）
               const next = !micMuted;
@@ -582,13 +600,28 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({ deviceName
           >
             {micMuted ? <MicOffRegular fontSize={16} /> : <MicRegular fontSize={16} />}
           </button>
-          <button type="button" className={styles.centerBtn} onClick={() => setCenterOpen((prev) => !prev)}>
+          <button
+            type="button"
+            className={styles.centerBtn}
+            data-tauri-drag-region={standalone ? 'false' : undefined}
+            onClick={() => setCenterOpen((prev) => !prev)}
+          >
             <SettingsRegular fontSize={15} />
             控制中心
           </button>
-          <button type="button" className={styles.disconnectBtn} onClick={onExit}>
+          <button
+            type="button"
+            className={styles.disconnectBtn}
+            data-tauri-drag-region={standalone ? 'false' : undefined}
+            onClick={onExit}
+          >
             断开连接
           </button>
+          {standalone && (
+            <span data-tauri-drag-region="false" style={{ display: 'inline-flex', height: '100%', marginLeft: '4px' }}>
+              <WindowControls />
+            </span>
+          )}
         </div>
       </div>
 
