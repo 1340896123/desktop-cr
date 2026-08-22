@@ -106,6 +106,12 @@ static LATEST_VIDEO_DUR: std::sync::atomic::AtomicU32 = std::sync::atomic::Atomi
 /// 当前抓帧循环任务句柄:用于 stop_capture 取消循环。
 static CAPTURE_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
+/// 抓帧循环停止标志:`spawn_blocking` 任务无法被 `JoinHandle::abort` 中断
+/// (tokio 文档语义:abort 不停止已进入阻塞闭包的线程),旧循环会泄漏并
+/// 永久忙跑(D3D11 资源不释放 + 多循环叠加拖垮整机)。每次 start 置 false、
+/// stop 置 true,循环每帧开头检查退出。
+static CAPTURE_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// 枚举系统中所有显示器(真实 EnumDisplayDevicesW / EnumDisplaySettingsW)。
 ///
 /// `is_virtual` 判断:DeviceString 含 "usbmmidd" / "USB Mobile Monitor" 即视为 IDD 虚拟屏。
@@ -138,13 +144,19 @@ pub async fn start_capture(
 ) -> Result<(), String> {
     // 幂等:先停止旧循环再启动新循环
     stop_capture_inner();
-
     #[cfg(target_os = "windows")]
     {
+        // 新循环启动:清除停止标志(须在 stop_capture_inner 置位之后)
+        CAPTURE_STOP.store(false, std::sync::atomic::Ordering::Release);
         // 参数仅作契约保留,真实参数读取流配置(stream_cfg)
         let _ = (width, height, fps);
-        let handle = tokio::spawn(async move {
-            if let Err(e) = dxgi_capture_loop(app.clone(), monitor_id).await {
+        // DXGI 抓帧为纯同步重活(D3D11 Map 读回 + FFmpeg 编码,1080p 每帧
+        // 阻塞十几 ms):跑在 async worker 上会与其他 tokio 任务(网络握手/
+        // 事件派发)争抢线程,实测可把新 spawn 的任务饿死数十秒(自连接
+        // host_accept 后 handle_host_connection 长时间不调度,握手超时)。
+        // spawn_blocking 用专用阻塞线程池,不占 async worker。
+        let handle = tokio::task::spawn_blocking(move || {
+            if let Err(e) = dxgi_capture_loop(app.clone(), monitor_id) {
                 log::error!("[capture] DXGI 抓屏循环退出: {e}");
                 crate::operation_log::op_log(
                     "capture",
@@ -200,6 +212,9 @@ fn stop_capture_inner() {
             handle.abort();
         }
     }
+    // spawn_blocking 任务 abort 无法中断已运行的阻塞线程:置停止标志,
+    // 循环在下一帧开头观察到后自行退出(释放 DXGI 资源)
+    CAPTURE_STOP.store(true, std::sync::atomic::Ordering::Release);
     if let Ok(mut slot) = LATEST_FRAME.lock() {
         *slot = None;
     }
@@ -572,9 +587,12 @@ fn list_monitors_windows() -> Result<Vec<MonitorInfo>, String> {
     Ok(monitors)
 }
 
-/// 真实 DXGI 桌面复制抓屏循环(随任务结束释放全部 DXGI 资源)。
+/// 真实 DXGI 桌面复制抓帧循环(随任务结束释放全部 DXGI 资源)。
+///
+/// **同步函数,跑在 spawn_blocking 专用线程上**:循环体是 D3D11 采集/Map 读回/
+/// FFmpeg 编码的同步重活,不得占用 async worker(见 `start_capture` 注释)。
 #[cfg(target_os = "windows")]
-async fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String> {
+fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String> {
     use windows::core::Interface;
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
     use windows::Win32::Graphics::Direct3D11::{
@@ -641,10 +659,17 @@ async fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String
 
     let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
     loop {
+        // 停止标志(stop_capture 置位):spawn_blocking 线程无法被 abort 中断,
+        // 循环在此自行退出并随函数返回释放全部 DXGI/编码器资源
+        if CAPTURE_STOP.load(std::sync::atomic::Ordering::Acquire) {
+            log::info!("[capture] 收到停止标志,抓帧循环退出(释放 DXGI 资源)");
+            return Ok(());
+        }
         // 实时读取流配置(前端 set_stream_quality/set_stream_resolution 即时生效)
         let cfg = crate::hbb_client::stream_cfg();
         let interval_ms = (1000u64 / u64::from(cfg.fps.clamp(1, 30))).max(1);
-        tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+        // 同步 sleep(本循环跑在 spawn_blocking 线程,不占 async worker)
+        std::thread::sleep(std::time::Duration::from_millis(interval_ms));
 
         // 4) 获取下一帧;DXGI_ERROR_WAIT_TIMEOUT 表示桌面暂无新帧 → 跳过本轮
         //    (A4:不编码、不推帧、不产生任何输出,纯空转等待)
@@ -652,6 +677,9 @@ async fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String
         if let Err(e) = unsafe { dup.AcquireNextFrame(0, &mut frame_info, &mut resource) } {
             if e.code() == DXGI_ERROR_WAIT_TIMEOUT {
                 stat_timeouts += 1;
+                // 防忙等:AcquireNextFrame(0) 超时(桌面静止)后小睡再试,
+                // 否则 0 超时 + continue 构成 100% CPU 自旋
+                std::thread::sleep(std::time::Duration::from_millis(30));
                 if stat_start.elapsed() >= std::time::Duration::from_secs(5) {
                     log::info!(
                         "[capture] 帧间隔统计({:.1}s): 新帧 {stat_frames}, 空转等待 {stat_timeouts} 次, 帧间平均 {gap_avg:.0}ms / 最大 {frame_gap_max_ms}ms(静止桌面不编码)",
@@ -670,7 +698,7 @@ async fn dxgi_capture_loop(app: AppHandle, monitor_id: u32) -> Result<(), String
                 continue;
             }
             log::error!("[capture] AcquireNextFrame 失败: {e}");
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            std::thread::sleep(std::time::Duration::from_millis(50));
             continue;
         }
         let Some(resource) = resource else {

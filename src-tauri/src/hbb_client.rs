@@ -767,7 +767,11 @@ pub fn disconnect_from_device(app: AppHandle) -> Result<(), String> {
 /// 获取当前连接状态(读取真实会话状态)。
 #[tauri::command]
 pub fn get_connection_state() -> ConnectionState {
-    match crate::network::session_peer() {
+    // 控制端视角:自连接双角色并存时优先 Client 表(session_peer 会优先返回
+    // Host 表,导致前端会话窗口 peerId 匹配失败显示未连接);单角色进程等价
+    let peer = crate::network::session_peer_side(crate::network::SessionSide::Client)
+        .or_else(|| crate::network::session_peer());
+    match peer {
         Some(peer) => ConnectionState {
             connected: true,
             peer_id: Some(peer),
@@ -1337,6 +1341,12 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
         // 同步预绑定,即时报告端口占用等错误
         let std_listener = std::net::TcpListener::bind(("0.0.0.0", port))
             .map_err(|e| format!("监听 0.0.0.0:{port} 失败(端口被占用?): {e}"))?;
+        // tokio 要求 from_std 的 socket 为非阻塞模式(Windows 上 from_std 不校验,
+        // 阻塞 socket 注册 IOCP 后 accept 完成事件可能永不被投递——表现为
+        // host_accept 滞后数十秒直到其他 IO 活动"踢"到共享完成端口,握手超时)
+        std_listener
+            .set_nonblocking(true)
+            .map_err(|e| format!("监听器设置非阻塞失败: {e}"))?;
         let cfg = stream_cfg();
 
         // 信令注册信息:服务器地址 / 本机 ID / 局域网地址(供广域网被发现)。
