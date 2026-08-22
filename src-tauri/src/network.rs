@@ -563,12 +563,24 @@ pub(crate) async fn write_msg<S: AsyncWrite + Unpin>(
     stream
         .write_all(&len)
         .await
-        .map_err(|e| format!("写入长度失败: {e}"))?;
+        .map_err(|e| format!("写入长度失败({}): {e}", io_err_desc(&e)))?;
     stream
         .write_all(&bytes)
         .await
-        .map_err(|e| format!("写入消息失败: {e}"))?;
+        .map_err(|e| format!("写入消息体失败({}): {e}", io_err_desc(&e)))?;
     Ok(())
+}
+
+/// IO 错误断连分类描述:区分对端正常关闭(FIN→EOF)、连接被重置(RST,即
+/// os error 10054)与其他异常,让两端会话结束日志能直接回答"对端是怎么关的"。
+fn io_err_desc(e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::UnexpectedEof => "对端正常关闭FIN".to_string(),
+        std::io::ErrorKind::ConnectionReset => "对端重置连接RST".to_string(),
+        std::io::ErrorKind::ConnectionAborted => "连接被中止".to_string(),
+        std::io::ErrorKind::TimedOut => "读超时".to_string(),
+        _ => "连接异常断开".to_string(),
+    }
 }
 
 /// 读一条消息(4 字节小端长度 + JSON)。
@@ -577,7 +589,7 @@ pub(crate) async fn read_msg<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Msg
     stream
         .read_exact(&mut len)
         .await
-        .map_err(|e| format!("读取消息头失败(连接已断开): {e}"))?;
+        .map_err(|e| format!("读取消息头失败({}): {e}", io_err_desc(&e)))?;
     let n = u32::from_le_bytes(len) as usize;
     if n == 0 || n > MAX_FRAME_BYTES {
         return Err(format!("非法消息长度: {n}"));
@@ -586,7 +598,7 @@ pub(crate) async fn read_msg<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Msg
     stream
         .read_exact(&mut buf)
         .await
-        .map_err(|e| format!("读取消息体失败: {e}"))?;
+        .map_err(|e| format!("读取消息体失败({}): {e}", io_err_desc(&e)))?;
     serde_json::from_slice(&buf).map_err(|e| format!("反序列化失败: {e}"))
 }
 
@@ -606,6 +618,17 @@ pub(crate) async fn serve_host(
         log::info!("[network] 收到连接: {addr}");
         crate::operation_log::op_log("network", "host_accept", &format!("addr={addr}"));
         // 单连接策略:新连接踢掉旧连接(旧会话发送通道关闭后其任务自然退出)
+        if let Some(old) = session_guard().as_ref().map(|s| (s.peer_id.clone(), s.peer_addr.clone()))
+        {
+            crate::operation_log::op_log(
+                "network",
+                "host_kick_old_session",
+                &format!(
+                    "old_peer={} old_addr={} new_addr={addr}(单连接策略,新连接踢旧线)",
+                    old.0, old.1
+                ),
+            );
+        }
         close_session();
         let app = app.clone();
         tokio::spawn(async move {
@@ -624,9 +647,19 @@ async fn handle_host_connection(
     addr: std::net::SocketAddr,
 ) -> Result<(), String> {
     // 1) 握手:等待 hello
-    let hello: Msg = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_msg(&mut stream))
-        .await
-        .map_err(|_| format!("握手超时(来自 {addr})"))??;
+    let hello: Msg = match tokio::time::timeout(HANDSHAKE_TIMEOUT, read_msg(&mut stream)).await {
+        Ok(Ok(m)) => m,
+        Ok(Err(e)) => {
+            let reason = format!("握手读取失败(来自 {addr}): {e}");
+            crate::operation_log::op_log("network", "host_handshake_failed", &reason);
+            return Err(reason);
+        }
+        Err(_) => {
+            let reason = format!("握手超时(来自 {addr})");
+            crate::operation_log::op_log("network", "host_handshake_failed", &reason);
+            return Err(reason);
+        }
+    };
     let peer_id = match &hello {
         Msg::Hello {
             id,
@@ -634,11 +667,25 @@ async fn handle_host_connection(
             ver,
         } => {
             if app_name != APP_NAME || *ver != PROTOCOL_VERSION {
-                return Err(format!("协议不匹配: app={app_name}, ver={ver:?}"));
+                let reason = format!("协议不匹配: app={app_name}, ver={ver:?}(本端期望 app={APP_NAME}, ver={PROTOCOL_VERSION})");
+                crate::operation_log::op_log(
+                    "network",
+                    "host_handshake_failed",
+                    &format!("addr={addr}, {reason}"),
+                );
+                return Err(reason);
             }
             id.clone()
         }
-        other => return Err(format!("首条消息必须是 hello,收到: {other:?}")),
+        other => {
+            let reason = format!("首条消息必须是 hello,收到: {other:?}");
+            crate::operation_log::op_log(
+                "network",
+                "host_handshake_failed",
+                &format!("addr={addr}, {reason}"),
+            );
+            return Err(reason);
+        }
     };
 
     // 2) 回 hello-ack
@@ -651,6 +698,11 @@ async fn handle_host_connection(
         peer_addr: addr.to_string(),
         tx,
     });
+    crate::operation_log::op_log(
+        "network",
+        "host_session_start",
+        &format!("peer={peer_id} addr={addr}(握手成功,会话已注册)"),
+    );
     if let Some(app) = &app {
         let _ = app.emit(
             "connection-state",
@@ -665,9 +717,18 @@ async fn handle_host_connection(
     let read_task = tokio::spawn(host_read_loop(app.clone(), read_half));
     let write_task = tokio::spawn(host_write_loop(app.clone(), write_half, rx));
 
+    // 任一路退出即会话结束。panic(JoinError)同样汇入 sess_err 走统一清理
+    // 与 host_session_end 落盘(此前 `?` 提前返回会跳过清理,且 panic 无落盘日志);
+    // 标注退出侧别(读=收消息 / 写=推帧),定位"谁先关"直接看侧别。
     let sess_err: Result<(), String> = tokio::select! {
-        r = read_task => r.map_err(|e| format!("读任务失败: {e}"))?,
-        w = write_task => w.map_err(|e| format!("写任务失败: {e}"))?,
+        r = read_task => match r {
+            Ok(inner) => inner.map_err(|e| format!("读循环退出(收消息侧): {e}")),
+            Err(e) => Err(format!("读任务 panic(收消息侧): {e}")),
+        },
+        w = write_task => match w {
+            Ok(inner) => inner.map_err(|e| format!("写循环退出(推帧侧): {e}")),
+            Err(e) => Err(format!("写任务 panic(推帧侧): {e}")),
+        },
     };
 
     // 任一路退出即会话结束;仅当会话仍属于自己时才广播断开
@@ -703,7 +764,7 @@ fn handle_host_udp_dead() {
     crate::operation_log::op_log(
         "network",
         "udp_fallback",
-        "reason=peer-watchdog-udp-dead",
+        "reason=peer-watchdog-udp-dead, side=host(被控端收到 UdpDead,关闭 UDP 通道回退 TCP)",
     );
     udp_channel_close();
 }
@@ -1074,6 +1135,11 @@ async fn host_write_loop(
                                 Ok(()) => sent_via_udp = true,
                                 Err(e) => {
                                     log::warn!("[network] UDP 发送失败,本帧回退 TCP: {e}");
+                                    crate::operation_log::op_log(
+                                        "network",
+                                        "udp_fallback",
+                                        &format!("side=host, reason=send-failed, err={e}(UDP 发送失败,本帧回退 TCP)"),
+                                    );
                                     udp_channel_close();
                                 }
                             }
@@ -1140,7 +1206,13 @@ async fn host_write_loop(
     }
     let _ = app;
     udp_channel_close();
-    log::info!("[network] host 写循环结束");
+    // 正常退出 = 会话被替换(新连接踢线)或主动关闭;异常路径经 Err 汇入 host_session_end
+    log::info!("[network] host 写循环结束(会话通道关闭)");
+    crate::operation_log::op_log(
+        "network",
+        "host_write_loop_end",
+        "reason=session-channel-closed(发送通道关闭,通常为新连接踢线或主动断开)",
+    );
     Ok(())
 }
 
@@ -1170,9 +1242,19 @@ pub async fn connect_peer(
         },
     )
     .await?;
-    let ack: Msg = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_msg(&mut stream))
-        .await
-        .map_err(|_| "握手超时(未收到 hello-ack)".to_string())??;
+    let ack: Msg = match tokio::time::timeout(HANDSHAKE_TIMEOUT, read_msg(&mut stream)).await {
+        Ok(Ok(m)) => m,
+        Ok(Err(e)) => {
+            let reason = format!("握手读取失败: {e}");
+            crate::operation_log::op_log("network", "connect_handshake_failed", &reason);
+            return Err(reason);
+        }
+        Err(_) => {
+            let reason = "握手超时(未收到 hello-ack)".to_string();
+            crate::operation_log::op_log("network", "connect_handshake_failed", &reason);
+            return Err(reason);
+        }
+    };
     match ack {
         Msg::HelloAck { id: host_id } => {
             log::info!("[network] 握手成功,对端: {host_id} ({via})");
@@ -1182,7 +1264,11 @@ pub async fn connect_peer(
                 &format!("peer={host_id} via={via}"),
             );
         }
-        other => return Err(format!("握手响应异常: {other:?}")),
+        other => {
+            let reason = format!("握手响应异常: {other:?}");
+            crate::operation_log::op_log("network", "connect_handshake_failed", &reason);
+            return Err(reason);
+        }
     }
 
     // 3) 注册会话
@@ -1192,6 +1278,11 @@ pub async fn connect_peer(
         peer_addr: addr.clone(),
         tx,
     });
+    crate::operation_log::op_log(
+        "network",
+        "client_session_start",
+        &format!("peer={id} addr={addr} via={via}(握手成功,读/写循环已启动)"),
+    );
     // 记录连接路径(直连/信令外部/中继),供会话指标展示;transport 初始 tcp,
     // TCP 握手后经 UdpInit/UdpInitAck 协商成功则更新为 udp/relay-udp
     init_metrics(&via);
@@ -1218,6 +1309,11 @@ pub async fn connect_peer(
             Ok(s) => Some(Arc::new(s)),
             Err(e) => {
                 log::warn!("[network] 控制端 UDP 预绑定失败,维持 TCP: {e}");
+                crate::operation_log::op_log(
+                    "network",
+                    "udp_negotiation_abandon",
+                    &format!("side=client, reason=pre-bind-failed, err={e}(UDP 预绑定失败,未发起 UdpInit,维持 TCP)"),
+                );
                 None
             }
         };
@@ -1227,6 +1323,11 @@ pub async fn connect_peer(
                 .map(|ip| ip.to_string())
                 .unwrap_or_else(|| "127.0.0.1".to_string());
             let token = format!("udp-{:x}", now_ms());
+            crate::operation_log::op_log(
+                "network",
+                "udp_negotiation_started",
+                &format!("side=client, listen_port={port}, lan={lan_ip}, token={token}(已下发 UdpInit)"),
+            );
             *PENDING_UDP_NEGOTIATION
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some((sock, token.clone()));
@@ -1252,6 +1353,11 @@ pub async fn connect_peer(
     tokio::spawn(async move {
         if let Err(e) = peer_write_loop(write_half, rx).await {
             log::warn!("[network] 控制端写循环结束: {e}");
+            crate::operation_log::op_log(
+                "network",
+                "client_write_loop_end",
+                &format!("peer={id}, reason={e}(写循环异常退出)"),
+            );
         }
     });
 
@@ -1804,14 +1910,22 @@ pub(crate) async fn open_transport(
     relay: Option<&str>,
     peer_id: &str,
 ) -> Result<(TcpStream, String), String> {
+    // 逐路径尝试结果汇总(全失败时落盘,便于排查"连接不上"到底卡在哪条路径)
+    let mut attempts: Vec<String> = Vec::new();
     // 1) 直连配置地址(LAN)
     if let Some(addr) = direct {
         match tokio::time::timeout(std::time::Duration::from_secs(3), TcpStream::connect(addr))
             .await
         {
             Ok(Ok(s)) => return Ok((s, format!("直连 {addr}"))),
-            Ok(Err(e)) => log::info!("[network] 直连 {addr} 失败: {e}"),
-            Err(_) => log::info!("[network] 直连 {addr} 超时(3秒)"),
+            Ok(Err(e)) => {
+                log::info!("[network] 直连 {addr} 失败: {e}");
+                attempts.push(format!("直连 {addr} 失败({})", io_err_desc(&e)));
+            }
+            Err(_) => {
+                log::info!("[network] 直连 {addr} 超时(3秒)");
+                attempts.push(format!("直连 {addr} 超时(3秒)"));
+            }
         }
     }
     // 2) 外部地址(信令服务器返回的反射地址)
@@ -1821,8 +1935,14 @@ pub(crate) async fn open_transport(
                 .await
             {
                 Ok(Ok(s)) => return Ok((s, format!("直连外部 {addr}"))),
-                Ok(Err(e)) => log::info!("[network] 直连外部 {addr} 失败: {e}"),
-                Err(_) => log::info!("[network] 直连外部 {addr} 超时(3秒)"),
+                Ok(Err(e)) => {
+                    log::info!("[network] 直连外部 {addr} 失败: {e}");
+                    attempts.push(format!("直连外部 {addr} 失败({})", io_err_desc(&e)));
+                }
+                Err(_) => {
+                    log::info!("[network] 直连外部 {addr} 超时(3秒)");
+                    attempts.push(format!("直连外部 {addr} 超时(3秒)"));
+                }
             }
         }
     }
@@ -1830,10 +1950,19 @@ pub(crate) async fn open_transport(
     if let Some(relay) = relay {
         match open_relay_stream(relay, peer_id).await {
             Ok(s) => return Ok((s, format!("中继 {relay}"))),
-            Err(e) => log::info!("[network] 中继连接失败: {e}"),
+            Err(e) => {
+                log::info!("[network] 中继连接失败: {e}");
+                attempts.push(format!("中继 {relay} 失败: {e}"));
+            }
         }
     }
-    Err("所有连接路径均失败(直连/外部/中继)".into())
+    let reason = format!("所有连接路径均失败(直连/外部/中继): {}", attempts.join("; "));
+    crate::operation_log::op_log(
+        "network",
+        "connect_transport_failed",
+        &format!("peer={peer_id}, {reason}"),
+    );
+    Err(reason)
 }
 
 /// 向信令服务器注册本机并持续心跳(host 侧,长连接保活,断开自动重连)。
@@ -2310,13 +2439,27 @@ async fn peer_read_loop(
     }
     .await;
 
-    // 断线清理:仅当会话仍属于自己时广播断开
+    // 断线清理:仅当会话仍属于自己时广播断开。先取传输模式快照再关闭会话
+    // (close_session_if 会重置 SESSION_METRICS,顺序颠倒会读到空值)
+    let (transport, rtt) = {
+        let m = SESSION_METRICS.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            m.transport.clone().unwrap_or_default(),
+            m.rtt_ms
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "n/a".into()),
+        )
+    };
     if close_session_if(SessionSide::Client, &peer_id, &peer_addr) {
         let reason = result.err().unwrap_or_else(|| "连接已断开".to_string());
+        // 断线时刻的传输模式快照:TCP 断线时视频面实际走 tcp/udp/relay-udp,
+        // 是定位"画面黑屏但连接是谁断的"的关键上下文
         crate::operation_log::op_log(
             "network",
             "disconnect",
-            &format!("peer={peer_id} addr={peer_addr} reason={reason}"),
+            &format!(
+                "peer={peer_id} addr={peer_addr} transport={transport} rtt={rtt}ms reason={reason}"
+            ),
         );
         // 断开会话时停止控制端音频播放(释放输出设备)并关闭 UDP 通道
         crate::audio::stop_audio_playback();
@@ -2490,6 +2633,11 @@ fn install_peer_udp_recv_loop(
             .await;
         if let Err(e) = r {
             log::warn!("[network] 控制端 UDP 接收结束: {e}");
+            crate::operation_log::op_log(
+                "network",
+                "client_udp_recv_end",
+                &format!("peer={peer_id}, err={e}(UDP 接收循环异常结束)"),
+            );
         }
     });
 
