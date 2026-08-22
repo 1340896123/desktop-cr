@@ -59,7 +59,7 @@
 
 ### 2.1 Cargo 依赖
 
-> 注记(项目收尾后现状):RustDesk 的 `hbb_common`/`scrap` 是 git submodule 形态的重依赖链(多个 rustdesk-org fork 依赖、sodiumoxide C 编译、bindgen 等),在 Windows 上构建脆弱且需要 libclang;`hbb_common` 作为 git 依赖无法拉取 submodule 内容。当前网络层改为**自研直连 TCP 协议**(`network.rs`,长度前缀 JSON 帧 + base64 H.264 Annex-B,标准视频编解码、禁止 JPEG),真实实现了 LAN 远程控制的全部能力;抓屏直接用 windows crate 的 DXGI API(与 scrap 底层同一技术),已隔离在 `capture.rs`,未来可平滑替换为 RustDesk 生态。
+> 注记(项目收尾后现状):RustDesk 的 `hbb_common`/`scrap` 是 git submodule 形态的重依赖链(多个 rustdesk-org fork 依赖、sodiumoxide C 编译、bindify 等),在 Windows 上构建脆弱且需要 libclang;`hbb_common` 作为 git 依赖无法拉取 submodule 内容。当前网络层为**自研协议**(`network.rs`,控制面 TCP 长度前缀 JSON 帧 + 视频面 UDP 自定义分片,base64 H.264 Annex-B,标准视频编解码、全链路禁止 JPEG),真实实现了 LAN/中继远程控制的全部能力;抓屏直接用 windows crate 的 DXGI API(与 scrap 底层同一技术),已隔离在 `capture.rs`,未来可平滑替换为 RustDesk 生态。
 
 实际依赖(`src-tauri/Cargo.toml`):
 
@@ -72,9 +72,8 @@ tokio = { version = "1", features = ["full"] }
 log = "0.4"
 env_logger = "0.11"
 
-# 轻量纯 Rust 依赖:协议 base64 / JPEG 编码 / IDD dylib 动态加载
+# 轻量纯 Rust 依赖:协议 base64 / IDD dylib 动态加载(JPEG 依赖已移除,禁止回潮)
 base64 = "0.22"
-jpeg-encoder = "0.6"
 libloading = "0.8"
 
 [target.'cfg(windows)'.dependencies]
@@ -110,37 +109,48 @@ windows = { version = "0.58", features = [
 
 ## 3. 画面传输与渲染管道
 
-画面传输采用 **真实 DXGI 抓屏 + H.264 标准视频编解码(硬编/硬解优先)+ LAN TCP / Tauri IPC 事件** 双通道。**编码规范:音视频链路一律标准编解码(H.264/HEVC 视频、WAV/PCM 音频),禁止 JPEG 上协议**:
+画面传输采用 **真实 DXGI 抓屏 + H.264 标准视频编解码(硬编优先、前端 WebCodecs / FFmpeg D3D11VA 硬解)+ TCP/UDP 双数据面**。**编码规范:音视频链路一律标准编解码(H.264/HEVC 视频、WAV/PCM 音频),全链路禁止 JPEG(jpeg-encoder/image 依赖已移除)**:
 
 ```
 +------------------+         +---------------------+         +------------------------+
 | 远程主机采集端   |         | Rust 编码层          |         | 解码/渲染层              |
-| (DXGI Output     | ------> | (FFmpeg H.264 硬编,  | ------> | 控制端 FFmpeg D3D11VA  |
-|  Duplication)    |         |  base64/TCP 帧)      |         | 硬解 / WebCodecs 预览)  |
+| (DXGI Output     | ------> | (FFmpeg H.264 硬编,  | ------> | 前端 WebCodecs 解码     |
+|  Duplication)    |         |  TCP base64 / UDP 分片)|       | / FFmpeg D3D11VA 硬解)  |
 +------------------+         +---------------------+         +------------------------+
 ```
 
 ### 3.1 视频传输两条路线
 
-**远程模式 (已实现 - LAN TCP 帧流)：**
+**远程模式 (已实现 - TCP/UDP 双数据面):**
 
-- 被控端 `capture.rs` 用 IDXGIOutputDuplication 抓帧 → `ffmpeg_hw.rs` H.264 编码(NVENC/QSV/AMF 按 GPU 优选,软件回退)→ `network.rs` 以 4 字节长度前缀 JSON 帧(`frame` 消息,base64 Annex-B)推送到控制端
-- 控制端 FFmpeg 解码(D3D11VA 硬解优先)→ `remote-frame` 事件携带解码后帧 → 前端 `<canvas>` 渲染
-- 流参数(画质/分辨率/帧率)经 `stream` 消息实时下发被控端并即时生效
+- 被控端 `capture.rs` 用 IDXGIOutputDuplication 抓帧(BGRA 直入编码器)→ `ffmpeg_hw.rs` H.264 编码(NVENC/QSV/AMF 按 GPU 优选,软件回退)→ `network.rs` 下发:
+  - **TCP 模式**:4 字节长度前缀 JSON 帧(`frame` 消息,base64 Annex-B);
+  - **UDP 模式**(默认优先):`transport.rs` 自定义二进制分片(单片 ≤1200B)经 `UdpChannel` 直连(打洞)/中继(21119)发送,失败自动回退 TCP,会话不中断;
+- 控制端 Rust **原样透传**编码帧 → `remote-frame` 事件(含 codec 字段)→ 前端 **WebCodecs VideoDecoder** 解码 → `VideoFrame` → canvas 渲染(零中间转码,禁止 JPEG)
+- 流参数(画质=H.264 码率档位/分辨率/帧率)经 `stream` 消息实时下发被控端并即时生效
 
-**本机预览模式 (已实现 - IPC 事件)：**
+**本机预览模式 (已实现 - IPC 事件):**
 
-- 同一套 DXGI 抓帧循环,FFmpeg 视频激活时附带小尺寸 JPEG 预览图(480x270,仅本机 `capture-frame` 面板,不上协议)
+- 同一套 DXGI 抓帧循环,复用 H.264 编码帧经 `capture-frame` 事件推前端 WebCodecs 解码;FFmpeg 不可用时回退小尺寸 BGRA 原始字节(putImageData 直绘,同样禁止 JPEG)
 
 ### 3.2 诊断:DXGI 回传自检(设置页「诊断」tab)
 
 一键验证真实本机采集全链路,与生产会话同管线、**全程 H.264 标准编解码、禁止 JPEG**:
 
-真实 DXGI 抓屏 → H.264 硬编 → 生产协议帧 → 本机 TCP 回环 → D3D11VA 硬解,
-输出各阶段耗时、实时帧率与端到端延迟;回环到达的 H.264 帧经 `dxgi-loop-frame`
-事件回传前端,WebCodecs 解码后实时预览。抓屏失败显式报错,不回退合成帧。
+真实 DXGI 抓屏 → H.264 硬编 → TCP 生产协议帧回环 / **UDP 生产分片回环**(`split_packet` 分片 → `UdpChannel` → 重组)→ D3D11VA 硬解,
+输出各阶段耗时、实时帧率与端到端延迟(硬编硬解基线 80ms/软编软解 150ms,超基线给阶段分解),UDP 模式附分片/丢片/乱片/丢帧/平均重组耗时统计;回环到达的 H.264 帧经 `dxgi-loop-frame` 事件(含 codec 字段)回传前端,WebCodecs 解码后实时预览。抓屏失败显式报错,不回退合成帧。
 
-> WebRTC `<video>` 高帧率路线(AV1 等)依赖 RustDesk 官方信令服务器基础设施,为远期蓝图;当前 H.264-over-TCP 硬编硬解已满足 LAN 场景。
+### 3.3 端到端手测路径(F4)
+
+```
+npm run tauri dev
+  → 设置 → 网络 → 开启「允许他人协助」(host 监听 21118 并向信令注册)
+  → 远程协助页:设备列表连本机 ID(或另开一实例互连)
+  → 会话窗口出现远端画面(WebCodecs 解码;性能浮窗显示传输模式 tcp/udp/relay-udp)
+  → 设置 → 诊断 → 传输模式选「UDP 回环」→ 运行,查看端到端延迟与 UDP 分片统计报告
+```
+
+> WebRTC `<video>` 高帧率路线(AV1 等)依赖 RustDesk 官方信令服务器基础设施,为远期蓝图;当前 H.264 over TCP/UDP 硬编 + WebCodecs/硬解已满足 LAN 场景。
 
 ## 4. 控制事件管线
 
@@ -236,7 +246,7 @@ my-tauri-remote-desktop/
 ├── src/                            # React 前端工程
 │   ├── components/                 # Fluent UI 业务组件
 │   │   ├── ControlBar.tsx          # 顶部悬浮工具栏
-│   │   ├── RemoteCanvas.tsx        # 远程画面 Canvas(JPEG 渲染,local/remote 双源)
+│   │   ├── RemoteCanvas.tsx        # 远程画面 Canvas(WebCodecs 解码渲染,local/remote 双源)
 │   │   ├── RemoteSessionView.tsx   # 远程会话窗口(控制中心/性能浮窗)
 │   │   ├── VirtualDisplayPanel.tsx # 虚拟屏管理 + 本机显示器预览
 │   │   ├── DevicePage.tsx / SettingsPage.tsx / FileTransferPage.tsx / Sidebar.tsx ...
@@ -284,7 +294,7 @@ my-tauri-remote-desktop/
 - **虚拟显示器**:管理员权限下安装 usbmmidd IDD 驱动,一键添加 1080P/2K/4K 虚拟屏(最多 4 个),支持枚举/移除。
 - **配置持久化**:对端设备列表、被控端口、被控自启开关持久化到 `%APPDATA%/com.example.winui-remote-desktop/config.json`。
 
-> 说明:HBBS/HBBR 信令服务器、NAT 打洞与 WebRTC 视频轨道依赖 RustDesk 官方服务器基础设施与重依赖链,属外部依赖项;当前直连 TCP 已实现完整远程桌面功能,该层替换不影响前端与注入/抓帧模块。
+> 说明:HBBS/HBBR 信令服务器、NAT 打洞与 WebRTC 视频轨道依赖 RustDesk 官方服务器基础设施与重依赖链,属外部依赖项;当前自研 TCP/UDP 数据面已实现完整远程桌面功能,该层替换不影响前端与注入/抓帧模块。
 
 ## 9. 信令 / STUN / TURN 服务
 
@@ -315,3 +325,30 @@ cargo build --release   # 产出 server\target\release\dcr-signal.exe、dcr-rela
 - **控制端**设备列表自动合并信令发现的在线设备;连接回退链为 `配置 LAN 直连 → 信令外部地址 → 中继兜底`,直连/打洞失败时经中继透明转发(上层 framing 原样透传)。
 
 协议细节(长度前缀 JSON 帧):信令 `register/heartbeat/unregister/lookup/list`;中继 `allocate/allocated`。消息类型与 framing 由客户端经 `dcr-server = { path = "../server" }` 共享,与 `network.rs` 保持一致。
+
+## 10. 测试与验收
+
+```bash
+# Rust 客户端(src-tauri/)
+cd src-tauri
+cargo check           # 零警告零错误
+cargo test            # 38 条默认测试全过(含 UDP 分片重组 500 帧/通道直连/中继回环、STUN 探测)
+cargo test --release -- --ignored --nocapture --test-threads=1
+                      # 8 条真实硬件链路基准(需活动桌面):
+                      #   dxgi_max_fps_benchmark      DXGI 采集基准(平均抓屏耗时)
+                      #   ffmpeg_h264_roundtrip       H.264/H.265 编解码往返 100 帧(硬编→D3D11VA 硬解)
+                      #   ffmpeg_h264_benchmark       编码基准(2 codec × 3 输入格式)
+                      #   ffmpeg_capability_report    编码能力报告(硬编/软编、硬解/软解路径)
+                      #   dxgi_loopback_real_chain    诊断 TCP 端到端回环(各阶段耗时/端到端延迟)
+                      #   dxgi_loopback_udp_real_chain 诊断 UDP 端到端回环(分片/丢片/重组统计)
+
+# 服务端(server/)
+cd server
+cargo check && cargo test   # 42 单元 + 18 集成 loopback 全过
+
+# 前端(仓库根)
+npm run build         # tsc strict + vite,零错误
+npm test              # vitest 5 用例全过
+```
+
+验收标准 = `cargo check` 零警告(两处)+ `cargo test` 全过(两处)+ `npm run build` 零错误 + `npm test` 全过。
