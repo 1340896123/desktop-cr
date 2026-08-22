@@ -408,6 +408,7 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                 version,
                 user,
                 token,
+                external,
             } => {
                 // 认证开启时以令牌解析出的用户名为准(忽略客户端自报的 user);
                 // 令牌无效直接拒绝。开放模式没有 JWT 密钥,此时信任 user 字段,
@@ -492,7 +493,14 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                     .lock()
                     .map(|m| m.contains_key(&id))
                     .unwrap_or(false);
-                let generation = core.register(&id, &lan, &addr);
+                // external 优先采用客户端上报的 STUN 反射地址(UDP 数据面打洞目标);
+                // 旧客户端未上报时回退 TCP 连接对端地址(与既有行为一致)。
+                let effective_external = if external.is_empty() {
+                    addr.clone()
+                } else {
+                    external.clone()
+                };
+                let generation = core.register(&id, &lan, &effective_external);
                 core.devices.touch(
                     &id,
                     &effective_user,
@@ -500,18 +508,20 @@ pub async fn handle_signal_conn(core: Arc<SignalCore>, mut stream: TcpStream) {
                     &os,
                     &version,
                     &lan,
-                    &addr,
+                    &effective_external,
                     true,
                 );
                 conn = Some((id.clone(), generation));
                 log::info!(
-                    "[signal] 注册: id={id}, lan={lan}, external={addr}, user={effective_user}, previous_owner={previous_owner}, auth={auth_source}, os={os}, v={version}, duplicate={duplicated}, generation={generation}"
+                    "[signal] 注册: id={id}, lan={lan}, external={effective_external}(上报={}, 连接={addr}), user={effective_user}, previous_owner={previous_owner}, auth={auth_source}, os={os}, v={version}, duplicate={duplicated}, generation={generation}",
+                    if external.is_empty() { "无" } else { "STUN 反射地址" },
                 );
                 op_log(
                     "signal",
                     "register_accepted",
                     &format!(
-                        "id={id}, owner={effective_user}, previous_owner={previous_owner}, auth={auth_source}, duplicate={duplicated}, generation={generation}, lan={lan}, external={addr}"
+                        "id={id}, owner={effective_user}, previous_owner={previous_owner}, auth={auth_source}, duplicate={duplicated}, generation={generation}, lan={lan}, external={effective_external}, external_source={}",
+                        if external.is_empty() { "tcp-peer" } else { "stun-mapped" },
                     ),
                 );
                 let _ = write_msg(
@@ -854,6 +864,74 @@ mod tests {
         assert!(core.heartbeat("nobody").is_err());
         core.unregister("pc-a");
         assert!(core.lookup("pc-a").is_none(), "注销后应查不到");
+    }
+
+    /// 注册应优先采用客户端上报的 STUN 反射地址(handle_signal_conn 侧逻辑),
+    /// 未上报时回退 TCP 连接对端地址。本测试用回环直连断言 external 语义。
+    #[tokio::test]
+    async fn register_prefers_client_reported_external() {
+        let core = Arc::new(SignalCore::new(""));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let core2 = core.clone();
+        let serve = tokio::spawn(async move {
+            let _ = serve(listener, udp, core2).await;
+        });
+
+        // 上报反射地址:external 应等于上报值
+        let mut c1 = TcpStream::connect(addr).await.unwrap();
+        crate::framing::write_msg(
+            &mut c1,
+            &SignalMsg::Register {
+                id: "pc-ext".into(),
+                lan: "192.168.1.7:21118".into(),
+                name: String::new(),
+                os: String::new(),
+                version: String::new(),
+                user: String::new(),
+                token: String::new(),
+                external: "127.0.0.1:40001".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let _: SignalMsg = crate::framing::read_msg(&mut c1).await.unwrap();
+        let (_, external, _) = core.lookup("pc-ext").unwrap();
+        assert_eq!(
+            external, "127.0.0.1:40001",
+            "客户端上报的反射地址应被优先采用"
+        );
+        drop(c1);
+
+        // 未上报反射地址:回退 TCP 连接对端地址(127.0.0.1:端口)
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut c2 = TcpStream::connect(addr).await.unwrap();
+        crate::framing::write_msg(
+            &mut c2,
+            &SignalMsg::Register {
+                id: "pc-legacy".into(),
+                lan: "192.168.1.8:21118".into(),
+                name: String::new(),
+                os: String::new(),
+                version: String::new(),
+                user: String::new(),
+                token: String::new(),
+                external: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let _: SignalMsg = crate::framing::read_msg(&mut c2).await.unwrap();
+        let (_, external2, _) = core.lookup("pc-legacy").unwrap();
+        // 回退地址为 TCP 连接对端地址(127.0.0.1:某端口);端口随连接变化,
+        // 断言 IP 语义与端口非 40001(即不是误用上报值)。
+        assert!(
+            external2.starts_with("127.0.0.1:") && external2 != "127.0.0.1:40001",
+            "未上报时应回退 TCP 连接对端地址,实际: {external2}"
+        );
+        drop(c2);
+        serve.abort();
     }
 
     #[test]

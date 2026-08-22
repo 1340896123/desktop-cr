@@ -45,6 +45,21 @@ pub fn parse_binding_request(bytes: &[u8]) -> Result<[u8; 12], String> {
     Ok(txn)
 }
 
+/// 构造无属性的 Binding Request(客户端探测入口):
+/// 20 字节头(type=0x0001、长度 0、magic cookie、transaction id)。
+///
+/// 客户端用法:向信令/STUN 服务器的 UDP 端口发送本请求,收到响应后用
+/// [`parse_binding_response`] 解析 XOR-MAPPED-ADDRESS 得到本机的反射地址
+/// (NAT 外网映射)。transaction id 由调用方随机生成(服务端仅原样回带)。
+pub fn build_binding_request(txn_id: &[u8; 12]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(HEADER_LEN);
+    out.extend_from_slice(&BINDING_REQUEST.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes()); // 无属性,长度为 0
+    out.extend_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+    out.extend_from_slice(txn_id);
+    out
+}
+
 /// 构造 Binding Response,携带 XOR-MAPPED-ADDRESS 属性(源地址 `source`)。
 ///
 /// - XOR 端口 = port ^ (magic cookie >> 16);
@@ -201,13 +216,24 @@ mod tests {
     #[test]
     fn parse_request_ok() {
         let txn: [u8; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
-        let mut req = vec![0u8; HEADER_LEN];
-        req[0..2].copy_from_slice(&BINDING_REQUEST.to_be_bytes());
-        req[2..4].copy_from_slice(&0u16.to_be_bytes()); // 无属性
-        req[4..8].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
-        req[8..HEADER_LEN].copy_from_slice(&txn);
+        let req = build_binding_request(&txn);
+        assert_eq!(req.len(), HEADER_LEN, "无属性请求应恰为头长");
         let got = parse_binding_request(&req).unwrap();
         assert_eq!(txn, got);
+    }
+
+    /// 客户端探测往返:build_binding_request → build_binding_response →
+    /// parse_binding_response,反射地址应还原发送方地址(C1 客户端链路的纯函数基座)。
+    #[test]
+    fn binding_request_response_roundtrip() {
+        let txn: [u8; 12] = [0x5A; 12];
+        let req = build_binding_request(&txn);
+        assert_eq!(parse_binding_request(&req).unwrap(), txn);
+        let src = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 41234);
+        let resp = build_binding_response(&txn, src).unwrap();
+        let (port, ip) = parse_binding_response(&resp).unwrap();
+        assert_eq!(port, src.port());
+        assert_eq!(ip, src.ip());
     }
 
     /// 类型/长度/magic cookie 非法的请求应报错。

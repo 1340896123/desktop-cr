@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 pub enum SignalMsg {
     /// 注册:`id` 为对端唯一标识,`lan` 为局域网地址("ip:port");
     /// `name`/`os`/`version`/`user` 为设备信息与归属用户(旧客户端缺省为空);
-    /// `token` 为登录 JWT(登录时携带,服务端以其解析出的用户名为准,不信任 user)。
+    /// `token` 为登录 JWT(登录时携带,服务端以其解析出的用户名为准,不信任 user);
+    /// `external` 为客户端经 STUN Binding 探测到的反射地址("ip:udp端口",可带
+    /// 独立的视频 UDP 端口;旧客户端缺省为空,服务端回退用 TCP 连接对端地址)。
     Register {
         id: String,
         lan: String,
@@ -25,6 +27,8 @@ pub enum SignalMsg {
         user: String,
         #[serde(default)]
         token: String,
+        #[serde(default)]
+        external: String,
     },
     /// 注册应答:`ok` 是否成功,`msg` 为错误信息(成功时可为空);
     /// `auth_error` 表示登录令牌无效/已过期(客户端应提示重新登录,而非静默重试)。
@@ -98,6 +102,26 @@ pub enum RelayMsg {
     Allocated { id: String, peer_connected: bool },
 }
 
+/// UDP 中继消息(JSON 字符串数据报,`t` 字段区分)。
+///
+/// 协议约定(视频 UDP 数据面,**二进制透传语义**):
+/// - `data` 的 `payload` 为 base64(标准字母表)编码的**完整 UDP 分片帧**
+///   (客户端 16 字节分片头 + Annex-B 切片,见客户端 transport.rs 线格式),
+///   中继原样解码转发,不解析、不重组、不二次封装;
+/// - 控制消息(`alloc-udp`/`allocated`)为纯 JSON,与二进制负载经 payload
+///   base64 封装共存无歧义——数据报首字节为 `{` 即控制帧,分片帧只出现在
+///   `data` 的 payload 内,宿主侧收到的是**裸二进制分片字节**(与直连 UDP
+///   收到的完全一致,接收端同一套 parse/重组代码);
+/// - 向后兼容:既有转发语义(payload base64 → 原样字节)不变。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "kebab-case")]
+pub enum RelayUdpMsg {
+    /// 登记某 id 的宿主 UDP 端点(发送者地址即宿主地址),服务端回 `{"t":"allocated"}`。
+    AllocUdp { id: String },
+    /// 向某 id 的宿主转发载荷(payload 为 base64 的完整 UDP 分片帧)。
+    Data { id: String, payload: String },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,6 +139,7 @@ mod tests {
                     version: "0.1.0".into(),
                     user: "alice".into(),
                     token: "jwt-token".into(),
+                    external: "203.0.113.9:40001".into(),
                 },
                 "register",
             ),
@@ -169,7 +194,7 @@ mod tests {
         }
     }
 
-    /// SignalMsg 序列化 → 反序列化往返一致。
+    /// SignalMsg 序列化 → 反序列化往返一致(含 Register 的 external 反射地址字段)。
     #[test]
     fn signal_msg_roundtrip() {
         let msg = SignalMsg::LookupAck {
@@ -181,6 +206,14 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let back: SignalMsg = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, back);
+
+        // Register.external 有 serde default:旧客户端 JSON(无该字段)可正常解析为空串
+        let legacy = r#"{"t":"register","id":"old","lan":"10.0.0.2:9000"}"#;
+        let parsed: SignalMsg = serde_json::from_str(legacy).unwrap();
+        match parsed {
+            SignalMsg::Register { external, .. } => assert_eq!(external, ""),
+            other => panic!("期望 Register,得到 {other:?}"),
+        }
     }
 
     /// RelayMsg 各变体 "t" 标签与往返一致。

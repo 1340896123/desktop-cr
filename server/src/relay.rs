@@ -5,7 +5,9 @@
 //!   client 后连(或反过来),配对成功后两个 TCP 连接做**双向字节透明转发**
 //!   (上层 framing 由客户端负责,原样透传);
 //! - UDP(默认 21119):`alloc-udp {id}` 登记宿主端点,`data {id, payload}` 把
-//!   base64 载荷转发给宿主(对端),宿主也可向对端 id 发数据。
+//!   base64 载荷转发给宿主(对端),宿主也可向对端 id 发数据。payload 约定为
+//!   **完整 UDP 分片帧**(客户端 16 字节分片头 + Annex-B 切片)整体 base64,
+//!   中继原样解码转发——宿主收到的字节与直连 UDP 完全一致(见 message::RelayUdpMsg)。
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -13,13 +15,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine as _;
-use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::watch;
 
 use crate::framing::{read_msg, write_msg};
-use crate::message::RelayMsg;
+use crate::message::{RelayMsg, RelayUdpMsg};
 use crate::operation_log::op_log;
 
 /// client 等待 host 接入的最长时间。
@@ -268,14 +269,21 @@ pub async fn handle_relay_conn(manager: RelayManager, mut stream: TcpStream, add
     op_log("relay", "session_end", &format!("id={id}"));
 }
 
-/// UDP 中继消息(JSON 字符串,`t` 字段区分)。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "t", rename_all = "kebab-case")]
-enum RelayUdpMsg {
-    /// 登记某 id 的宿主 UDP 端点(发送者地址即宿主地址)。
-    AllocUdp { id: String },
-    /// 向某 id 的宿主转发载荷(payload 为 base64)。
-    Data { id: String, payload: String },
+/// UDP 中继消息类型(统一定义于 [`crate::message::RelayUdpMsg`],此处重导出便于使用)。
+pub use crate::message::RelayUdpMsg as UdpRelayMsg;
+
+/// 把一个 UDP 分片帧(裸二进制字节)封装为 `data` 数据报(供客户端/测试使用):
+/// `{"t":"data","id":...,"payload":"<base64>"}`。中继解码后原样转发,宿主收到
+/// 的字节与本函数输入完全一致——与直连 UDP 路径同构。
+pub fn encode_udp_data_datagram(id: &str, frame_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let payload = base64::engine::general_purpose::STANDARD
+        .encode(frame_bytes)
+        .to_string();
+    serde_json::to_vec(&RelayUdpMsg::Data {
+        id: id.to_string(),
+        payload,
+    })
+    .map_err(|e| format!("data 数据报序列化失败: {e}"))
 }
 
 /// 处理一个 UDP 数据报:登记宿主端点 / 转发载荷。

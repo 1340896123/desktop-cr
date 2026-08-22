@@ -34,6 +34,8 @@ async fn signal_register_lookup_flow() {
             version: "0.1.0".into(),
             user: "alice".into(),
             token: String::new(),
+
+            external: String::new(),
         },
     )
     .await
@@ -184,6 +186,8 @@ async fn signal_register_then_disconnect_unregisters() {
                 version: "0.1.0".into(),
                 user: "alice".into(),
                 token: String::new(),
+
+                external: String::new(),
             },
         )
         .await
@@ -236,6 +240,8 @@ async fn signal_persistent_connection_keeps_online() {
             version: "0.1.0".into(),
             user: "alice".into(),
             token: String::new(),
+
+            external: String::new(),
         },
     )
     .await
@@ -305,6 +311,8 @@ async fn signal_persistent_connection_keeps_online() {
             version: "0.1.0".into(),
             user: "alice".into(),
             token: String::new(),
+
+            external: String::new(),
         },
     )
     .await
@@ -357,6 +365,7 @@ async fn signal_list_filters_by_account() {
                 } else {
                     String::new()
                 },
+                external: String::new(),
             },
         )
         .await
@@ -492,6 +501,8 @@ async fn signal_list_discovers_multiple_devices_for_same_account() {
                 version: "0.1.0".into(),
                 user: "alice".into(),
                 token: String::new(),
+
+                external: String::new(),
             },
         )
         .await
@@ -552,6 +563,8 @@ async fn signal_old_connection_disconnect_does_not_kill_new() {
             version: "0.1.0".into(),
             user: "alice".into(),
             token: String::new(),
+
+            external: String::new(),
         },
     )
     .await
@@ -570,6 +583,8 @@ async fn signal_old_connection_disconnect_does_not_kill_new() {
             version: "0.1.0".into(),
             user: "alice".into(),
             token: String::new(),
+
+            external: String::new(),
         },
     )
     .await
@@ -659,6 +674,8 @@ async fn signal_reconnect_allowed_at_device_limit() {
             version: "0.1.0".into(),
             user: "alice".into(),
             token: String::new(),
+
+            external: String::new(),
         },
     )
     .await
@@ -678,6 +695,8 @@ async fn signal_reconnect_allowed_at_device_limit() {
             version: "0.1.0".into(),
             user: "alice".into(),
             token: String::new(),
+
+            external: String::new(),
         },
     )
     .await
@@ -700,6 +719,8 @@ async fn signal_reconnect_allowed_at_device_limit() {
             version: "0.1.0".into(),
             user: "alice".into(),
             token: String::new(),
+
+            external: String::new(),
         },
     )
     .await
@@ -756,6 +777,8 @@ async fn signal_auth_token_validation() {
             version: "0.1.0".into(),
             user: "bogus".into(),
             token: alice_token.clone(),
+
+            external: String::new(),
         },
     )
     .await
@@ -775,6 +798,8 @@ async fn signal_auth_token_validation() {
             version: "0.1.0".into(),
             user: "alice".into(),
             token: "forged-token".into(),
+
+            external: String::new(),
         },
     )
     .await
@@ -797,6 +822,8 @@ async fn signal_auth_token_validation() {
             version: "0.1.0".into(),
             user: "alice".into(),
             token: String::new(),
+
+            external: String::new(),
         },
     )
     .await
@@ -818,6 +845,8 @@ async fn signal_auth_token_validation() {
             version: "0.1.0".into(),
             user: "bob".into(),
             token: bob_token.clone(),
+
+            external: String::new(),
         },
     )
     .await
@@ -840,6 +869,8 @@ async fn signal_auth_token_validation() {
             version: "0.1.0".into(),
             user: "alice".into(),
             token: alice_token.clone(),
+
+            external: String::new(),
         },
     )
     .await
@@ -932,6 +963,8 @@ async fn signal_heartbeat_requires_connection_ownership() {
             version: "0.1.0".into(),
             user: "alice".into(),
             token: String::new(),
+
+            external: String::new(),
         },
     )
     .await
@@ -972,6 +1005,8 @@ async fn signal_heartbeat_requires_connection_ownership() {
             version: "0.1.0".into(),
             user: "alice".into(),
             token: String::new(),
+
+            external: String::new(),
         },
     )
     .await
@@ -1036,6 +1071,8 @@ async fn signal_lookup_requires_account_ownership() {
             version: "0.1.0".into(),
             user: "alice".into(),
             token: alice_token.clone(),
+
+            external: String::new(),
         },
     )
     .await
@@ -1150,6 +1187,8 @@ async fn signal_list_reports_auth_error() {
             version: "0.1.0".into(),
             user: "alice".into(),
             token: alice_token.clone(),
+
+            external: String::new(),
         },
     )
     .await
@@ -1238,13 +1277,9 @@ async fn stun_binding_udp() {
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let client_addr = client.local_addr().unwrap();
 
-    // 构造标准 Binding Request
+    // 构造标准 Binding Request(与客户端生产入口同一函数)
     let txn: [u8; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
-    let mut req = vec![0u8; 20];
-    req[0..2].copy_from_slice(&stun::BINDING_REQUEST.to_be_bytes());
-    req[2..4].copy_from_slice(&0u16.to_be_bytes());
-    req[4..8].copy_from_slice(&stun::STUN_MAGIC_COOKIE.to_be_bytes());
-    req[8..20].copy_from_slice(&txn);
+    let req = stun::build_binding_request(&txn);
 
     client.send_to(&req, server_addr).await.unwrap();
     let mut buf = [0u8; 2048];
@@ -1426,6 +1461,121 @@ async fn relay_udp_forward() {
 fn base64_std(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+// ---------------------------------------------------------------------------
+// UDP 视频分片协议常量(与客户端 src-tauri/src/transport.rs 线格式保持一致;
+// 服务端测试按规范值独立实现编解码,故意不复用客户端代码——同时锁定线格式契约)。
+const SEGMENT_MAGIC: u32 = 0x4450_5255; // "URPD" 小端
+const SEGMENT_HEADER_LEN: usize = 16;
+const SEGMENT_MTU: usize = 1200;
+const FLAG_KEYFRAME: u16 = 0x0001;
+const FLAG_LAST: u16 = 0x0002;
+
+/// 构造一个分片数据报(16 字节小端头 + 负载)。
+fn build_segment(frame_id: u32, frag_idx: u16, frag_cnt: u16, key: bool, payload: &[u8]) -> Vec<u8> {
+    let mut flags = 0u16;
+    if key {
+        flags |= FLAG_KEYFRAME;
+    }
+    if frag_idx + 1 == frag_cnt {
+        flags |= FLAG_LAST;
+    }
+    let mut out = Vec::with_capacity(SEGMENT_HEADER_LEN + payload.len());
+    out.extend_from_slice(&SEGMENT_MAGIC.to_le_bytes());
+    out.extend_from_slice(&frame_id.to_le_bytes());
+    out.extend_from_slice(&frag_idx.to_le_bytes());
+    out.extend_from_slice(&frag_cnt.to_le_bytes());
+    out.extend_from_slice(&flags.to_le_bytes());
+    out.push(0u8); // codec: 0 = h264
+    out.push(0u8); // rfu
+    out.extend_from_slice(payload);
+    out
+}
+
+/// 解析分片数据报,返回 (frame_id, frag_idx, frag_cnt, key, payload)。
+fn parse_segment(bytes: &[u8]) -> (u32, u16, u16, bool, Vec<u8>) {
+    assert!(bytes.len() >= SEGMENT_HEADER_LEN, "分片短于头长");
+    let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    assert_eq!(magic, SEGMENT_MAGIC, "magic 不符");
+    let frame_id = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    let frag_idx = u16::from_le_bytes([bytes[8], bytes[9]]);
+    let frag_cnt = u16::from_le_bytes([bytes[10], bytes[11]]);
+    let flags = u16::from_le_bytes([bytes[12], bytes[13]]);
+    let key = flags & FLAG_KEYFRAME != 0;
+    (frame_id, frag_idx, frag_cnt, key, bytes[SEGMENT_HEADER_LEN..].to_vec())
+}
+
+/// C4:TURN/中继 UDP 回退真实回环——客户端 A `alloc-udp` 登记,客户端 B 把一个
+/// **分片化视频帧**(32KB,分片 ≤1200 字节,16 字节分片头线格式)逐片经
+/// `data` 数据报发往 A,A 收到的裸二进制分片与原始分片逐字节一致,并按
+/// frag_idx 重组回完整帧。真实 UdpSocket + 真实 serve_udp 循环,无 mock。
+#[tokio::test]
+async fn relay_udp_forwards_fragmented_video_frame() {
+    let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let relay_addr = relay.local_addr().unwrap();
+    let serve = tokio::spawn(async move {
+        let _ = dcr_server::relay::serve_udp(relay).await;
+    });
+
+    // 客户端 A(宿主侧,被控端):登记
+    let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    a.send_to(r#"{"t":"alloc-udp","id":"c4"}"#.as_bytes(), relay_addr)
+        .await
+        .unwrap();
+    let mut buf = vec![0u8; 64 * 1024];
+    let (n, _) = tokio::time::timeout(std::time::Duration::from_secs(3), a.recv_from(&mut buf))
+        .await
+        .expect("登记应答超时")
+        .unwrap();
+    assert_eq!(&buf[..n], r#"{"t":"allocated"}"#.as_bytes());
+
+    // 客户端 B(发送侧,控制端):构造一个 32KB 伪 Annex-B 帧并分片
+    let frame_len = 32 * 1024;
+    let frame: Vec<u8> = (0..frame_len).map(|i| (i % 251) as u8).collect();
+    let payload_cap = SEGMENT_MTU - SEGMENT_HEADER_LEN;
+    let frag_cnt = frame.chunks(payload_cap).count() as u16;
+    // 用服务端公开的封装函数(与客户端接线同一入口)构造 data 数据报
+    let mut datagrams = Vec::new();
+    for (idx, chunk) in frame.chunks(payload_cap).enumerate() {
+        let seg = build_segment(1, idx as u16, frag_cnt, true, chunk);
+        assert!(seg.len() <= SEGMENT_MTU, "单片不得超 MTU 预算");
+        datagrams.push(dcr_server::relay::encode_udp_data_datagram("c4", &seg).unwrap());
+    }
+
+    let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    for dg in &datagrams {
+        b.send_to(dg, relay_addr).await.unwrap();
+    }
+
+    // A 收齐全部分片(乱序容忍:按 frag_idx 放位)并重组
+    let mut parts: Vec<Option<Vec<u8>>> = vec![None; frag_cnt as usize];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut got = 0usize;
+    while got < frag_cnt as usize && std::time::Instant::now() < deadline {
+        let (n, _) = match tokio::time::timeout(std::time::Duration::from_secs(2), a.recv_from(&mut buf)).await
+        {
+            Ok(v) => v.unwrap(),
+            Err(_) => break,
+        };
+        let (frame_id, frag_idx, frag_cnt_got, key, payload) = parse_segment(&buf[..n]);
+        assert_eq!(frame_id, 1, "帧号应透传不变");
+        assert_eq!(frag_cnt_got, frag_cnt, "分片总数应透传不变");
+        assert!(key, "关键帧标记应透传不变");
+        assert!(parts[frag_idx as usize].is_none(), "不得重复收到同一分片");
+        parts[frag_idx as usize] = Some(payload);
+        got += 1;
+    }
+    assert_eq!(got, frag_cnt as usize, "应收齐全部分片(实际 {got}/{frag_cnt})");
+    let mut reassembled = Vec::with_capacity(frame_len);
+    for p in parts {
+        reassembled.extend_from_slice(&p.unwrap());
+    }
+    assert_eq!(reassembled, frame, "经中继转发的分片帧重组后应与原始逐字节一致");
+
+    drop(a);
+    drop(b);
+    serve.abort();
 }
 
 /// 中继会话上报 → 信令会话记录(真实 UDP 事件链路)。
