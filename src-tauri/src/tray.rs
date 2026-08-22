@@ -136,7 +136,15 @@ pub fn setup(app: &AppHandle) {
                     }
                 });
             }
-            MENU_QUIT => app.exit(0),
+            MENU_QUIT => {
+                // 退出前落盘:控制端视角该进程消失表现为连接被重置(os error 10054)
+                crate::operation_log::op_log(
+                    "tray",
+                    "app_exit",
+                    "经托盘菜单退出进程,所有会话连接随进程关闭(对端将收到连接断开/重置)",
+                );
+                app.exit(0)
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

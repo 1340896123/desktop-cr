@@ -1361,6 +1361,11 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
                 // 生产调用恒传 Some(AppHandle);None 仅测试环境使用(跳过前端事件)
                 if let Err(e) = crate::network::serve_host(Some(app.clone()), listener).await {
                     log::error!("[hbb_client] host 服务退出: {e}");
+                    crate::operation_log::op_log(
+                        "hbb_client",
+                        "host_serve_exit",
+                        &format!("reason={e}(accept 循环异常退出,被控端不再接受新连接)"),
+                    );
                 }
             };
             let reg = async {

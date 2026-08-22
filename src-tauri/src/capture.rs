@@ -146,6 +146,11 @@ pub async fn start_capture(
         let handle = tokio::spawn(async move {
             if let Err(e) = dxgi_capture_loop(app.clone(), monitor_id).await {
                 log::error!("[capture] DXGI 抓屏循环退出: {e}");
+                crate::operation_log::op_log(
+                    "capture",
+                    "capture_loop_dead",
+                    &format!("monitor={monitor_id}, reason={e}(抓屏循环已退出,不再产出视频帧)"),
+                );
             }
         });
         *CAPTURE_TASK
