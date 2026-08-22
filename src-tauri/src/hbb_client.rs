@@ -550,12 +550,12 @@ pub async fn list_devices(app: AppHandle) -> Vec<DeviceInfo> {
         }
 
         // 本机条目:始终展示(登录账号后本机即属于「我的设备」,不再依赖被控端模式开关);
-        // 被控端运行中为 online,否则 idle
-        let status = if is_host_running() { "online" } else { "idle" };
+        // 永远可连——自连接(local-host)会在 connect_to_device 自动拉起被控端,
+        // 无"离线不可连"状态,故状态固定 online
         devices.push(DeviceInfo {
             id: "local-host".into(),
             name: crate::network::local_id(),
-            status: status.into(),
+            status: "online".into(),
             platform: "windows".into(),
         });
 
@@ -648,14 +648,34 @@ async fn tcp_probe(addr: &str) -> bool {
 /// 若该 peer 不在本地配置(信令发现/仅凭 ID),则从信令服务器查询其地址。
 #[tauri::command]
 pub async fn connect_to_device(peer_id: String, app: AppHandle) -> Result<ConnectionState, String> {
-    // 本机不能连接自己
-    if peer_id == "local-host" {
-        let err = "本机不能连接自己".to_string();
-        crate::operation_log::op_log("hbb_client", "connect_to_device", &format!("失败: {err}"));
-        return Err(err);
-    }
     let cfg = load_app_config();
-    let peer = cfg.peers.iter().find(|p| p.id == peer_id).cloned();
+    let mut peer = cfg.peers.iter().find(|p| p.id == peer_id).cloned();
+
+    // 本机条目(local-host):连到自己。被控端未运行时自动拉起(否则无服务可连),
+    // 直连地址固定 127.0.0.1:被控端口——自连接场景同进程内 Host/Client 双角色
+    // 并存,会话/UDP 通道按角色分表本就支持(见 network::SessionSide)
+    if peer_id == "local-host" {
+        if !is_host_running() {
+            log::info!("[hbb_client] 自连接:被控端未运行,自动拉起(端口 {})", cfg.host_port);
+            start_host(cfg.host_port, app.clone()).await?;
+        }
+        let addr = format!("127.0.0.1:{}", cfg.host_port);
+        if peer.is_none() {
+            peer = Some(PeerConfig {
+                id: "local-host".into(),
+                name: crate::network::local_id(),
+                addr,
+                platform: Some("windows".into()),
+            });
+        } else {
+            peer.as_mut().map(|p| p.addr = addr);
+        }
+        crate::operation_log::op_log(
+            "hbb_client",
+            "connect_to_device",
+            &format!("自连接 local-host → 127.0.0.1:{}", cfg.host_port),
+        );
+    }
 
     // 信令服务器查询(可选):拿外部地址与中继提示;信令发现的设备借此获取地址。
     // 已登录时取账号服务主机的信令端口(令牌只在该部署有效)。
@@ -815,9 +835,10 @@ pub async fn set_stream_quality(
         "set_stream_quality",
         &format!("fps={fps} quality={quality} tier={tier} bitrate={}kbps", bitrate_for_tier(tier)),
     );
-    // 有活跃会话时实时下发到被控端(码率档位经协议 u8 字段承载)
+    // 有活跃会话时实时下发到被控端(码率档位经协议 u8 字段承载)。
+    // 控制端视角发送:本机自连接双角色并存时须显式走 Client 表
     if crate::network::session_peer().is_some() {
-        let _ = crate::network::session_send(crate::network::Msg::Stream {
+        let _ = crate::network::session_send_client(crate::network::Msg::Stream {
             fps,
             quality_tier: tier,
             width,
@@ -851,7 +872,7 @@ pub async fn set_stream_resolution(width: u32, height: u32, fps: u32) -> Result<
     );
     // 有活跃会话时实时下发到被控端(码率档位经协议 u8 字段承载)
     if crate::network::session_peer().is_some() {
-        let _ = crate::network::session_send(crate::network::Msg::Stream {
+        let _ = crate::network::session_send_client(crate::network::Msg::Stream {
             fps,
             quality_tier: tier,
             width: scaled_w,
@@ -1048,11 +1069,12 @@ pub fn set_clipboard_text(text: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn sync_clipboard(app: AppHandle) -> Result<String, String> {
     let text = get_clipboard_text()?;
-    // 有活跃会话时真实同步到对端
+    // 有活跃会话时真实同步到对端(控制端视角:自连接双角色时显式走 Client 表)
     if crate::network::session_peer().is_some() {
-        let sent =
-            crate::network::session_send(crate::network::OutMsg::Clipboard { text: text.clone() })
-                .await;
+        let sent = crate::network::session_send_client(
+            crate::network::OutMsg::Clipboard { text: text.clone() },
+        )
+        .await;
         if !sent {
             log::warn!("[hbb_client] 剪贴板同步失败: 会话已断开");
         }
@@ -1079,7 +1101,7 @@ pub async fn request_remote_monitors() -> Result<(), String> {
     if crate::network::session_peer().is_none() {
         return Err("无活跃会话".into());
     }
-    let sent = crate::network::session_send(crate::network::Msg::Monitors).await;
+    let sent = crate::network::session_send_client(crate::network::Msg::Monitors).await;
     if !sent {
         return Err("会话已断开".into());
     }
@@ -1093,7 +1115,7 @@ pub async fn select_session_monitor(monitor_id: u32) -> Result<(), String> {
         return Err("无活跃会话".into());
     }
     let cfg = stream_cfg();
-    let sent = crate::network::session_send(crate::network::Msg::Stream {
+    let sent = crate::network::session_send_client(crate::network::Msg::Stream {
         fps: cfg.fps,
         quality_tier: cfg.quality_tier,
         width: cfg.target_width,
@@ -1114,23 +1136,39 @@ pub async fn select_session_monitor(monitor_id: u32) -> Result<(), String> {
 }
 
 /// 发送本地文件到对端(经会话文件传输协议;进度通过 `file-progress` 事件上报)。
+/// 控制端视角:走 Client 会话表(自连接双角色时显式路由)。
 #[tauri::command]
 pub async fn send_file(path: String, app: AppHandle) -> Result<u32, String> {
-    if crate::network::session_peer().is_none() {
+    if crate::network::session_peer_side(crate::network::SessionSide::Client).is_none() {
         return Err("无活跃会话".into());
     }
     static FILE_ID: AtomicU32 = AtomicU32::new(1);
     let id = FILE_ID.fetch_add(1, Ordering::SeqCst);
-    if !send_file_with_id(id, path.clone(), app) {
+    if !send_file_with_id_inner(
+        id,
+        path.clone(),
+        app,
+        crate::network::SessionSide::Client,
+    ) {
         return Err("读取文件信息失败(路径不存在或不是文件)".into());
     }
     Ok(id)
 }
 
 /// 以指定 id 发送文件(被控端响应控制端 FileRequest 时复用其分配的 id,保证两侧任务可对账)。
-/// 校验会话与文件存在性;返回是否成功发起。
+/// 被控端视角:走 Host 会话表。
 pub(crate) fn send_file_with_id(id: u32, path: String, app: AppHandle) -> bool {
-    if crate::network::session_peer().is_none() {
+    send_file_with_id_inner(id, path, app, crate::network::SessionSide::Host)
+}
+
+/// 校验会话与文件存在性并后台发起发送;返回是否成功发起。
+fn send_file_with_id_inner(
+    id: u32,
+    path: String,
+    app: AppHandle,
+    side: crate::network::SessionSide,
+) -> bool {
+    if crate::network::session_peer_side(side).is_none() {
         return false;
     }
     let meta = match std::fs::metadata(&path) {
@@ -1149,15 +1187,24 @@ pub(crate) fn send_file_with_id(id: u32, path: String, app: AppHandle) -> bool {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "file.bin".into());
     tokio::spawn(async move {
-        send_file_task(id, path, name, size, app).await;
+        send_file_task(id, path, name, size, app, side).await;
     });
     true
 }
 
 /// 后台发送文件:FileStart → FileData(64KB 块)→ FileEnd,逐块上报本地进度。
-async fn send_file_task(id: u32, path: String, name: String, size: u64, app: AppHandle) {
+/// `side` 为发送方角色:双角色并存(本机自连接)时按角色路由会话写通道,
+/// 单角色进程与既有 session_send 行为一致。
+async fn send_file_task(
+    id: u32,
+    path: String,
+    name: String,
+    size: u64,
+    app: AppHandle,
+    side: crate::network::SessionSide,
+) {
     use tokio::io::AsyncReadExt;
-    if !crate::network::session_send(crate::network::Msg::FileStart {
+    if !crate::network::session_send_side_pub(side, crate::network::Msg::FileStart {
         id,
         name: name.clone(),
         size,
@@ -1190,7 +1237,7 @@ async fn send_file_task(id: u32, path: String, name: String, size: u64, app: App
             break;
         }
         let chunk = &buf[..n];
-        if !crate::network::session_send(crate::network::Msg::FileData {
+        if !crate::network::session_send_side_pub(side, crate::network::Msg::FileData {
             id,
             seq,
             data: base64::engine::general_purpose::STANDARD.encode(chunk),
@@ -1213,7 +1260,7 @@ async fn send_file_task(id: u32, path: String, name: String, size: u64, app: App
             }),
         );
     }
-    if !crate::network::session_send(crate::network::Msg::FileEnd {
+    if !crate::network::session_send_side_pub(side, crate::network::Msg::FileEnd {
         id,
         total_chunks: seq,
     })
@@ -1248,7 +1295,7 @@ pub async fn request_remote_dir(path: String) -> Result<(), String> {
     if crate::network::session_peer().is_none() {
         return Err("无活跃会话".into());
     }
-    let sent = crate::network::session_send(crate::network::Msg::DirList { path }).await;
+    let sent = crate::network::session_send_client(crate::network::Msg::DirList { path }).await;
     if !sent {
         return Err("会话已断开".into());
     }
@@ -1261,7 +1308,8 @@ pub async fn request_file_pull(id: u32, path: String) -> Result<(), String> {
     if crate::network::session_peer().is_none() {
         return Err("无活跃会话".into());
     }
-    let sent = crate::network::session_send(crate::network::Msg::FileRequest { id, path }).await;
+    let sent =
+        crate::network::session_send_client(crate::network::Msg::FileRequest { id, path }).await;
     if !sent {
         return Err("会话已断开".into());
     }

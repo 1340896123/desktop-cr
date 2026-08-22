@@ -511,6 +511,26 @@ async fn session_send_side(side: SessionSide, msg: OutMsg) -> bool {
     }
 }
 
+/// 控制端视角发送:生产单角色与 [`session_send`] 等价;**本机自连接**
+/// (local-host,同进程内 Host/Client 双角色并存)时必须走本入口——
+/// `session_send` 经 `session_guard` 优先路由 Host 表,控制端的消息
+/// (Stream/UdpInit/DirList/FileRequest/剪贴板同步等)会被错路由进
+/// host 自己的写循环,host 读循环永远收不到。
+pub async fn session_send_client(msg: OutMsg) -> bool {
+    session_send_side(SessionSide::Client, msg).await
+}
+
+/// 按角色发送(跨模块入口:文件发送按发送方角色路由,控制端推文件走
+/// Client、被控端响应 FileRequest 回传走 Host)。
+pub async fn session_send_side_pub(side: SessionSide, msg: OutMsg) -> bool {
+    session_send_side(side, msg).await
+}
+
+/// 指定角色的会话对端 id(自连接双角色并存时按角色检查会话存活)。
+pub(crate) fn session_peer_side(side: SessionSide) -> Option<String> {
+    session_guard_side(side).as_ref().map(|s| s.peer_id.clone())
+}
+
 /// 关闭当前会话(踢出对端)。两侧一并清理(生产单角色时另一侧本为空)。
 pub fn close_session() {
     *session_guard_side(SessionSide::Host) = None;
@@ -703,11 +723,17 @@ async fn handle_host_connection(
         "host_session_start",
         &format!("peer={peer_id} addr={addr}(握手成功,会话已注册)"),
     );
+    // 本机自连接(对端 id = 本机 id,同进程双角色):抑制 host 侧
+    // connection-state 事件——与控制端事件(peerId="local-host")在同一
+    // 前端竞争会破坏会话窗口的 peerId 匹配;同进程内 client 侧事件已完整覆盖
+    let self_connect = peer_id == local_id();
     if let Some(app) = &app {
-        let _ = app.emit(
-            "connection-state",
-            serde_json::json!({ "connected": true, "peerId": peer_id }),
-        );
+        if !self_connect {
+            let _ = app.emit(
+                "connection-state",
+                serde_json::json!({ "connected": true, "peerId": peer_id }),
+            );
+        }
     }
 
     // 4) 多路任务:收消息 + 推帧(视频帧优先 UDP 分片,音频/控制 TCP)
@@ -743,11 +769,14 @@ async fn handle_host_connection(
             "host_session_end",
             &format!("peer={peer_id} addr={addr} reason={reason}"),
         );
+        // 本机自连接:抑制 host 侧断开事件(与连接时对称,client 侧事件覆盖 UI)
         if let Some(app) = &app {
-            let _ = app.emit(
-                "connection-state",
-                serde_json::json!({ "connected": false, "peerId": peer_id }),
-            );
+            if !self_connect {
+                let _ = app.emit(
+                    "connection-state",
+                    serde_json::json!({ "connected": false, "peerId": peer_id }),
+                );
+            }
         }
     }
     sess_err?;
@@ -1287,10 +1316,11 @@ pub async fn connect_peer(
     // TCP 握手后经 UdpInit/UdpInitAck 协商成功则更新为 udp/relay-udp
     init_metrics(&via);
 
-    // 3.5) 连接即下发当前流参数(codec 偏好等),使被控端默认走 FFmpeg 编码
+    // 3.5) 连接即下发当前流参数(codec 偏好等),使被控端默认走 FFmpeg 编码。
+    // 控制端视角发送:本机自连接时双角色并存,须显式走 Client 表
     {
         let cfg = crate::hbb_client::stream_cfg();
-        let _ = session_send(Msg::Stream {
+        let _ = session_send_client(Msg::Stream {
             fps: cfg.fps,
             quality_tier: 0,
             width: cfg.target_width,
@@ -1331,7 +1361,8 @@ pub async fn connect_peer(
             *PENDING_UDP_NEGOTIATION
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some((sock, token.clone()));
-            let _ = session_send(Msg::UdpInit {
+            // 控制端视角发送(本机自连接双角色并存时显式走 Client 表)
+            let _ = session_send_client(Msg::UdpInit {
                 listen_port: port,
                 token,
                 lan: lan_ip,
@@ -4183,5 +4214,225 @@ mod tests {
     /// None 时跳过前端事件,与 diagnostics.rs 模式一致)。
     fn none_opt_app() -> Option<AppHandle> {
         None
+    }
+
+    // ------------------------------------------------------------------
+    // 本机自连接(local-host):同进程 Host/Client 双角色并存的会话路由
+    // ------------------------------------------------------------------
+
+    /// 自连接双角色路由测试(默认运行,无需编码器/DXGI):
+    ///
+    /// 模拟自连接形态——SESSION_HOST 与 SESSION_CLIENT 双表并存(生产单角色
+    /// 进程仅其一),验证控制端视角消息经 `session_send_client` 到达 **Client**
+    /// 写通道(而非被 session_guard 优先路由进 Host 自己的写循环),被控端
+    /// 视角回复(UdpInitAck 等)仍走 Host 表;这是"本机连接自己"能工作的
+    /// 路由基础(端到端会话形态由 production_session_udp_loopback 覆盖)。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn self_connect_dual_role_routes_by_side() {
+        let _ft = FILE_TEST_LOCK.lock().await;
+        let _log = crate::operation_log::test_lock::LOG_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // 1) 双角色会话表并存(自连接形态):host 与 client 各持独立发送通道
+        let (host_tx, mut host_rx) = mpsc::channel::<Msg>(8);
+        *session_guard_side(SessionSide::Host) = Some(SessionInner {
+            peer_id: "self-client".into(),
+            peer_addr: "127.0.0.1:1".into(),
+            tx: host_tx,
+        });
+        let (client_tx, mut client_rx) = mpsc::channel::<Msg>(8);
+        *session_guard_side(SessionSide::Client) = Some(SessionInner {
+            peer_id: "self-host".into(),
+            peer_addr: "127.0.0.1:2".into(),
+            tx: client_tx,
+        });
+
+        // 2) 控制端视角消息(session_send_client)必须到达 Client 写通道
+        assert!(
+            session_send_client(Msg::Stream {
+                fps: 30,
+                quality_tier: 0,
+                width: 1920,
+                height: 1080,
+                monitor: None,
+                codec: "h264".into(),
+            })
+            .await,
+            "控制端视角发送应成功"
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(2), client_rx.recv()).await {
+            Ok(Some(Msg::Stream { fps, codec, .. })) => {
+                assert_eq!(fps, 30);
+                assert_eq!(codec, "h264");
+            }
+            other => panic!("Stream 应到达 Client 写通道,实际: {other:?}"),
+        }
+        assert!(
+            host_rx.try_recv().is_err(),
+            "控制端消息不应错路由进 Host 写循环"
+        );
+
+        // 3) 被控端视角回复(session_send,host 侧)仍走 Host 表
+        assert!(
+            session_send(Msg::Pong { ts: 42 }).await,
+            "被控端视角发送应成功"
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(2), host_rx.recv()).await {
+            Ok(Some(Msg::Pong { ts })) => assert_eq!(ts, 42),
+            other => panic!("Pong 应到达 Host 写通道,实际: {other:?}"),
+        }
+
+        // 4) 文件传输双方向:控制端推文件走 Client,被控端回传走 Host
+        assert!(
+            session_send_side_pub(SessionSide::Client, Msg::FileStart {
+                id: 1,
+                name: "push.bin".into(),
+                size: 10,
+            })
+            .await
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(2), client_rx.recv()).await {
+            Ok(Some(Msg::FileStart { id, .. })) => assert_eq!(id, 1),
+            other => panic!("FileStart 应到达 Client 写通道,实际: {other:?}"),
+        }
+        assert!(
+            session_send_side_pub(SessionSide::Host, Msg::FileStart {
+                id: 2,
+                name: "pull.bin".into(),
+                size: 20,
+            })
+            .await
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(2), host_rx.recv()).await {
+            Ok(Some(Msg::FileStart { id, .. })) => assert_eq!(id, 2),
+            other => panic!("回传 FileStart 应到达 Host 写通道,实际: {other:?}"),
+        }
+
+        // 5) 双角色会话存活检查(session_peer 任一侧有会话即为真)
+        assert!(session_peer().is_some());
+        assert_eq!(
+            session_peer_side(SessionSide::Client).as_deref(),
+            Some("self-host")
+        );
+        assert_eq!(
+            session_peer_side(SessionSide::Host).as_deref(),
+            Some("self-client")
+        );
+
+        // 清理
+        close_session();
+    }
+
+    /// 自连接端到端回环测试(默认运行):真实 serve_host(TcpListener)→
+    /// 生产握手/会话注册路径 → host_write_loop/peer_write_loop 全双工,
+    /// 双表并存形态下验证 TCP 会话与控制面消息(Stream → host 侧
+    /// apply_stream_cfg 生效)真实互通。不依赖编码器/DXGI(host 无帧源时
+    /// 写循环仅维持心跳/音频检查,通道仍活)。
+    /// 持 FILE_TEST_LOCK(非 PROD_LOOPBACK_LOCK):本测试驱动全局 SESSION
+    /// 双表,须与所有操作 SESSION 表的默认测试(host_udp_dead/文件传输系列)
+    /// 串行,否则 close_session 清双侧表会互相踩。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn self_connect_session_loopback_tcp() {
+        let _ft = FILE_TEST_LOCK.lock().await;
+        let _log = crate::operation_log::test_lock::LOG_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // 隔离:阻断公网信令/中继默认回填(load_app_config 对空配置回填
+        // 120.78.x.x,避免 UDP 协商分支向公网发探测)
+        std::env::set_var("DCR_TEST_NO_SIGNAL", "1");
+        close_session();
+        udp_channel_close();
+
+        // 1) 真实被控端(serve_host,app=None 跳过前端事件)
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host_addr = listener.local_addr().unwrap();
+        let serve_task = tokio::spawn(async move {
+            let _ = serve_host(None, listener).await;
+        });
+
+        // 2) 生产握手路径(与 connect_peer 第 2 步一致):hello → hello-ack
+        let mut stream = TcpStream::connect(host_addr).await.unwrap();
+        write_msg(
+            &mut stream,
+            &Msg::Hello {
+                id: local_id(),
+                app: APP_NAME.into(),
+                ver: PROTOCOL_VERSION,
+            },
+        )
+        .await
+        .unwrap();
+        let ack = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_msg(&mut stream))
+            .await
+            .expect("握手超时")
+            .expect("握手失败");
+        match ack {
+            Msg::HelloAck { id } => assert_eq!(id, local_id(), "自连接握手对端应为本机"),
+            other => panic!("握手响应异常: {other:?}"),
+        }
+
+        // 3) 生产会话注册(connect_peer 第 3 步同款,client 侧表)
+        let (tx, rx) = mpsc::channel::<Msg>(64);
+        *session_guard_side(SessionSide::Client) = Some(SessionInner {
+            peer_id: "local-host".into(),
+            peer_addr: host_addr.to_string(),
+            tx,
+        });
+        init_metrics("直连 127.0.0.1(自连接)");
+        // 写通道循环(生产 peer_write_loop 同款:转发 session_send 消息 + 心跳)
+        let (read_half, write_half) = stream.into_split();
+        let mut tcp_read = read_half;
+        let write_task = tokio::spawn(async move { peer_write_loop(write_half, rx).await });
+
+        // 4) 双表并存下控制端视角发送:session_send_client → 生产
+        //    peer_write_loop → 真实 TCP → host_read_loop(收消息循环)→
+        //    apply_stream_cfg 生效(STREAM_CFG.fps 更新可观测)
+        let fps_before = crate::hbb_client::stream_cfg().fps;
+        let target_fps = if fps_before == 30 { 24u32 } else { 30u32 };
+        assert!(
+            session_send_client(Msg::Stream {
+                fps: target_fps,
+                quality_tier: 0,
+                width: 1280,
+                height: 720,
+                monitor: None,
+                codec: "h264".into(),
+            })
+            .await,
+            "自连接控制端发送应成功"
+        );
+        // host 侧真实消费:fps 生效(hello 后 host_read_loop 已在运行)
+        let mut applied = false;
+        for _ in 0..100 {
+            if crate::hbb_client::stream_cfg().fps == target_fps {
+                applied = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(applied, "Stream 消息应经 TCP 到达 host 侧并生效 fps");
+
+        // 5) 控制端心跳真实工作:peer_write_loop 周期 Ping → host 回 Pong →
+        //    (pong 经 host session_send → Host 表 → host 写循环 → TCP →
+        //    peer_read_loop 生产函数;此处直接读 TCP 断言消息到达)
+        let got_pong = tokio::time::timeout(PING_INTERVAL * 3 + std::time::Duration::from_secs(2), async {
+            loop {
+                match read_msg(&mut tcp_read).await {
+                    Ok(Msg::Pong { ts }) => break Some(ts),
+                    Ok(_) => continue,
+                    Err(_) => break None,
+                }
+            }
+        })
+        .await
+        .expect("等待 pong 超时");
+        assert!(got_pong.is_some(), "自连接 Ping/Pong 心跳应真实互通");
+
+        // 6) 断开:client 写循环退出 → host 读循环感知 → 会话清理
+        write_task.abort();
+        serve_task.abort();
+        close_session();
+        println!("[self-lb] 自连接 TCP 会话回环验证通过");
     }
 }
