@@ -3,13 +3,22 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isTauri } from './connection';
 
 /**
- * 一帧本机抓屏画面（JPEG 字节数组，Rust 端将 DXGI 帧编码为 JPEG 后推送）。
+ * 一帧本机抓屏画面（capture-frame 事件负载）。
+ * Rust 端 DXGI 帧按流配置编码后原样推送：
+ *   - codec="h264"/"hevc"：H.264/H.265 Annex-B 编码字节（前端经 WebCodecs 解码）；
+ *   - codec="bgra"：BGRA 原始像素字节（前端通道交换转 RGBA 后 putImageData）。
+ * 禁止 JPEG。
  */
 export interface CapturedFrame {
   monitorId: number;
   width: number;
   height: number;
-  jpeg: number[];
+  /** 是否为关键帧 */
+  key: boolean;
+  /** 帧编码格式："h264" | "hevc" | "bgra" */
+  codec: string;
+  /** 编码帧字节（Annex-B）或 BGRA 原始字节 */
+  data: number[];
   /** 是否为模拟画面（非 Windows 平台动画帧；真实抓帧缺省/为 false） */
   simulated?: boolean;
 }
@@ -24,15 +33,30 @@ export interface MonitorInfo {
   isVirtual: boolean;
 }
 
-/** 远程帧（来自被控端，经 LAN 协议解码后的 JPEG 字节） */
+/**
+ * 远程帧（remote-frame 事件负载）。
+ * Rust 控制端 peer_read_loop 收到 Msg::Frame 后原样透传编码帧字节，
+ * 前端用 WebCodecs VideoDecoder 解码渲染（不再解码转图像，禁止 JPEG）。
+ */
 export interface RemoteFrame {
   width: number;
   height: number;
-  jpeg: number[];
-  /** 帧序号（用于丢包/乱序统计） */
+  /** 编码帧字节（H.264/H.265 Annex-B） */
+  data: number[];
+  /** 帧序号（用于丢包/乱序统计；UDP 模式为 frame_id、TCP 模式为推流 seq，两域独立） */
   seq: number;
-  /** 编码耗时（毫秒） */
-  dur: number;
+  /** 编码耗时（毫秒）；UDP 模式分片头不携带该值 → null（未知，显示 "--"，不造假为 0） */
+  dur: number | null;
+  /** 是否为关键帧 */
+  key: boolean;
+  /** 编码格式："h264" | "hevc" */
+  codec: string;
+  /**
+   * 本帧真实传输通道："udp" | "relay-udp" | "tcp"（Rust 侧 emit 时按当帧来源
+   * 标注——UDP 重组循环 / TCP 读循环）。丢包统计以帧级标记为准，消除 metrics
+   * 2 秒轮询滞后窗口内的跨域错标；字段缺失（旧负载）回退 metrics 轮询值。
+   */
+  transport?: string;
   /** 是否为模拟画面（协议未携带该字段时保持 undefined，按 false 处理） */
   simulated?: boolean;
 }

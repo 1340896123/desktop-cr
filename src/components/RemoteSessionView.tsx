@@ -16,6 +16,12 @@ import {
 } from '@fluentui/react-icons';
 import { fontFamily, palette, radius, shadow, spacing, titleBarHeight, zIndex } from '../theme/tokens';
 import {
+  createLossStats,
+  feedLossStats,
+  type LossBaseline,
+  type LossStats,
+} from '../utils/lossStats';
+import {
   setFullscreen as requestFullscreen,
   setQuality,
   setResolution,
@@ -23,7 +29,7 @@ import {
   onClipboardSynced,
 } from '../services/connection';
 import { onRemoteFrame, type MonitorInfo } from '../services/capture';
-import { getSessionMetrics, requestRemoteMonitors, selectSessionMonitor, onRemoteMonitors, type SessionMetrics } from '../services/session';
+import { getSessionMetrics, requestRemoteMonitors, selectSessionMonitor, onRemoteMonitors, transportLabel, type SessionMetrics } from '../services/session';
 import { setAudioMuted, getAudioMuted, onAudioStateChange } from '../services/audio';
 import RemoteCanvas from './RemoteCanvas';
 import WindowControls from './shared/WindowControls';
@@ -415,6 +421,8 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({
   const [fps, setFps] = useState(0);
   const [bitrate, setBitrate] = useState('0.0');
   const [lossPct, setLossPct] = useState(0);
+  /** 平均编码耗时（毫秒）；UDP 模式无 dur → null 显示 "--"（F-4：禁止造假为 0） */
+  const [avgEncodeMs, setAvgEncodeMs] = useState<number | null>(null);
   const [metrics, setMetrics] = useState<SessionMetrics | null>(null);
   const [qualityChoice, setQualityChoice] = useState<'low' | 'medium' | 'high'>('high');
   const [resolutionChoice, setResolutionChoice] = useState<'1920x1080' | '2560x1440' | '3840x2160'>('1920x1080');
@@ -422,9 +430,18 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({
   const timerRef = useRef<number | null>(null);
   const frameCountRef = useRef(0);
   const bitsRef = useRef(0);
-  const lastSeqRef = useRef(-1);
-  const lostRef = useRef(0);
-  const receivedRef = useRef(0);
+  // 丢包统计（F-4 纯函数）：seq 连续性口径——UDP 域为 frame_id、TCP 域为推流 seq，
+  // 传输模式切换时基线重置豁免（resets），否则产生虚假丢包尖峰
+  const lostRef = useRef<LossStats>(createLossStats());
+  const lastFrameRef = useRef<LossBaseline | null>(null);
+  // 编码耗时统计（F-4）：仅累计 dur 非空的帧（UDP 模式 dur=null 不计入，不造假）
+  const durSumRef = useRef(0);
+  const durCountRef = useRef(0);
+  // 会话指标镜像（帧回调内读取最新 transport，避免 effect 依赖重建订阅）
+  const metricsRef = useRef<SessionMetrics | null>(null);
+  useEffect(() => {
+    metricsRef.current = metrics;
+  }, [metrics]);
 
   useEffect(() => {
     timerRef.current = window.setInterval(() => setElapsed((prev) => prev + 1), 1000);
@@ -473,26 +490,32 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({
     if (!connected) return;
     frameCountRef.current = 0;
     bitsRef.current = 0;
-    lastSeqRef.current = -1;
-    lostRef.current = 0;
-    receivedRef.current = 0;
+    lostRef.current = createLossStats();
+    lastFrameRef.current = null;
+    durSumRef.current = 0;
+    durCountRef.current = 0;
     setLossPct(0);
+    setAvgEncodeMs(null);
     let unlisten: (() => void) | undefined;
     void onRemoteFrame((frame) => {
       frameCountRef.current += 1;
-      // 码率累计：JPEG 字节数 * 8 换算为 bit
-      bitsRef.current += frame.jpeg.length * 8;
-      // 丢包统计：按 seq 连续性计数（seq 回绕时重置基准）
-      if (lastSeqRef.current >= 0) {
-        if (frame.seq > lastSeqRef.current + 1) {
-          lostRef.current += frame.seq - lastSeqRef.current - 1;
-        } else if (frame.seq < lastSeqRef.current) {
-          lastSeqRef.current = frame.seq;
-          return;
-        }
+      // 码率累计：编码帧字节（H.264/H.265 Annex-B）* 8 换算为 bit
+      bitsRef.current += frame.data.length * 8;
+      // 编码耗时累计（仅真实值；UDP 模式 dur=null 不计入，F-4 禁止造假）
+      if (frame.dur != null) {
+        durSumRef.current += frame.dur;
+        durCountRef.current += 1;
       }
-      lastSeqRef.current = frame.seq;
-      receivedRef.current += 1;
+      // 丢包统计（F-4 纯函数 + R2-B 帧级标记）：优先用帧自带 transport（当帧
+      // 真实来源，消除 metrics 2 秒轮询滞后窗口的跨域错标）；字段缺失（旧负载）
+      // 回退 metrics 轮询值；两者皆无按 tcp
+      const transport = frame.transport ?? metricsRef.current?.transport ?? 'tcp';
+      lastFrameRef.current = feedLossStats(
+        lostRef.current,
+        frame.seq,
+        transport,
+        lastFrameRef.current,
+      );
     }).then((fn) => {
       unlisten = fn;
     });
@@ -501,8 +524,12 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({
       setBitrate((bitsRef.current / 1e6).toFixed(1));
       frameCountRef.current = 0;
       bitsRef.current = 0;
-      const total = lostRef.current + receivedRef.current;
-      setLossPct(total > 0 ? (lostRef.current / total) * 100 : 0);
+      const total = lostRef.current.lost + lostRef.current.received;
+      setLossPct(total > 0 ? (lostRef.current.lost / total) * 100 : 0);
+      // 平均编码耗时：无真实样本时保持 null（浮窗显示 "--"，禁止显示假 0）
+      setAvgEncodeMs(durCountRef.current > 0 ? durSumRef.current / durCountRef.current : null);
+      durSumRef.current = 0;
+      durCountRef.current = 0;
     }, 1000);
     return () => {
       unlisten?.();
@@ -634,6 +661,10 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({
             <span>{resolutionLabel(selected)}</span>
           </div>
           <div className={styles.perfRow}>
+            <span>传输模式:</span>
+            <span className={styles.perfVal}>{transportLabel(metrics?.transport)}</span>
+          </div>
+          <div className={styles.perfRow}>
             <span>帧率:</span>
             <span className={styles.perfVal}>{fps > 0 ? `${fps} fps` : '-- fps'}</span>
           </div>
@@ -644,6 +675,10 @@ export const RemoteSessionView: React.FC<RemoteSessionViewProps> = ({
           <div className={styles.perfRow}>
             <span>延迟:</span>
             <span className={styles.perfVal}>{metrics?.rttMs != null ? `${metrics.rttMs} ms` : '-- ms'}</span>
+          </div>
+          <div className={styles.perfRow}>
+            <span>编码耗时:</span>
+            <span className={styles.perfVal}>{avgEncodeMs != null ? `${avgEncodeMs.toFixed(1)} ms` : '-- ms'}</span>
           </div>
           <div className={styles.perfRow}>
             <span>丢包率:</span>

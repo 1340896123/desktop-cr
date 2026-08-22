@@ -5,9 +5,22 @@ import {
   onDxgiLoopFrame,
   runDxgiLoopback,
   type DxgiLoopbackReport,
+  type LoopbackTransport,
 } from '../services/diagnostics';
 import { listMonitors, type MonitorInfo } from '../services/capture';
 import { palette, radius, shadow } from '../theme/tokens';
+
+/** WebCodecs 配置字符串：h264 → Baseline level 3.0；hevc → Main Profile level 120 */
+function webCodecsCodecId(codec: string): string | null {
+  switch (codec) {
+    case 'h264':
+      return 'avc1.42001e';
+    case 'hevc':
+      return 'hev1.1.6.L120.90';
+    default:
+      return null;
+  }
+}
 
 const useStyles = makeStyles({
   card: {
@@ -52,6 +65,7 @@ const useStyles = makeStyles({
     outline: 'none',
   },
   monitorSelect: { flex: '1', minWidth: '180px' },
+  transportSelect: { minWidth: '120px' },
   grayBtn: {
     height: '32px',
     padding: '0 16px',
@@ -94,10 +108,11 @@ const useStyles = makeStyles({
 });
 
 /**
- * 诊断卡片:DXGI 回传自检(真实本机采集)。
- * 真实 DXGI 抓屏 → H.264 编码(NVENC/QSV/AMF 优先)→ 生产协议帧 → 本机 TCP 回环
- * → FFmpeg 解码(D3D11VA 硬解优先)。全程标准视频编解码,禁止 JPEG;
- * 回环到达的 H.264 帧经 `dxgi-loop-frame` 事件回传,前端用 WebCodecs 解码预览。
+ * 诊断卡片:DXGI 回传自检(真实本机采集,可切换 TCP/UDP 传输模式)。
+ * 真实 DXGI 抓屏 → H.264/H.265 编码(NVENC/QSV/AMF 优先)→ 生产协议帧 →
+ * 本机 TCP 回环或 UDP 分片回环 → FFmpeg 解码(D3D11VA 硬解优先)。
+ * 全程标准视频编解码,禁止 JPEG;回环到达的编码帧经 `dxgi-loop-frame`
+ * 事件回传(含 codec 元数据),前端用 WebCodecs 解码预览(兼容 h264/hevc)。
  */
 const DxgiLoopbackCard: React.FC = () => {
   const styles = useStyles();
@@ -107,6 +122,7 @@ const DxgiLoopbackCard: React.FC = () => {
   const [targetFps, setTargetFps] = useState('30');
   const [targetW, setTargetW] = useState('1280');
   const [targetH, setTargetH] = useState('720');
+  const [transport, setTransport] = useState<LoopbackTransport>('tcp');
   const [running, setRunning] = useState(false);
   const [report, setReport] = useState<DxgiLoopbackReport | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -123,19 +139,35 @@ const DxgiLoopbackCard: React.FC = () => {
     });
   }, []);
 
-  // WebCodecs H.264 解码器(懒创建;诊断进行中持续解码回传帧)
+  // WebCodecs 解码器(懒创建;诊断进行中持续解码回传帧,按 codec 字段处理 h264/hevc)
   useEffect(() => {
     if (!running) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     let decoder: VideoDecoder | null = null;
+    let configuredCodec: string | null = null;
     const frameQueue: Array<{ key: boolean; timestamp: number; data: Uint8Array }> = [];
     let nextTimestamp = 0;
 
-    const ensureDecoder = (width: number, height: number): boolean => {
-      if (decoder) return true;
+    const ensureDecoder = (width: number, height: number, codec: string): boolean => {
+      if (decoder && configuredCodec === codec) return true;
+      if (decoder) {
+        // codec 家族切换:重建解码器
+        try {
+          decoder.close();
+        } catch {
+          /* 已关闭则忽略 */
+        }
+        decoder = null;
+        configuredCodec = null;
+      }
       if (typeof VideoDecoder === 'undefined') {
         setDecoderError('当前 WebView 不支持 WebCodecs,无法预览(诊断结论不受影响)');
+        return false;
+      }
+      const codecId = webCodecsCodecId(codec);
+      if (!codecId) {
+        setDecoderError(`预览不支持的视频编码: ${codec}`);
         return false;
       }
       const canvas = canvasRef.current;
@@ -162,11 +194,12 @@ const DxgiLoopbackCard: React.FC = () => {
           },
         });
         decoder.configure({
-          codec: 'avc1.42001f',
+          codec: codecId,
           codedWidth: width,
           codedHeight: height,
           optimizeForLatency: true,
         });
+        configuredCodec = codec;
         setPreviewLive(true);
         return true;
       } catch (e) {
@@ -195,7 +228,7 @@ const DxgiLoopbackCard: React.FC = () => {
 
     void onDxgiLoopFrame((frame) => {
       if (disposed) return;
-      if (!ensureDecoder(frame.width, frame.height)) return;
+      if (!ensureDecoder(frame.width, frame.height, frame.codec)) return;
       // 首块必须为关键帧(WebCodecs 的 delta 帧不能独立解码)
       if (!gotKeyframe && !frame.key) return;
       if (frame.key) gotKeyframe = true;
@@ -213,7 +246,11 @@ const DxgiLoopbackCard: React.FC = () => {
     return () => {
       disposed = true;
       unlisten?.();
-      decoder?.close();
+      try {
+        decoder?.close();
+      } catch {
+        /* 已关闭则忽略 */
+      }
     };
   }, [running]);
 
@@ -232,6 +269,7 @@ const DxgiLoopbackCard: React.FC = () => {
         targetFps: Number(targetFps) || 30,
         targetWidth: Number(targetW) || 1280,
         targetHeight: Number(targetH) || 720,
+        transport,
       });
       if (result) setReport(result);
     } catch (e) {
@@ -240,7 +278,7 @@ const DxgiLoopbackCard: React.FC = () => {
       setRunning(false);
       runningRef.current = false;
     }
-  }, [monitorId, seconds, targetFps, targetW, targetH]);
+  }, [monitorId, seconds, targetFps, targetW, targetH, transport]);
 
   const monitorOptions =
     monitors.length > 0
@@ -252,10 +290,10 @@ const DxgiLoopbackCard: React.FC = () => {
       <div className={styles.row}>
         <DesktopRegular fontSize={16} />
         <div className={styles.rowBody}>
-          <div className={styles.rowTitle}>DXGI 回传 · 真实本机采集</div>
+          <div className={styles.rowTitle}>DXGI 回传 · 真实本机采集（TCP / UDP）</div>
           <div className={styles.rowDesc}>
-            真实 DXGI 抓屏 → H.264 编码(硬编优先)→ 协议帧 → 本机 TCP 回环 → 硬解优先解码;
-            全程标准视频编解码,禁止 JPEG
+            真实 DXGI 抓屏 → H.264/H.265 编码(硬编优先)→ 协议帧 → 本机 TCP 回环或 UDP 分片回环
+            → 硬解优先解码;全程标准视频编解码,禁止 JPEG
           </div>
         </div>
       </div>
@@ -278,6 +316,17 @@ const DxgiLoopbackCard: React.FC = () => {
                 </option>
               ))}
             </select>
+            <span className={styles.paramLabel}>传输模式</span>
+            <select
+              className={`${styles.select} ${styles.transportSelect}`}
+              value={transport}
+              onChange={(e) => setTransport(e.target.value === 'udp' ? 'udp' : 'tcp')}
+            >
+              <option value="tcp">TCP 回环</option>
+              <option value="udp">UDP 回环</option>
+            </select>
+          </div>
+          <div className={styles.paramRow}>
             <span className={styles.paramLabel}>秒数</span>
             <input
               className={styles.paramInput}
@@ -292,8 +341,6 @@ const DxgiLoopbackCard: React.FC = () => {
               value={targetFps}
               onChange={(e) => setTargetFps(e.target.value)}
             />
-          </div>
-          <div className={styles.paramRow}>
             <span className={styles.paramLabel}>分辨率</span>
             <input
               className={styles.paramInput}
@@ -311,7 +358,7 @@ const DxgiLoopbackCard: React.FC = () => {
           </div>
           {error && <div className={styles.errorText}>{error}</div>}
           <button type="button" className={styles.grayBtn} disabled={running} onClick={() => void run()}>
-            {running ? '运行中…' : '运行 DXGI 回传诊断'}
+            {running ? '运行中…' : transport === 'udp' ? '运行 DXGI 回传诊断（UDP）' : '运行 DXGI 回传诊断（TCP）'}
           </button>
         </div>
       </div>
@@ -320,7 +367,7 @@ const DxgiLoopbackCard: React.FC = () => {
         <canvas ref={canvasRef} className={styles.canvas} width={960} height={540} />
         {!previewLive && (
           <div className={styles.placeholder}>
-            {decoderError ?? (running ? '等待回环帧…' : '运行诊断后在此预览本机采集画面(H.264 解码)')}
+            {decoderError ?? (running ? '等待回环帧…' : '运行诊断后在此预览本机采集画面(H.264/H.265 解码)')}
           </div>
         )}
       </div>
@@ -328,12 +375,17 @@ const DxgiLoopbackCard: React.FC = () => {
       {report && (
         <pre className={styles.benchResult}>{`编解码: ${report.codec} | 编码器: ${report.encoder} | 解码: ${
           report.decoderHwaccel ? 'D3D11VA 硬解' : '软件解码'
-        }
+        } | 传输模式: ${report.transport === 'udp' ? 'UDP 分片回环' : 'TCP 回环'}
 显示器: #${report.monitorId} | 时长: ${report.seconds}s | 目标帧率: ${report.targetFps}
 采集源: ${report.sourceWidth}x${report.sourceHeight} → 编码输出: ${report.frameWidth}x${report.frameHeight}
 真实抓帧: ${report.framesGrabbed} | 发送: ${report.framesSent} | 解码: ${report.framesRendered} | 实时帧率: ${report.realtimeFps.toFixed(1)} fps
 平均耗时 — 抓屏 ${report.avgCaptureMs.toFixed(2)} ms | 编码 ${report.avgEncodeMs.toFixed(2)} ms | 发送 ${report.avgSendMs.toFixed(2)} ms | 解码 ${report.avgDecodeMs.toFixed(2)} ms
-端到端延迟: ${report.avgE2eLatencyMs.toFixed(2)} ms | 传输量: ${(report.totalTransferBytes / 1024 / 1024).toFixed(2)} MB`}</pre>
+端到端延迟: ${report.avgE2eLatencyMs.toFixed(2)} ms | 传输量: ${(report.totalTransferBytes / 1024 / 1024).toFixed(2)} MB${
+          report.transport === 'udp'
+            ? `
+UDP 统计 — 分片: ${report.udpFragments ?? 0} | 丢包: ${report.udpLostFragments ?? 0} | 乱片: ${report.udpReorderedFragments ?? 0} | 丢帧: ${report.udpDroppedFrames ?? 0} | 平均重组耗时: ${(report.avgReassemblyMs ?? 0).toFixed(2)} ms`
+            : ''
+        }`}</pre>
       )}
     </div>
   );

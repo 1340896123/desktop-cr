@@ -21,6 +21,11 @@ export interface ConnectionState {
   error?: string;
 }
 
+/**
+ * 画质参数。quality 档位在 Rust 侧映射为 H.264 目标码率:
+ *   low → 低码率(流畅优先) / medium → 中码率(均衡) / high → 高码率(画质优先);
+ * bitrate 可选(单位 kbps),提供时优先于档位映射。仅支持 H.264/H.265 编码,无 JPEG 语义。
+ */
 export interface QualityOptions {
   fps: number;
   bitrate?: number;
