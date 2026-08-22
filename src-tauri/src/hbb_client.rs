@@ -132,21 +132,34 @@ pub struct AccountSession {
 #[derive(Debug, Clone)]
 pub(crate) struct StreamConfig {
     pub fps: u32,
-    pub jpeg_quality: u8,
+    /// H.264 目标码率档位(协议 u8:1=low / 2=medium / 3=high;0=未指定)。
+    pub quality_tier: u8,
+    /// H.264 目标码率(kbps,由档位映射;编码器实际按分辨率/帧率启发式取值)。
+    pub bitrate_kbps: u32,
     pub target_width: u32,
     pub target_height: u32,
-    /// 编码类型:"jpeg"(默认)或 "h264"(FFmpeg 硬件编码可用时由控制端下发)。
+    /// 编码类型:"h264"(默认)或 "hevc"(全链路标准视频编解码,JPEG 已移除)。
     pub codec: String,
+}
+
+/// 码率档位 → 目标码率(kbps):low≈1.5M(流畅) / medium≈4M(均衡) / high≈8M(画质)。
+pub(crate) fn bitrate_for_tier(tier: u8) -> u32 {
+    match tier {
+        1 => 1_500,
+        3 => 8_000,
+        _ => 4_000,
+    }
 }
 
 impl Default for StreamConfig {
     fn default() -> Self {
         Self {
             fps: 15,
-            jpeg_quality: 70,
+            quality_tier: 2,
+            bitrate_kbps: bitrate_for_tier(2),
             target_width: 1920,
             target_height: 1080,
-            codec: "jpeg".into(),
+            codec: "h264".into(),
         }
     }
 }
@@ -164,7 +177,8 @@ static DISCOVERY_SNAPSHOT: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mu
 /// 流参数(全局共享)。
 static STREAM_CFG: Mutex<StreamConfig> = Mutex::new(StreamConfig {
     fps: 15,
-    jpeg_quality: 70,
+    quality_tier: 2,
+    bitrate_kbps: 4_000,
     target_width: 1920,
     target_height: 1080,
     codec: String::new(),
@@ -175,27 +189,16 @@ pub fn register_config_dir(dir: PathBuf) {
     let _ = CONFIG_DIR.set(dir);
 }
 
-/// 控制端流编码选择(默认使用 FFmpeg):本机 FFmpeg 可用(可解码 H.264)时下发 h264,
-/// 否则 jpeg。H.265 为可选,默认 h264(兼容性与解码开销更优)。
+/// 控制端流编码选择:默认 h264(全链路标准视频编解码,JPEG 已移除;FFmpeg
+/// 不可用时无可用视频编码,显式回落 h264 由编码层报错,不再伪造 JPEG 路径)。
+/// H.265 为可选,默认 h264(兼容性与解码开销更优)。
 pub(crate) fn stream_codec_choice() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        if crate::ffmpeg_hw::available() {
-            return "h264".into();
-        }
-    }
-    "jpeg".into()
+    "h264".into()
 }
 
-/// 未协商时的默认编码:本机 FFmpeg 可用则 h264,否则 jpeg。
+/// 未协商时的默认编码:h264(标准视频编解码,禁止 JPEG)。
 fn default_codec_choice() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        if crate::ffmpeg_hw::available() {
-            return "h264".into();
-        }
-    }
-    "jpeg".into()
+    "h264".into()
 }
 
 /// 当前流参数快照(供抓帧 / 推帧循环读取);codec 为空时解析为默认 FFmpeg 编码。
@@ -221,13 +224,24 @@ fn scale_to_limit(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
 }
 
 /// 应用被控端收到的流参数(控制端经协议下发,见 network::Msg::Stream)。
-pub(crate) fn apply_stream_cfg(fps: u32, jpeg_quality: u8, width: u32, height: u32, codec: String) {
+///
+/// `bitrate_tier` 为码率档位(协议字段 quality_tier,历史旧名 jpeg_quality 经
+/// serde alias 兼容读取):1=low / 2=medium / 3=high 的 H.264 码率档位,
+/// 0 表示保持不变;codec 仅接受 h264/hevc。
+pub(crate) fn apply_stream_cfg(
+    fps: u32,
+    bitrate_tier: u8,
+    width: u32,
+    height: u32,
+    codec: String,
+) {
     let mut cfg = STREAM_CFG.lock().unwrap_or_else(|e| e.into_inner());
     if fps > 0 {
         cfg.fps = fps.clamp(1, 60);
     }
-    if jpeg_quality > 0 {
-        cfg.jpeg_quality = jpeg_quality.clamp(1, 100);
+    if bitrate_tier > 0 {
+        cfg.quality_tier = bitrate_tier.min(3);
+        cfg.bitrate_kbps = bitrate_for_tier(cfg.quality_tier);
     }
     if width > 0 && height > 0 {
         // 宽高同时提供时等比缩放,避免破坏宽高比
@@ -242,28 +256,30 @@ pub(crate) fn apply_stream_cfg(fps: u32, jpeg_quality: u8, width: u32, height: u
             cfg.target_height = height.clamp(1, MAX_STREAM_EDGE);
         }
     }
-    // codec 为空 → 默认 FFmpeg(h264 可用时);仅接受 jpeg/h264/hevc
-    if codec.is_empty() {
+    // codec 为空 → 默认 h264;仅接受 h264/hevc(全链路标准视频编解码,禁止 JPEG)
+    if codec.is_empty() || codec == "jpeg" {
+        // "jpeg" 为旧协议残留值,统一迁移到默认 h264
         cfg.codec = default_codec_choice();
-    } else if matches!(codec.as_str(), "jpeg" | "h264" | "hevc") {
+    } else if matches!(codec.as_str(), "h264" | "hevc") {
         cfg.codec = codec;
     } else {
-        cfg.codec = "jpeg".into();
+        cfg.codec = "h264".into();
     }
     log::info!(
-        "[hbb_client] apply_stream_cfg: {}x{} @ {}fps, jpeg_quality={}, codec={}",
+        "[hbb_client] apply_stream_cfg: {}x{} @ {}fps, tier={}, bitrate={}kbps, codec={}",
         cfg.target_width,
         cfg.target_height,
         cfg.fps,
-        cfg.jpeg_quality,
+        cfg.quality_tier,
+        cfg.bitrate_kbps,
         cfg.codec
     );
     crate::operation_log::op_log(
         "hbb_client",
         "apply_stream_cfg",
         &format!(
-            "{}x{} @ {}fps jpeg_quality={} codec={}",
-            cfg.target_width, cfg.target_height, cfg.fps, cfg.jpeg_quality, cfg.codec
+            "{}x{} @ {}fps tier={} bitrate={}kbps codec={}",
+            cfg.target_width, cfg.target_height, cfg.fps, cfg.quality_tier, cfg.bitrate_kbps, cfg.codec
         ),
     );
 }
@@ -301,7 +317,7 @@ pub(crate) fn load_app_config() -> AppConfig {
     cfg
 }
 
-const DEFAULT_SIGNAL_SERVER: &str = "120.78.77.248:21116";
+pub(crate) const DEFAULT_SIGNAL_SERVER: &str = "120.78.77.248:21116";
 const DEFAULT_RELAY_SERVER: &str = "120.78.77.248:21117";
 
 /// 从账号服务地址解析主机名("http://host:21120" → "host")。
@@ -325,7 +341,15 @@ fn account_server_host(server: &str) -> Option<String> {
 ///
 /// 账号服务与信令服务通常同机部署。首次登录或旧配置仍为内置公网默认值时,
 /// 自动将信令切到登录账号所在主机；用户明确填写的自定义信令地址保持不变。
+/// 环境变量 `DCR_TEST_NO_SIGNAL=1` 强制返回 None(生产会话级回环测试隔离:
+/// 阻止 UDP 协商分支向公网信令发 STUN Binding,仅走回环 LAN 候选地址)。
 pub(crate) fn effective_signal_server(cfg: &AppConfig) -> Option<String> {
+    if std::env::var("DCR_TEST_NO_SIGNAL")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        return None;
+    }
     let configured = cfg
         .signal_server
         .as_deref()
@@ -343,7 +367,14 @@ pub(crate) fn effective_signal_server(cfg: &AppConfig) -> Option<String> {
 }
 
 /// 生效的中继服务器地址。账号服务与中继服务可以分离,登录不参与地址推导。
+/// 环境变量 `DCR_TEST_NO_SIGNAL=1` 同样强制 None(回环测试不依赖公网中继)。
 pub(crate) fn effective_relay_server(cfg: &AppConfig) -> Option<String> {
+    if std::env::var("DCR_TEST_NO_SIGNAL")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        return None;
+    }
     let configured = cfg.relay_server.as_deref().filter(|s| !s.trim().is_empty());
     if let Some(host) = cfg
         .account
@@ -355,6 +386,16 @@ pub(crate) fn effective_relay_server(cfg: &AppConfig) -> Option<String> {
         }
     }
     configured.map(str::to_string)
+}
+
+/// 生效信令服务器地址(network.rs UDP 协商期 STUN 探测目标;M3b 接线)。
+pub(crate) fn effective_signal_server_pub() -> Option<String> {
+    effective_signal_server(&load_app_config())
+}
+
+/// 生效中继服务器地址(network.rs UDP 中继兜底;M3b 接线)。
+pub(crate) fn effective_relay_server_pub() -> Option<String> {
+    effective_relay_server(&load_app_config())
 }
 
 /// 记录设备发现状态变化。明细同时保留在普通日志中，操作日志仅保留状态转变。
@@ -720,55 +761,65 @@ pub fn get_connection_state() -> ConnectionState {
     }
 }
 
-/// 画质档位 → (jpeg 质量, 默认帧率):low→(50,10)、medium→(70,20)、high→(85,30)、未知→(70,15)。
+/// 画质档位 → (码率档位, 默认帧率):low→(1,10)、medium→(2,20)、high→(3,30)、未知→(2,15)。
+/// 档位经协议下发后由被控端映射为 H.264 目标码率(见 [`bitrate_for_tier`])。
 pub(crate) fn quality_params(quality: &str) -> (u8, u32) {
     match quality {
-        "low" => (50u8, 10u32),
-        "medium" => (70u8, 20u32),
-        "high" => (85u8, 30u32),
-        _ => (70u8, 15u32),
+        "low" => (1u8, 10u32),
+        "medium" => (2u8, 20u32),
+        "high" => (3u8, 30u32),
+        _ => (2u8, 15u32),
     }
 }
 
 /// 设置画面质量(真实生效:写入 STREAM_CFG,被控端抓帧循环实时读取)。
 ///
-/// quality: "low/medium/high" → jpeg 质量 50/70/85,档位默认帧率 10/20/30;
-/// fps 为 0 时使用档位默认帧率。
+/// quality: "low/medium/high" → H.264 码率档位(约 1.5/4/8 Mbps),档位默认帧率
+/// 10/20/30;fps 为 0 时使用档位默认帧率;bitrate(可选,kbps)提供时优先于档位映射
+/// (折算回最近的档位下发)。
 #[tauri::command]
 pub async fn set_stream_quality(
     fps: u32,
     bitrate: Option<u32>,
     quality: String,
 ) -> Result<(), String> {
-    let _ = bitrate; // 协议保留参数(LAN 直连下无需码率控制)
-    let (jpeg_quality, default_fps) = quality_params(&quality);
+    let (mut tier, default_fps) = quality_params(&quality);
+    // 显式码率(kbps)优先:折算到最近的档位(阈值取档位几何中点)
+    if let Some(kbps) = bitrate.filter(|v| *v > 0) {
+        tier = if kbps < 2_500 {
+            1
+        } else if kbps < 6_000 {
+            2
+        } else {
+            3
+        };
+    }
     let fps = if fps == 0 {
         default_fps
     } else {
         fps.clamp(1, 60)
     };
     let (width, height) = {
-        let cfg = STREAM_CFG.lock().unwrap_or_else(|e| e.into_inner());
-        let mut cfg = cfg.clone();
+        let mut cfg = STREAM_CFG.lock().unwrap_or_else(|e| e.into_inner());
         cfg.fps = fps;
-        cfg.jpeg_quality = jpeg_quality;
-        let (w, h) = (cfg.target_width, cfg.target_height);
-        *STREAM_CFG.lock().unwrap_or_else(|e| e.into_inner()) = cfg;
-        (w, h)
+        cfg.quality_tier = tier;
+        cfg.bitrate_kbps = bitrate_for_tier(tier);
+        (cfg.target_width, cfg.target_height)
     };
     log::info!(
-        "[hbb_client] set_stream_quality: fps={fps}, quality={quality}, jpeg_quality={jpeg_quality}"
+        "[hbb_client] set_stream_quality: fps={fps}, quality={quality}, tier={tier}, bitrate={}kbps",
+        bitrate_for_tier(tier)
     );
     crate::operation_log::op_log(
         "hbb_client",
         "set_stream_quality",
-        &format!("fps={fps} quality={quality} jpeg_quality={jpeg_quality}"),
+        &format!("fps={fps} quality={quality} tier={tier} bitrate={}kbps", bitrate_for_tier(tier)),
     );
-    // 有活跃会话时实时下发到被控端
+    // 有活跃会话时实时下发到被控端(码率档位经协议 u8 字段承载)
     if crate::network::session_peer().is_some() {
         let _ = crate::network::session_send(crate::network::Msg::Stream {
             fps,
-            jpeg_quality,
+            quality_tier: tier,
             width,
             height,
             monitor: None,
@@ -782,18 +833,15 @@ pub async fn set_stream_quality(
 /// 设置流分辨率(写入 STREAM_CFG 并实时下发到被控端)。
 #[tauri::command]
 pub async fn set_stream_resolution(width: u32, height: u32, fps: u32) -> Result<(), String> {
-    let (fps, jpeg_quality, scaled_w, scaled_h) = {
-        let cfg = STREAM_CFG.lock().unwrap_or_else(|e| e.into_inner());
-        let mut cfg = cfg.clone();
+    let (fps, tier, scaled_w, scaled_h) = {
+        let mut cfg = STREAM_CFG.lock().unwrap_or_else(|e| e.into_inner());
         let (w, h) = scale_to_limit(width, height, MAX_STREAM_EDGE);
         cfg.target_width = w;
         cfg.target_height = h;
         if fps > 0 {
             cfg.fps = fps.clamp(1, 60);
         }
-        let (f, q) = (cfg.fps, cfg.jpeg_quality);
-        *STREAM_CFG.lock().unwrap_or_else(|e| e.into_inner()) = cfg;
-        (f, q, w, h)
+        (cfg.fps, cfg.quality_tier, w, h)
     };
     log::info!("[hbb_client] set_stream_resolution: {scaled_w}x{scaled_h} @ {fps}fps");
     crate::operation_log::op_log(
@@ -801,11 +849,11 @@ pub async fn set_stream_resolution(width: u32, height: u32, fps: u32) -> Result<
         "set_stream_resolution",
         &format!("{scaled_w}x{scaled_h} @ {fps}fps"),
     );
-    // 有活跃会话时实时下发到被控端
+    // 有活跃会话时实时下发到被控端(码率档位经协议 u8 字段承载)
     if crate::network::session_peer().is_some() {
         let _ = crate::network::session_send(crate::network::Msg::Stream {
             fps,
-            jpeg_quality,
+            quality_tier: tier,
             width: scaled_w,
             height: scaled_h,
             monitor: None,
@@ -1047,7 +1095,7 @@ pub async fn select_session_monitor(monitor_id: u32) -> Result<(), String> {
     let cfg = stream_cfg();
     let sent = crate::network::session_send(crate::network::Msg::Stream {
         fps: cfg.fps,
-        jpeg_quality: cfg.jpeg_quality,
+        quality_tier: cfg.quality_tier,
         width: cfg.target_width,
         height: cfg.target_height,
         monitor: Some(monitor_id),
@@ -1310,7 +1358,8 @@ pub async fn start_host(port: u16, app: AppHandle) -> Result<(), String> {
             // 保活连接随之关闭,服务端立即注销,设备不再显示在线。
             let has_signal = signal_addr.is_some();
             let serve = async {
-                if let Err(e) = crate::network::serve_host(app.clone(), listener).await {
+                // 生产调用恒传 Some(AppHandle);None 仅测试环境使用(跳过前端事件)
+                if let Err(e) = crate::network::serve_host(Some(app.clone()), listener).await {
                     log::error!("[hbb_client] host 服务退出: {e}");
                 }
             };
@@ -1505,10 +1554,15 @@ mod tests {
 
     #[test]
     fn quality_params_mapping() {
-        assert_eq!(quality_params("low"), (50u8, 10u32));
-        assert_eq!(quality_params("medium"), (70u8, 20u32));
-        assert_eq!(quality_params("high"), (85u8, 30u32));
-        assert_eq!(quality_params("ultra"), (70u8, 15u32));
+        // 档位 → (码率档位, 默认帧率);未知档位回退 medium/15fps
+        assert_eq!(quality_params("low"), (1u8, 10u32));
+        assert_eq!(quality_params("medium"), (2u8, 20u32));
+        assert_eq!(quality_params("high"), (3u8, 30u32));
+        assert_eq!(quality_params("ultra"), (2u8, 15u32));
+        // 码率档位映射(kbps)
+        assert_eq!(bitrate_for_tier(1), 1_500);
+        assert_eq!(bitrate_for_tier(2), 4_000);
+        assert_eq!(bitrate_for_tier(3), 8_000);
     }
 
     #[test]
@@ -1517,27 +1571,33 @@ mod tests {
         let _guard = crate::operation_log::test_lock::LOG_WRITE_LOCK
             .lock()
             .unwrap();
-        // 越界输入: fps>60 截到 60、quality>100 截到 100、超大分辨率等比缩到 1920 边
-        apply_stream_cfg(99, 200, 4000, 3000, String::new());
+        // 越界输入: fps>60 截到 60、码率档位>3 截到 3(high)、超大分辨率等比缩到 1920 边
+        apply_stream_cfg(99, 9, 4000, 3000, String::new());
         let cfg = stream_cfg();
         assert_eq!(cfg.fps, 60);
-        assert_eq!(cfg.jpeg_quality, 100);
+        assert_eq!(cfg.quality_tier, 3);
+        assert_eq!(cfg.bitrate_kbps, 8_000);
         assert_eq!(cfg.target_width, 1920);
         assert_eq!(cfg.target_height, 1440);
+        // 默认编码为 h264(空 codec → h264)
+        assert_eq!(cfg.codec, "h264");
 
-        // width/height/fps 为 0 时保持原值不变
+        // width/height/fps/档位为 0 时保持原值不变
         apply_stream_cfg(0, 0, 0, 0, String::new());
         let cfg = stream_cfg();
         assert_eq!(cfg.fps, 60);
-        assert_eq!(cfg.jpeg_quality, 100);
+        assert_eq!(cfg.quality_tier, 3);
+        assert_eq!(cfg.bitrate_kbps, 8_000);
         assert_eq!(cfg.target_width, 1920);
         assert_eq!(cfg.target_height, 1440);
 
-        // codec 仅接受 h264/jpeg(空视为 jpeg,非法值归一为 jpeg)
-        apply_stream_cfg(0, 0, 0, 0, "h264".into());
+        // codec 仅接受 h264/hevc;旧协议残留 "jpeg" 与非法值统一归一为 h264
+        apply_stream_cfg(0, 0, 0, 0, "hevc".into());
+        assert_eq!(stream_cfg().codec, "hevc");
+        apply_stream_cfg(0, 0, 0, 0, "jpeg".into());
         assert_eq!(stream_cfg().codec, "h264");
         apply_stream_cfg(0, 0, 0, 0, "vp8".into());
-        assert_eq!(stream_cfg().codec, "jpeg");
+        assert_eq!(stream_cfg().codec, "h264");
     }
 
     #[test]
@@ -1692,5 +1752,26 @@ mod tests {
             back.relay_fallback_enabled,
             "旧配置无 relayFallbackEnabled,应回退 true"
         );
+    }
+
+    /// E2 旧配置迁移:历史版本 config.json 携带的 JPEG 语义残留字段
+    /// (如 stream.jpegQuality)不应导致解析失败(serde 默认忽略未知字段,不 panic)。
+    #[test]
+    fn legacy_config_with_jpeg_fields_parses() {
+        let legacy = r#"{
+            "hostEnabled": true,
+            "hostPort": 21118,
+            "peers": [{"id":"p1","name":"旧设备","addr":"192.168.1.5:21118"}],
+            "jpegQuality": 70,
+            "streamCodec": "jpeg"
+        }"#;
+        let cfg: AppConfig = serde_json::from_str(legacy)
+            .expect("携带 JPEG 残留字段的旧配置应可解析(未知字段忽略)");
+        assert!(cfg.host_enabled);
+        assert_eq!(cfg.host_port, 21118);
+        assert_eq!(cfg.peers.len(), 1);
+        // 流默认编码迁移为 h264(JPEG 已全链路移除)
+        assert_eq!(default_codec_choice(), "h264");
+        assert_eq!(stream_codec_choice(), "h264");
     }
 }

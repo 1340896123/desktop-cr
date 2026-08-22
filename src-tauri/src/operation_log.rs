@@ -192,8 +192,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("desktop-cr-oplog-{stamp}"));
         register_log_dir(dir.clone());
 
-        // 持锁期间写入+读取,避免与其他触发 op_log 的测试并发写同一文件
-        let _guard = test_lock::LOG_WRITE_LOCK.lock().unwrap();
+        // 持锁期间写入+读取,避免与其他触发 op_log 的测试并发写同一文件;
+        // 容忍 poison(其他测试异常 panic 会污染锁,不应连锁失败)
+        let _guard = test_lock::LOG_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         op_log("testmod", "action1", "detail one");
         // 保证时间戳严格递增,以便验证"最新在前"

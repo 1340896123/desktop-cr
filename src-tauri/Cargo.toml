@@ -20,11 +20,10 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 log = "0.4"
 env_logger = "0.11"
-# LAN 远程控制协议：帧内 base64、JPEG 编码、动态加载 IDD 控制 DLL
+# LAN 远程控制协议：帧内 base64、动态加载 IDD 控制 DLL
+# （JPEG 全链路已清除：jpeg-encoder/image 依赖已删除，禁止回潮——G3）
 base64 = "0.22"
-jpeg-encoder = "0.6"
-# 音视频全链路测试:JPEG 解码(image)、WAV 编解码(hound)、音频采集(cpal)
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# 音视频全链路测试:WAV 编解码(hound)、音频采集(cpal)
 hound = "3"
 cpal = "0.16"
 libloading = "0.8"

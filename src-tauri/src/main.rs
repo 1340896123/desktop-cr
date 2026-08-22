@@ -13,6 +13,7 @@ mod input_injector;
 mod network;
 mod operation_log;
 mod tray;
+mod transport;
 mod virtual_display;
 
 use tauri::Manager;
@@ -102,8 +103,9 @@ fn main() {
             capture::start_capture,
             capture::stop_capture,
             capture::get_frame,
-            // 诊断:DXGI 回传自检(真实采集 + H.264 标准编解码回环)
+            // 诊断:DXGI 回传自检(TCP/UDP 回环,真实采集 + H.264 标准编解码)+ 编码能力报告
             diagnostics::run_dxgi_loopback,
+            diagnostics::get_ffmpeg_capability,
             // 操作日志
             operation_log::get_operation_logs,
         ])
